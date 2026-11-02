@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <ItemGroup Label="ProjectConfigurations">
+
+    <ProjectConfiguration Include="Debug|ARM64">
+
+      <Configuration>Debug</Configuration>
+
+      <Platform>ARM64</Platform>
+
+    </ProjectConfiguration>
+
+    <ProjectConfiguration Include="Release|ARM64">
+
+      <Configuration>Release</Configuration>
+
+      <Platform>ARM64</Platform>
+
+    </ProjectConfiguration>
+
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+
+    <ProjectGuid>{5A2E9C41-7B3D-4F1E-9A6C-1D8E3B7F9177}</ProjectGuid>
+
+    <RootNamespace>sia9177</RootNamespace>
+
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+
+    <Platform Condition="'$(Platform)' == ''">ARM64</Platform>
+
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
+
+    <TargetVersion>Windows10</TargetVersion>
+
+    <UseDebugLibraries>False</UseDebugLibraries>
+
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+
+    <DriverType>WDM</DriverType>
+
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+
+    <ConfigurationType>Driver</ConfigurationType>
+
+  </PropertyGroup>
+
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+
+    <TargetVersion>Windows10</TargetVersion>
+
+    <UseDebugLibraries>True</UseDebugLibraries>
+
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+
+    <DriverType>WDM</DriverType>
+
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+
+    <ConfigurationType>Driver</ConfigurationType>
+
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <PropertyGroup>
+
+    <TargetName>sia9177</TargetName>
+
+    <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
+
+    <SiaVersionDate Condition="'$(SiaVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</SiaVersionDate>
+
+    <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-10-31'">1</SiaRevision>
+    <SiaRevision Condition="'$(SiaRevision)' == ''">0</SiaRevision>
+
+    <SiaDriverDate>$([System.DateTime]::Parse('$(SiaVersionDate)').ToString('MM/dd/yyyy'))</SiaDriverDate>
+
+    <SiaDriverVersion>$([System.DateTime]::Parse('$(SiaVersionDate)').ToString('yy.M.d')).$(SiaRevision)</SiaDriverVersion>
+    <SiaDriverVersionComma>$([System.String]::Copy('$(SiaDriverVersion)').Replace('.', ','))</SiaDriverVersionComma>
+
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+
+    <ClCompile>
+
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..</AdditionalIncludeDirectories>
+
+      <PreprocessorDefinitions>SIA_DRIVER_VERSION=&quot;$(SiaDriverVersion)&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+
+      <LanguageStandard>stdcpp17</LanguageStandard>
+
+      <ExceptionHandling>false</ExceptionHandling>
+
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+
+      <AdditionalOptions>/Zc:throwingNew- %(AdditionalOptions)</AdditionalOptions>
+
+    </ClCompile>
+
+    <Link>
+
+      <AdditionalDependencies>portcls.lib;ks.lib;ksguid.lib;ntstrsafe.lib;%(AdditionalDependencies)</AdditionalDependencies>
+
+    </Link>
+
+    <Inf>
+
+      <SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate>
+
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+
+      <DateStamp>$(SiaDriverDate)</DateStamp>
+
+      <TimeStamp>$(SiaDriverVersion)</TimeStamp>
+
+    </Inf>
+
+    <ResourceCompile>
+      <PreprocessorDefinitions>ALS_DRIVER_VERSION=$(SiaDriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(SiaDriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
+    <DriverSign>
+
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+
+    </DriverSign>
+
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+
+    <ClCompile Include="..\driver.c" />
+
+    <ClCompile Include="..\i2c.c" />
+
+    <ClCompile Include="..\wavert.cpp" />
+
+    <ClCompile Include="..\link.c" />
+
+    <ClCompile Include="..\audio.c" />
+    <ResourceCompile Include="sia9177.rc" />
+
+  </ItemGroup>
+
+  <ItemGroup>
+
+    <ClInclude Include="..\sia9177.h" />
+
+  </ItemGroup>
+
+  <ItemGroup>
+
+    <Inf Include="sia9177.inx" />
+
+    <FilesToPackage Include="$(TargetPath)" />
+
+  </ItemGroup>
+
+  <PropertyGroup>
+    <WoAProjectRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\..'))</WoAProjectRoot>
+    <OutDir>$(WoAProjectRoot)\out\qcom-audio\$(Platform)\$(Configuration)\bin\</OutDir>
+    <IntDir>$(WoAProjectRoot)\out\qcom-audio\$(Platform)\$(Configuration)\obj\</IntDir>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+
+</Project>
+

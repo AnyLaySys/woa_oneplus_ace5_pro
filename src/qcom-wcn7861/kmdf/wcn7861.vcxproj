@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|ARM64">
+      <Configuration>Debug</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM64">
+      <Configuration>Release</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{D84F82DB-B306-4F08-AFC9-6981AB1BB612}</ProjectGuid>
+    <NetAdapterDriver>true</NetAdapterDriver><NETADAPTER_VERSION_MAJOR>2</NETADAPTER_VERSION_MAJOR><NETADAPTER_VERSION_MINOR>5</NETADAPTER_VERSION_MINOR>
+    <WifiDriver>true</WifiDriver><WIFI_VERSION_MAJOR>1</WIFI_VERSION_MAJOR><WIFI_VERSION_MINOR>2</WIFI_VERSION_MINOR>
+    <RootNamespace>wcn7861</RootNamespace>
+    <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR><KMDF_VERSION_MINOR>33</KMDF_VERSION_MINOR>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <Platform Condition="'$(Platform)' == ''">ARM64</Platform>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>False</UseDebugLibraries>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>True</UseDebugLibraries>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <TargetName>wcn7861</TargetName>
+
+    <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <Inf>
+      <DateStamp>11/02/2026</DateStamp>
+      <TimeStamp>26.11.2.0</TimeStamp>
+    </Inf>
+    <ClCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);POOL_NX_OPTIN=1;WCN_STAGE8=1</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..;$(DDK_INC_PATH)wlan\2.0</AdditionalIncludeDirectories>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+    </ClCompile>
+    <Link><AdditionalDependencies>%(AdditionalDependencies);Cng.lib;$(DDK_LIB_PATH)wlan\2.0\WificxTLVGenParse.lib</AdditionalDependencies></Link>
+    <DriverSign>
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+    </DriverSign>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\driver.c" />
+    <ClCompile Include="..\stage8.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
+    <ClCompile Include="..\sae.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
+    <ClCompile Include="..\stage8-queue.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
+    <ClCompile Include="..\ce.c" />
+    <ClCompile Include="..\dp.c" />
+    <ClCompile Include="..\stage6.c" />
+    <ClCompile Include="..\stage7.c" />
+    <ClCompile Include="..\station.c" />
+    <ClCompile Include="..\management.c" />
+    <ClCompile Include="..\stage7-dp.c" />
+    <ClCompile Include="..\pcie.c" />
+    <ClCompile Include="..\mhi.c" />
+    <ClCompile Include="..\qrtr.c" />
+    <ClCompile Include="..\qmi.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\wcn7861.h" />
+    <ClInclude Include="..\version.h" />
+    <ClInclude Include="..\stage6-protocol.h" />
+    <ClInclude Include="..\stage7-rx-protocol.h" />
+    <ClInclude Include="..\stage7-tx-protocol.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Inf Include="wcn7861.inx" />
+    <ResourceCompile Include="wcn7861.rc" />
+    <FilesToPackage Include="$(TargetPath)" />
+  </ItemGroup>
+  <PropertyGroup>
+    <WoAProjectRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\..'))</WoAProjectRoot>
+    <OutDir>$(WoAProjectRoot)\out\qcom-wcn7861\$(Platform)\$(Configuration)\bin\</OutDir>
+    <IntDir>$(WoAProjectRoot)\out\qcom-wcn7861\$(Platform)\$(Configuration)\obj\</IntDir>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

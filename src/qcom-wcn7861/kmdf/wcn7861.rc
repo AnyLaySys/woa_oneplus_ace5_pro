@@ -1,0 +1,30 @@
+#include <windows.h>
+#include "../version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION WCN_DRIVER_VERSION_COMMA
+ PRODUCTVERSION WCN_DRIVER_VERSION_COMMA
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DRV
+ FILESUBTYPE VFT2_DRV_NETWORK
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904B0"
+  BEGIN
+   VALUE "CompanyName", "AnyLaySys\0"
+   VALUE "FileDescription", "Qualcomm WCN7861 Wi-Fi Driver\0"
+   VALUE "FileVersion", WCN_DRIVER_VERSION "\0"
+   VALUE "InternalName", "wcn7861.sys\0"
+   VALUE "OriginalFilename", "wcn7861.sys\0"
+   VALUE "ProductName", "AnyLaySys WCN7861 Wi-Fi Driver\0"
+   VALUE "ProductVersion", WCN_DRIVER_VERSION "\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x0409, 1200
+ END
+END

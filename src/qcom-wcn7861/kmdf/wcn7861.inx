@@ -1,0 +1,73 @@
+;
+; WCN7861 (Qualcomm PEACH, 17cb:110e) on hummer, exposed by UEFI as the WLN0
+; ACPI node (ACPI\HMRW7861). Firmware is read from
+; %SystemRoot%\System32\drivers\wcn7861\ (amss.bin and friends).
+;
+[Version]
+Signature="$WINDOWS NT$"
+Class=Net
+ClassGuid={4d36e972-e325-11ce-bfc1-08002be10318}
+Provider=%ProviderString%
+DriverVer=11/02/2026,26.11.2.0
+CatalogFile=wcn7861.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskDesc%,,,
+
+[SourceDisksFiles]
+wcn7861.sys = 1
+
+[Manufacturer]
+%ManufacturerString% = Qualcomm, NT$ARCH$.10.0...22000
+
+[Qualcomm.NT$ARCH$.10.0...22000]
+%DeviceDesc% = wcn7861_Device, ACPI\HMRW7861
+
+[wcn7861_Device.NT]
+CopyFiles = wcn7861_CopyFiles
+Characteristics = 0x84
+BusType = 0
+AddReg = wcn7861_Ndi
+*IfType = 71
+*MediaType = 16
+*PhysicalMediaType = 9
+
+[wcn7861_CopyFiles]
+wcn7861.sys
+
+[wcn7861_Device.NT.Services]
+AddService = wcn7861, 0x00000002, wcn7861_Service_Inst
+
+[wcn7861_Service_Inst]
+DisplayName   = %ServiceDesc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\wcn7861.sys
+
+[wcn7861_Device.NT.Wdf]
+KmdfService = wcn7861, wcn7861_wdfsect
+
+[wcn7861_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[wcn7861_Ndi]
+HKR, Ndi, Service, 0, "wcn7861"
+HKR, Ndi\Interfaces, UpperRange, 0, "ndis5"
+HKR, Ndi\Interfaces, LowerRange, 0, "wlan,ethernet"
+HKR, NetworkInterface, *IfConnectorPresent, 0x00010001, 1
+HKR, NetworkInterface, *ConnectionType, 0x00010001, 1
+HKR, NetworkInterface, *DirectionType, 0x00010001, 0
+HKR, NetworkInterface, *AccessType, 0x00010001, 2
+HKR, NetworkInterface, *HardwareLoopback, 0x00010001, 0
+
+[Strings]
+ProviderString     = "AnyLaySys"
+ManufacturerString = "Qualcomm"
+DiskDesc           = "AnyLaySys WCN7861 Wi-Fi Driver"
+DeviceDesc         = "Qualcomm WCN7861 Wi-Fi Adapter"
+ServiceDesc        = "Qualcomm WCN7861 Wi-Fi Driver"
