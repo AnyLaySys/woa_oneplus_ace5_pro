@@ -70,9 +70,7 @@ DpRingCreate (PWCN_DEVICE Dev, ULONG Id, ULONG Entries, ULONG EntryDwords,
             return STATUS_DEVICE_HARDWARE_ERROR;
         }
     }
-    WcnLog (Dev, "dp: ring id=%u %s entries=%u dwords=%u dma=0x%llx r0=0x%x r2=0x%x",
-            Id, Lmac ? "firmware-managed" : (Source ? "source" : "destination"),
-            Entries, EntryDwords, Ring->Desc.La, RegBase, PointerReg);
+
     return STATUS_SUCCESS;
 }
 
@@ -117,7 +115,7 @@ DpLinksInitialize (PWCN_DEVICE Dev)
         }
     }
     DpPublish (Dev, Ring, Filled);
-    WcnLog (Dev, "dp: WBM idle links %u, banks 3, linear idle ring (no scatter)", Filled);
+
     return STATUS_SUCCESS;
 }
 
@@ -128,7 +126,6 @@ DpCookiesInitialize (PWCN_DEVICE Dev)
     NTSTATUS Status;
     ULONG Page, Entry, Cmem = (ULONG)Dev->Qmi.CmemBase;
     ULONG64 *Spt;
-    PWCN_DP_COOKIE Cookie;
 
     if (!Cmem || Dev->Qmi.CmemBase > MAXULONG ||
         Dev->Qmi.CmemSize < WCN_DP_SPT_PAGES * 4 ||
@@ -150,10 +147,7 @@ DpCookiesInitialize (PWCN_DEVICE Dev)
         if (!NT_SUCCESS (Status)) return Status;
         Spt = (ULONG64 *)Dev->Dp.Spt[Page].Va;
         for (Entry = 0; Entry < DP_SPT_ENTRIES; Entry++) {
-            Cookie = &Dev->Dp.Cookies[Page * DP_SPT_ENTRIES + Entry];
-            Cookie->Cookie = (Page << 9) | Entry;
-            Cookie->Magic = 0xbabababa;
-            Spt[Entry] = (ULONG64)(ULONG_PTR)Cookie;
+            Spt[Entry] = (ULONG64)(ULONG_PTR)&Dev->Dp.Cookies[Page * DP_SPT_ENTRIES + Entry];
         }
         KeMemoryBarrier ();
         WcnWrite (Dev, Cmem + Page * 4, (ULONG)(Dev->Dp.Spt[Page].La >> 12));
@@ -162,8 +156,7 @@ DpCookiesInitialize (PWCN_DEVICE Dev)
             return STATUS_DEVICE_HARDWARE_ERROR;
         }
     }
-    WcnLog (Dev, "dp: CMEM 0x%x size 0x%llx PPT populated: 256 TX + 24 RX SPT pages",
-            Cmem, Dev->Qmi.CmemSize);
+
     return STATUS_SUCCESS;
 }
 
@@ -244,7 +237,7 @@ WcnDpInitialize (_In_ PWCN_DEVICE Dev)
     if (Dev->Dp.Initialized) return STATUS_SUCCESS;
     if (Dev->Dp.Failed) return STATUS_DEVICE_NOT_READY;
 #define DP_TRY(Call) do { Status = (Call); if (!NT_SUCCESS (Status)) goto Fail; } while (0)
-    WcnLog (Dev, "dp: PEACH/QCC2072 pre-WMI setup begins");
+
     DP_TRY (WcnDmaAllocAligned (Dev, 256 * 4, 0xfff, &Dev->Dp.Rdp));
     DP_TRY (WcnDmaAllocAligned (Dev, 96 * 4, 0xfff, &Dev->Dp.Wrp));
     DP_TRY (DpLinksInitialize (Dev));
@@ -290,8 +283,7 @@ WcnDpInitialize (_In_ PWCN_DEVICE Dev)
         DP_TRY (DpFillBuffers (Dev, Ring, 16 + Index * 4, TRUE));
     }
     Dev->Dp.Initialized = TRUE;
-    WcnLog (Dev, "dp: common setup complete, %u rings, 4095 RX + 2046 monitor buffers",
-            Dev->Dp.RingCount);
+
     return STATUS_SUCCESS;
 Fail:
     Dev->Dp.Failed = TRUE;
@@ -332,7 +324,7 @@ WcnDpPrepareWmi (_In_ PWCN_DEVICE Dev)
     }
     KeMemoryBarrier ();
     Dev->Dp.ReadyForWmi = TRUE;
-    WcnLog (Dev, "dp: cookie conversion enabled and 8 REO destination rings ready; WMI_INIT allowed");
+
     return STATUS_SUCCESS;
 }
 
@@ -352,17 +344,6 @@ WcnDpCleanup (_In_ PWCN_DEVICE Dev)
     if (Dev->Dp.CookieMemory) WdfObjectDelete (Dev->Dp.CookieMemory);
     RtlZeroMemory (&Dev->Dp, sizeof (Dev->Dp));
 #undef DP_FREE
-}
-
-VOID
-WcnDpService (_In_ PWCN_DEVICE Dev)
-{
-    if (Dev->Ce.WmiReady && Dev->Dp.ReadyAt && !Dev->Dp.StabilityLogged &&
-        Dev->Mhi.MissionMode && !Dev->Mhi.SysErr && !Dev->Mhi.RddmSaved &&
-        (Dev->Mhi.Ee == MHI_EE_AMSS || Dev->Mhi.Ee == MHI_EE_WFW) && WcnNowMs () - Dev->Dp.ReadyAt >= 60000) {
-        Dev->Dp.StabilityLogged = TRUE;
-        WcnLog (Dev, "stage5: WMI_READY stable for 60 seconds, no RDDM observed");
-    }
 }
 
 /* Post-READY counterpart of ath12k_dp_rx_htt_setup. Ring memory/buffers
@@ -409,8 +390,7 @@ WcnDpHttRxPrepare (PWCN_DEVICE Dev)
         B[11] = Batch * Ring->EntryDwords | ((Timer >> 3) << 16);
         B[12] = Low;
         Status = WcnHttSend (Dev, B, 52);
-        if (NT_SUCCESS (Status)) WcnLog (Dev, "stage6: HTT_RX_RING submitted hal-id=%u htt-id=%u type=%u pdev=%u dma=0x%llx hp=0x%llx tp=0x%llx entries=%u",
-                Ring->Id, HttId, Type, Type == 2 ? Mac : Mac + 1, Ring->Desc.La, Hp, Tp, Ring->Entries);
+
     } else {
         /* ath12k_dp_rxdma_ring_sel_config_qcc2072, normal receive filter.
          * No monitor-mode capture and no direct data-packet injection. */
@@ -424,15 +404,14 @@ WcnDpHttRxPrepare (PWCN_DEVICE Dev)
         B[8] = S6_QCC_MPDU_START_TAG_OFFSET << 16;
         B[9] = S6_QCC_MSDU_END_TAG_OFFSET;
         Status = WcnHttSend (Dev, B, sizeof (B));
-        if (NT_SUCCESS (Status)) WcnLog (Dev, "stage6: HTT_RX_FILTER submitted pdev=%u packet-offset=%u header-offset=%u mpdu-offset=%u (QCC2072)",
-                Mac + 1, S6_QCC_DESCRIPTOR_BYTES, S6_QCC_PACKET_HEADER_OFFSET, S6_QCC_MPDU_START_TAG_OFFSET);
+
     }
     if (!NT_SUCCESS (Status)) return Status;
     Dev->Dp.HttRxStep++;
     if (Dev->Dp.HttRxStep == 8) {
         Dev->Dp.HttRxReady = TRUE;
         KeMemoryBarrier ();
-        WcnLog (Dev, "stage6: six RX rings and two QCC2072 filters advertised over HTT; no claim of firmware ACK or data-network readiness");
+
         return STATUS_SUCCESS;
     }
     return STATUS_PENDING;

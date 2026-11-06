@@ -169,8 +169,7 @@ WcnPcieSetup (
     ULONG Version;
 
     Id = WcnCfgRead (Dev, 0x00);
-    WcnLog (Dev, "endpoint: id 0x%08x cmd/sts 0x%08x class/rev 0x%08x bar0 0x%08x:%08x",
-            Id, WcnCfgRead (Dev, 0x04), WcnCfgRead (Dev, 0x08), WcnCfgRead (Dev, 0x14), WcnCfgRead (Dev, 0x10));
+
     if (Id != WCN_PCI_ID) {
         return STATUS_DEVICE_NOT_CONNECTED;
     }
@@ -180,12 +179,12 @@ WcnPcieSetup (
     Express = WcnCfgFindCapability (Dev, 0x10);
     if (Express != 0) {
         WcnCfgWrite (Dev, Express + 0x10, WcnCfgRead (Dev, Express + 0x10) & ~0x3UL);
-        WcnLog (Dev, "endpoint: pcie cap 0x%x lnkctl/sta 0x%08x", Express, WcnCfgRead (Dev, Express + 0x10));
+
     }
 
     Msi = WcnCfgFindCapability (Dev, 0x05);
     if (Msi == 0) {
-        WcnLog (Dev, "endpoint: no MSI capability");
+
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
     Control = WcnCfgRead (Dev, Msi) >> 16;
@@ -194,7 +193,7 @@ WcnPcieSetup (
     AddressLow = WcnDbiRead (Dev, DBI_MSI_ADDR_LO);
     AddressHigh = WcnDbiRead (Dev, DBI_MSI_ADDR_HI);
     if (AddressLow == 0 && AddressHigh == 0) {
-        WcnLog (Dev, "root port: iMSI target not programmed by UEFI");
+
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
 
@@ -218,11 +217,9 @@ WcnPcieSetup (
     WcnDbiWrite (Dev, DBI_MSI_INTR0_MASK, 0);
     WcnDbiWrite (Dev, DBI_MSI_INTR0_STATUS, MAXULONG);
     WcnDbiWrite (Dev, DBI_MSI_INTR0_ENABLE, MAXULONG);
-    WcnLog (Dev, "msi: cap 0x%x control 0x%04x (mmc %u, 64-bit %u) target 0x%08x:%08x vectors %u",
-            Msi, WcnCfgRead (Dev, Msi) >> 16, Mmc, Is64, AddressHigh, AddressLow, Dev->MultiMsi ? 32 : 1);
 
     Version = WcnRead (Dev, WCN_TCSR_SOC_HW_VERSION);
-    WcnLog (Dev, "soc hw version 0x%08x (major %u minor %u)", Version, (Version >> 8) & 0xF, (Version >> 4) & 0xF);
+
     if (((Version >> 8) & 0xF) != 2) {
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
@@ -265,10 +262,9 @@ WcnPcieSwReset (
             WcnWrite (Dev, WCN_PARF_LTSSM, WCN_PARF_LTSSM_VALUE);
             Value = WcnRead (Dev, WCN_PARF_LTSSM);
         }
-        WcnLog (Dev, "reset: ltssm 0x%x", Value);
 
         WcnWrite (Dev, WCN_GCC_PCIE_HOT_RST, WcnRead (Dev, WCN_GCC_PCIE_HOT_RST) | 0x10);
-        WcnLog (Dev, "reset: pcie_hot_rst 0x%x", WcnRead (Dev, WCN_GCC_PCIE_HOT_RST));
+
         WcnSleep (5);
 
         WcnWrite (Dev, WCN_PCIE_INT_ALL_CLEAR, MAXULONG);
@@ -281,12 +277,11 @@ WcnPcieSwReset (
     WcnWrite (Dev, WCN_RXVECSTATUS, 0);
 
     Value = WcnRead (Dev, WCN_Q6_COOKIE);
-    WcnLog (Dev, "reset: cookie 0x%x warm entry 0x%x", Value, WcnRead (Dev, WCN_WLAON_WARM_SW_ENTRY));
+
     WcnSleep (10);
     WcnWrite (Dev, WCN_WLAON_WARM_SW_ENTRY, 0);
     WcnSleep (10);
     Value = WcnRead (Dev, WCN_WLAON_WARM_SW_ENTRY);
-    WcnLog (Dev, "reset: warm entry 0x%x reset cause 0x%x", Value, WcnRead (Dev, WCN_WLAON_RESET_CAUSE));
 
     Value = WcnRead (Dev, WCN_SOC_GLOBAL_RESET) | 1;
     WcnWrite (Dev, WCN_SOC_GLOBAL_RESET, Value);
@@ -297,13 +292,11 @@ WcnPcieSwReset (
     (VOID)WcnRead (Dev, WCN_SOC_GLOBAL_RESET);
     WcnSleep (10);
     Value = WcnRead (Dev, WCN_SOC_GLOBAL_RESET);
-    WcnLog (Dev, "reset: global reset 0x%x", Value);
 
     /* the window register is cleared by the global reset */
     WcnBarWrite (Dev, WCN_WINDOW_REG, WCN_WINDOW_ENABLE | Dev->Window);
     (VOID)WcnBarRead (Dev, WCN_WINDOW_REG);
 
-    WcnLog (Dev, "reset: mhi status 0x%x", WcnBarRead (Dev, MHI_STATUS));
     WcnBarWrite (Dev, MHI_CTRL, MHI_CTRL_RESET);
     WcnSleep (10);
 }
@@ -346,7 +339,6 @@ WcnPcieConfigSid (
     if (Dev->Parf == NULL || Dev->ParfLength < PARF_BDF_TO_SID_CFG + 4) {
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
-    WcnLog (Dev, "sid: bdf_to_sid_cfg 0x%08x", READ_REGISTER_ULONG ((volatile ULONG *)(Dev->Parf + PARF_BDF_TO_SID_CFG)));
 
     for (Entry = 0; Entry < 256; Entry++) {
         WRITE_REGISTER_ULONG ((volatile ULONG *)(Dev->Parf + PARF_BDF_TO_SID_TABLE + 4 * Entry), 0);
@@ -365,12 +357,12 @@ WcnPcieConfigSid (
         }
         Value = (Map[Index][0] << 16) | ((Map[Index][1] - WCN_SID_BASE) << 8);
         WRITE_REGISTER_ULONG ((volatile ULONG *)(Dev->Parf + PARF_BDF_TO_SID_TABLE + 4 * Hash), Value);
-        WcnLog (Dev, "sid: bdf 0x%04x -> sid 0x%x at hash 0x%02x", Map[Index][0], Map[Index][1], Hash);
+
     }
 
     Value = READ_REGISTER_ULONG ((volatile ULONG *)(Dev->Parf + PARF_BDF_TO_SID_CFG));
     WRITE_REGISTER_ULONG ((volatile ULONG *)(Dev->Parf + PARF_BDF_TO_SID_CFG), Value & ~PARF_BDF_TO_SID_BYPASS);
-    WcnLog (Dev, "sid: bdf_to_sid_cfg now 0x%08x", READ_REGISTER_ULONG ((volatile ULONG *)(Dev->Parf + PARF_BDF_TO_SID_CFG)));
+
     return STATUS_SUCCESS;
 }
 
@@ -395,9 +387,7 @@ WcnSmrOverlaps (
  * scans from the bottom, does not race for the same one.
  */
 NTSTATUS
-WcnSmmuSetup (
-    _In_ PWCN_DEVICE Dev
-    )
+WcnSmmuSetup (VOID)
 {
     const ULONG Id = WCN_SID_BASE;
     const ULONG Mask = 0x1;
@@ -419,8 +409,7 @@ WcnSmmuSetup (
     }
 
     Count = READ_REGISTER_ULONG (&Smmu[SMMU_IDR0 / 4]) & 0xFF;
-    WcnLog (Dev, "smmu: scr0 0x%08x idr0 0x%08x smrs %u",
-            READ_REGISTER_ULONG (&Smmu[SMMU_SCR0 / 4]), READ_REGISTER_ULONG (&Smmu[SMMU_IDR0 / 4]), Count);
+
     if (Count == 0 || Count > 256) {
         Status = STATUS_DEVICE_CONFIGURATION_ERROR;
         goto out;
@@ -430,11 +419,10 @@ WcnSmmuSetup (
         Smr = READ_REGISTER_ULONG (&Smmu[SMMU_SMR (Slot) / 4]);
         if (WcnSmrOverlaps (Smr, SMMU_UFS_SID, 0) && UfsS2cr == MAXULONG) {
             UfsS2cr = READ_REGISTER_ULONG (&Smmu[SMMU_S2CR (Slot) / 4]);
-            WcnLog (Dev, "smmu: ufs smr[%u] 0x%08x s2cr 0x%08x", Slot, Smr, UfsS2cr);
+
         }
         if (WcnSmrOverlaps (Smr, Id, Mask)) {
-            WcnLog (Dev, "smmu: pcie0 already matched by smr[%u] 0x%08x s2cr 0x%08x",
-                    Slot, Smr, READ_REGISTER_ULONG (&Smmu[SMMU_S2CR (Slot) / 4]));
+
             if (Existing != MAXULONG || Smr != Wanted) {
                 Status = STATUS_DEVICE_CONFIGURATION_ERROR;
                 goto out;
@@ -447,7 +435,7 @@ WcnSmmuSetup (
     }
 
     if (UfsS2cr == MAXULONG || (UfsS2cr & 0x3) != 0) {
-        WcnLog (Dev, "smmu: no translating UFS stream to borrow");
+
         Status = STATUS_NOT_FOUND;
         goto out;
     }
@@ -468,8 +456,7 @@ WcnSmmuSetup (
     }
     WRITE_REGISTER_ULONG (&Smmu[SMMU_S2CR (Free) / 4], UfsS2cr);
     WRITE_REGISTER_ULONG (&Smmu[SMMU_SMR (Free) / 4], Wanted);
-    WcnLog (Dev, "smmu: smr[%u] 0x%08x s2cr 0x%08x", Free,
-            READ_REGISTER_ULONG (&Smmu[SMMU_SMR (Free) / 4]), READ_REGISTER_ULONG (&Smmu[SMMU_S2CR (Free) / 4]));
+
     if (READ_REGISTER_ULONG (&Smmu[SMMU_SMR (Free) / 4]) != Wanted ||
         READ_REGISTER_ULONG (&Smmu[SMMU_S2CR (Free) / 4]) != UfsS2cr) {
         WRITE_REGISTER_ULONG (&Smmu[SMMU_SMR (Free) / 4], 0);

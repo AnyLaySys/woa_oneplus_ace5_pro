@@ -8,7 +8,7 @@ ClassGuid={4d36e96c-e325-11ce-bfc1-08002be10318}
 
 Provider=%Provider%
 
-DriverVer=10/31/2026,26.10.31.1
+DriverVer=11/05/2026,26.11.5.17
 
 CatalogFile=sia9177.cat
 
@@ -99,6 +99,12 @@ ServiceBinary=%13%\sia9177.sys
 
 
 [Sia.NT.Interfaces]
+AddInterface=%KSCATEGORY_AUDIO%,WaveMic,Sia.MicWave
+AddInterface=%KSCATEGORY_CAPTURE%,WaveMic,Sia.MicWave
+AddInterface=%KSCATEGORY_REALTIME%,WaveMic,Sia.MicWave
+AddInterface=%KSCATEGORY_AUDIO%,TopologyMic,Sia.MicTopology
+AddInterface=%KSCATEGORY_TOPOLOGY%,TopologyMic,Sia.MicTopology
+
 
 AddInterface=%KSCATEGORY_AUDIO%,Wave,Sia.Wave
 
@@ -111,6 +117,21 @@ AddInterface=%KSCATEGORY_AUDIO%,Topology,Sia.Topology
 AddInterface=%KSCATEGORY_TOPOLOGY%,Topology,Sia.Topology
 
 
+
+[Sia.MicWave]
+AddReg=Sia.WaveRegistry
+
+[Sia.MicTopology]
+AddReg=Sia.MicRegistry
+
+[Sia.MicRegistry]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%DeviceName%
+HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_MICROPHONE%
+HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,4
+HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x00010001,1
+HKR,EP\0,%PKEY_AudioEndpoint_Disable_SysFx%,0x00010001,1
+HKR,EP\0,%PKEY_AudioEngine_OEMFormat%,0x00000001,fe,ff,02,00,80,bb,00,00,00,ee,02,00,04,00,10,00,16,00,10,00,03,00,00,00,01,00,00,00,00,00,10,00,80,00,00,aa,00,38,9b,71
 
 [Sia.Wave]
 
@@ -153,6 +174,9 @@ HKR,EP\0,%PKEY_AudioEngine_OEMFormat%,0x00000001,fe,ff,02,00,80,bb,00,00,00,65,0
 
 
 [Strings]
+KSCATEGORY_CAPTURE="{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
+KSNODETYPE_MICROPHONE="{DFF21BE1-F70F-11D0-B917-00A0C9223196}"
+
 
 Provider="AnyLaySys"
 

@@ -1,17 +1,6 @@
 #include "sia9177.h"
 
 VOID
-SiaLog (
-    _In_ PSIA_DEVICE Dev,
-    _In_z_ _Printf_format_string_ PCSTR Format,
-    ...
-    )
-{
-    UNREFERENCED_PARAMETER (Dev);
-    UNREFERENCED_PARAMETER (Format);
-}
-
-VOID
 SiaSleep (
     _In_ ULONG Milliseconds
     )
@@ -22,8 +11,8 @@ SiaSleep (
     KeDelayExecutionThread (KernelMode, FALSE, &Interval);
 }
 
-static NTSTATUS
-SiaProbe (PSIA_DEVICE Dev)
+NTSTATUS
+SiaAmpsProbe (PSIA_DEVICE Dev)
 {
     static const UCHAR Addresses[] = { 0x6C, 0x6D };
     static const ULONG Pins[] = { 2, 164 };
@@ -49,25 +38,33 @@ SiaWorker (PVOID Context)
     PSIA_DEVICE Dev = Context;
     BOOLEAN LinkReady = FALSE;
     NTSTATUS Status;
-    SiaLog (Dev, "sia9177 v%s: Windows WaveRT, no automatic playback", SIA_DRIVER_VERSION);
     for (;;) {
         KeWaitForSingleObject (&Dev->WorkEvent, Executive, KernelMode, FALSE, NULL);
         if (Dev->Stopping) break;
-        if (!Dev->Running) { KeSetEvent (&Dev->IdleEvent, IO_NO_INCREMENT, FALSE); continue; }
+        if (!Dev->Running) continue;
         ExSetTimerResolution (10000, TRUE);
-        Status = SiaProbe (Dev);
-        if (NT_SUCCESS (Status) && !LinkReady) {
+        Status = STATUS_SUCCESS;
+        if (!LinkReady) {
             Status = SiaLinkStart (Dev);
             LinkReady = NT_SUCCESS (Status);
             if (!LinkReady) SiaLinkStop (Dev);
         }
-        if (NT_SUCCESS (Status) && Dev->Running && !Dev->Stopping) SiaAudioPlay (Dev);
-        InterlockedExchange (&Dev->Running, 0);
+        if (NT_SUCCESS (Status)) SiaAudioRun (Dev);
+        if (!NT_SUCCESS(Status)) {
+            InterlockedExchange (&Dev->Running, 0);
+            for (ULONG Index = 0; Index < 2; Index++) {
+                Dev->Stream[Index].Status = Status;
+                KeSetEvent (&Dev->Stream[Index].ReadyEvent, IO_NO_INCREMENT, FALSE);
+        KeSetEvent (&Dev->Stream[Index].IdleEvent, IO_NO_INCREMENT, FALSE);
+            }
+        }
         ExSetTimerResolution (0, FALSE);
-        KeSetEvent (&Dev->IdleEvent, IO_NO_INCREMENT, FALSE);
     }
     SiaLinkStop (Dev);
-    KeSetEvent (&Dev->IdleEvent, IO_NO_INCREMENT, FALSE);
+    for (ULONG Index = 0; Index < 2; Index++) {
+        KeSetEvent (&Dev->Stream[Index].ReadyEvent, IO_NO_INCREMENT, FALSE);
+        KeSetEvent (&Dev->Stream[Index].IdleEvent, IO_NO_INCREMENT, FALSE);
+    }
     PsTerminateSystemThread (STATUS_SUCCESS);
 }
 
@@ -78,8 +75,11 @@ SiaHardwareStart (PSIA_DEVICE Dev, PCM_PARTIAL_RESOURCE_DESCRIPTOR Resource)
     OBJECT_ATTRIBUTES Attributes;
     RtlZeroMemory (Dev, sizeof (*Dev));
     KeInitializeEvent (&Dev->WorkEvent, SynchronizationEvent, FALSE);
-    KeInitializeEvent (&Dev->IdleEvent, NotificationEvent, TRUE);
-    KeInitializeSpinLock (&Dev->NotifyLock);
+    for (ULONG Index = 0; Index < 2; Index++) {
+        KeInitializeEvent (&Dev->Stream[Index].IdleEvent, NotificationEvent, TRUE);
+        KeInitializeEvent (&Dev->Stream[Index].ReadyEvent, NotificationEvent, FALSE);
+        KeInitializeSpinLock (&Dev->Stream[Index].NotifyLock);
+    }
     Dev->SeSize = Resource->u.Memory.Length;
     Dev->Se = MmMapIoSpaceEx (Resource->u.Memory.Start, Dev->SeSize, PAGE_READWRITE | PAGE_NOCACHE);
     Physical.QuadPart = SIA_GCC_PHYS;
@@ -92,20 +92,33 @@ SiaHardwareStart (PSIA_DEVICE Dev, PCM_PARTIAL_RESOURCE_DESCRIPTOR Resource)
 }
 
 VOID
-SiaStreamStop (PSIA_DEVICE Dev)
+SiaStreamStop (PSIA_DEVICE Dev, BOOLEAN Capture)
 {
-    InterlockedExchange (&Dev->Running, 0);
-    if (Dev->Thread) KeWaitForSingleObject (&Dev->IdleEvent, Executive, KernelMode, FALSE, NULL);
-    if (Dev->PcmSize) Dev->ReadOffset = (ULONG)((ULONGLONG)Dev->PlayedBytes % Dev->PcmSize);
+    PSIA_PCM Pcm = &Dev->Stream[Capture != FALSE];
+    InterlockedAnd (&Dev->Running, ~(1L << (Capture != FALSE)));
+    KeSetEvent (&Dev->WorkEvent, IO_NO_INCREMENT, FALSE);
+    if (Dev->Thread) KeWaitForSingleObject (&Pcm->IdleEvent, Executive, KernelMode, FALSE, NULL);
+    if (Pcm->PcmSize) Pcm->ReadOffset = (ULONG)((ULONGLONG)Pcm->PlayedBytes % Pcm->PcmSize);
 }
 
 NTSTATUS
-SiaStreamStart (PSIA_DEVICE Dev)
+SiaStreamStart (PSIA_DEVICE Dev, BOOLEAN Capture)
 {
-    if (Dev->Stopping || !Dev->Thread || !Dev->Pcm || !Dev->PcmSize || Dev->RetainedDma) return STATUS_DEVICE_NOT_READY;
-    if (InterlockedCompareExchange (&Dev->Running, 1, 0) != 0) return STATUS_SUCCESS;
-    KeClearEvent (&Dev->IdleEvent);
+    PSIA_PCM Pcm = &Dev->Stream[Capture != FALSE];
+    LONG Bit = 1L << (Capture != FALSE);
+    if (Dev->Stopping || !Dev->Thread || !Pcm->Pcm || !Pcm->PcmSize || Dev->RetainedDma) return STATUS_DEVICE_NOT_READY;
+    if (InterlockedCompareExchange (&Dev->Running, 0, 0) & Bit) return STATUS_SUCCESS;
+    Pcm->Status = STATUS_PENDING;
+    KeClearEvent (&Pcm->IdleEvent);
+    KeClearEvent (&Pcm->ReadyEvent);
+    InterlockedOr (&Dev->Running, Bit);
     KeSetEvent (&Dev->WorkEvent, IO_NO_INCREMENT, FALSE);
+    if(Capture) {
+        LARGE_INTEGER Timeout;Timeout.QuadPart=-100000000LL;
+        NTSTATUS Status=KeWaitForSingleObject(&Pcm->ReadyEvent,Executive,KernelMode,FALSE,&Timeout);
+        if(Status!=STATUS_SUCCESS){SiaStreamStop(Dev,Capture);return STATUS_IO_TIMEOUT;}
+        return Pcm->Status;
+    }
     return STATUS_SUCCESS;
 }
 

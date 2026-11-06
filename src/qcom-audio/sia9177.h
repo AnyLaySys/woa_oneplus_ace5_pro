@@ -1,10 +1,6 @@
 #pragma once
 #include <ntddk.h>
-#include <ntstrsafe.h>
 
-#ifndef SIA_DRIVER_VERSION
-#define SIA_DRIVER_VERSION "26.10.31.1"
-#endif
 #define SIA_PCM_RATE 48000u
 #define SIA_PCM_FRAMES 960u
 #define SIA_PCM_BYTES (SIA_PCM_FRAMES * SIA_PCM_FRAME)
@@ -39,10 +35,9 @@ typedef struct _SIA_LINK {
     ULONG TxLength;
     PUCHAR RxFifo;
     ULONG RxLength;
-    ULONG LastInValid;
-    ULONG LastInValues[16];
     ULONG AudioRcid;
     BOOLEAN AudioOpenAcked;
+    BOOLEAN AudioOpening;
     ULONG IntentIid[SIA_REMOTE_INTENTS];
     ULONG IntentSize[SIA_REMOTE_INTENTS];
     BOOLEAN IntentFree[SIA_REMOTE_INTENTS];
@@ -52,6 +47,20 @@ typedef struct _SIA_LINK {
     ULONG QueueTail;
 } SIA_LINK, *PSIA_LINK;
 
+typedef struct _SIA_PCM {
+    PUCHAR Pcm;
+    ULONG PcmSize;
+    ULONG ReadOffset;
+    volatile LONG64 PlayedBytes;
+    volatile LONG StreamAllocated;
+    KSPIN_LOCK NotifyLock;
+    PKEVENT NotifyEvent;
+    ULONG NotifyBytes;
+    KEVENT IdleEvent;
+    KEVENT ReadyEvent;
+    volatile NTSTATUS Status;
+} SIA_PCM, *PSIA_PCM;
+
 typedef struct _SIA_DEVICE {
     PUCHAR Se;
     SIZE_T SeSize;
@@ -60,19 +69,15 @@ typedef struct _SIA_DEVICE {
     PSIA_LINK Link;
     HANDLE Thread;
     KEVENT WorkEvent;
-    KEVENT IdleEvent;
     volatile LONG Stopping;
     volatile LONG Running;
-    volatile LONG StreamAllocated;
     BOOLEAN RetainedDma;
-    PUCHAR Pcm;
-    ULONG PcmSize;
-    ULONG ReadOffset;
-    volatile LONG64 PlayedBytes;
-    KSPIN_LOCK NotifyLock;
-    PKEVENT NotifyEvent;
-    ULONG NotifyBytes;
+    SIA_PCM Stream[2];
 } SIA_DEVICE, *PSIA_DEVICE;
+
+typedef struct _SIA_MIC SIA_MIC, *PSIA_MIC;
+#define SIA_CAPTURE_FRAME 4u
+#define SIA_CAPTURE_BYTES (SIA_PCM_FRAMES * SIA_CAPTURE_FRAME)
 
 static __inline ULONG SiaRead32 (PUCHAR Base, ULONG Offset)
 {
@@ -99,9 +104,8 @@ extern "C" {
 #endif
 NTSTATUS SiaHardwareStart (PSIA_DEVICE Dev, PCM_PARTIAL_RESOURCE_DESCRIPTOR Resource);
 VOID SiaHardwareStop (PSIA_DEVICE Dev);
-NTSTATUS SiaStreamStart (PSIA_DEVICE Dev);
-VOID SiaStreamStop (PSIA_DEVICE Dev);
-VOID SiaLog (_In_ PSIA_DEVICE Dev, _In_z_ _Printf_format_string_ PCSTR Format, ...);
+NTSTATUS SiaStreamStart (PSIA_DEVICE Dev, BOOLEAN Capture);
+VOID SiaStreamStop (PSIA_DEVICE Dev, BOOLEAN Capture);
 VOID SiaSleep (_In_ ULONG Milliseconds);
 
 NTSTATUS SiaI2cInit (_In_ PSIA_DEVICE Dev);
@@ -115,7 +119,11 @@ VOID SiaLinkPoll (_In_ PSIA_DEVICE Dev);
 NTSTATUS SiaGprSendRaw (_In_ PSIA_DEVICE Dev, _In_reads_bytes_ (Length) const UCHAR *Packet, _In_ ULONG Length);
 BOOLEAN SiaGprPop (_In_ PSIA_DEVICE Dev, _Out_ SIA_GPR_PACKET *Packet);
 
-VOID SiaAudioPlay (_In_ PSIA_DEVICE Dev);
+VOID SiaAudioRun (_In_ PSIA_DEVICE Dev);
+NTSTATUS SiaAmpsProbe (PSIA_DEVICE Dev);
+NTSTATUS SiaMicStart (PSIA_DEVICE Dev, PSIA_MIC *Mic, VOID (*Service)(PSIA_DEVICE, PVOID), PVOID Audio);
+VOID SiaMicPoll (PSIA_MIC Mic);
+VOID SiaMicStop (PSIA_DEVICE Dev, PSIA_MIC Mic);
 
 #ifdef __cplusplus
 }

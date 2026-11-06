@@ -129,6 +129,7 @@
 #define HSP_SMMU_S2CR(i)        (0xC00u + 4u * (i))
 #define HSP_SMMU_SMR_VALID      0x80000000u
 #define HSP_SMMU_TYPE_MASK      0x3u
+#define HSP_SMMU_ALLOC_LIMIT    128u
 #define HSP_GPI_STREAM_ID       0xB6u
 #define HSP_QUP_STREAM_ID       0xA3u
 #define HSP_UFS_STREAM_ID       0x60u
@@ -451,7 +452,7 @@ HspConfigureSmmu (_Inout_ PHSP_CTX Ctx)
             UfsS2cr = HspRd(Ctx->Smmu, HSP_SMMU_S2CR(Slot));
             if (UfsS2cr == MAXULONG || (UfsS2cr & HSP_SMMU_TYPE_MASK) != 0) return STATUS_DEVICE_CONFIGURATION_ERROR;
         }
-        if ((Smr & HSP_SMMU_SMR_VALID) == 0) {
+        if ((Smr & HSP_SMMU_SMR_VALID) == 0 && Slot < HSP_SMMU_ALLOC_LIMIT) {
             if (FreeCount < RTL_NUMBER_OF(FreeSlot)) FreeSlot[FreeCount++] = Slot;
         }
         for (Index = 0; Index < 2; Index++) {
@@ -621,14 +622,6 @@ HspStopDma(PHSP_CTX Ctx)
         if (Ctx->MasksSaved) HspMasks(Ctx, TRUE);
     }
     for (Index = 0; Index < 2; Index++) {
-        if (!Ctx->SmmuChanged[Index]) continue;
-        HspWr(Ctx->Smmu, HSP_SMMU_SMR(Ctx->SmmuSlot[Index]), Ctx->SmmuSavedSmr[Index]);
-        HspWr(Ctx->Smmu, HSP_SMMU_S2CR(Ctx->SmmuSlot[Index]), Ctx->SmmuSavedS2cr[Index]);
-        if (HspRd(Ctx->Smmu, HSP_SMMU_SMR(Ctx->SmmuSlot[Index])) != Ctx->SmmuSavedSmr[Index] ||
-            HspRd(Ctx->Smmu, HSP_SMMU_S2CR(Ctx->SmmuSlot[Index])) != Ctx->SmmuSavedS2cr[Index]) {
-            Ctx->Faulted = TRUE;
-            return STATUS_IO_DEVICE_ERROR;
-        }
         Ctx->SmmuChanged[Index] = FALSE;
     }
     Ctx->SmmuReady = FALSE;

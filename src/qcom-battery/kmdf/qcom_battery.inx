@@ -1,0 +1,46 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=Battery
+ClassGuid={72631e54-78a4-11d0-bcf7-00aa00b7b32a}
+Provider=%ProviderString%
+DriverVer=11/04/2026,26.11.4.1
+CatalogFile=qcom_battery.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskDesc%,,,
+
+[SourceDisksFiles]
+qcom_battery.sys = 1
+
+[Manufacturer]
+%ManufacturerString% = Qualcomm, NT$ARCH$.10.0...22000
+
+[Qualcomm.NT$ARCH$.10.0...22000]
+%DeviceDesc% = qcom_battery_Device, ACPI\HMRB0001
+
+[qcom_battery_Device.NT]
+CopyFiles = qcom_battery_CopyFiles
+
+[qcom_battery_CopyFiles]
+qcom_battery.sys
+
+[qcom_battery_Device.NT.Services]
+AddService = qcom_battery, 0x00000002, qcom_battery_Service
+
+[qcom_battery_Service]
+DisplayName   = %ServiceDesc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\qcom_battery.sys
+
+[Strings]
+ProviderString     = "AnyLaySys"
+ManufacturerString = "Qualcomm"
+DiskDesc           = "AnyLaySys Battery Gauge Driver"
+DeviceDesc         = "Qualcomm Battery Fuel Gauge"
+ServiceDesc        = "Qualcomm Battery Fuel Gauge Driver"

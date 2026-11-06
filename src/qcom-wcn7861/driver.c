@@ -1,13 +1,8 @@
-/*
- * KMDF glue for the WLN0 (HMRW7861) node: resources, the iMSI interrupt, a
- * passive-level bring-up thread and a plain-text log at \SystemRoot\wcn7861.log
- * (the PE runs flat from the als partition, so the log survives a reboot).
- */
+/* KMDF resource and power lifecycle; passive-level radio worker. */
 #include "version.h"
 #include <ntifs.h> /* documented ZwWaitForSingleObject for thread-create rollback */
 #include "wcn7861.h"
 
-#define WCN_LOG_PATH        L"\\SystemRoot\\wcn7861.log"
 #define WCN_FIRMWARE_PATH   L"\\SystemRoot\\System32\\drivers\\wcn7861\\amss.bin"
 
 DRIVER_INITIALIZE DriverEntry;
@@ -20,62 +15,11 @@ EVT_WDF_INTERRUPT_ISR WcnEvtIsr;
 EVT_WDF_INTERRUPT_DPC WcnEvtDpc;
 KSTART_ROUTINE WcnThread;
 
-VOID
-WcnLog (
-    _In_ PWCN_DEVICE Dev,
-    _In_z_ _Printf_format_string_ PCSTR Format,
-    ...
-    )
+/* Failures remain visible to a kernel debugger; no persistent trace files. */
+VOID WcnLog(PWCN_DEVICE Dev,PCSTR Format,...)
 {
-    CHAR Line[512];
-    size_t Length;
-    va_list Args;
-    LONGLONG Elapsed;
-    IO_STATUS_BLOCK Iosb;
-    NTSTATUS Status;
-
-    if (KeGetCurrentIrql () != PASSIVE_LEVEL) {
-        return;
-    }
-
-    if (Dev->LogFile == NULL) {
-        OBJECT_ATTRIBUTES Attributes;
-        UNICODE_STRING Path;
-
-        RtlInitUnicodeString (&Path, WCN_LOG_PATH);
-        InitializeObjectAttributes (&Attributes, &Path, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
-        Status = ZwCreateFile (&Dev->LogFile,
-                               FILE_APPEND_DATA | SYNCHRONIZE,
-                               &Attributes,
-                               &Iosb,
-                               NULL,
-                               FILE_ATTRIBUTE_NORMAL,
-                               FILE_SHARE_READ,
-                               FILE_OVERWRITE_IF,
-                               FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE | FILE_WRITE_THROUGH,
-                               NULL,
-                               0);
-        if (!NT_SUCCESS (Status)) {
-            Dev->LogFile = NULL;
-            return;
-        }
-        Dev->LogStart = (LONGLONG)KeQueryInterruptTime ();
-    }
-
-    Elapsed = ((LONGLONG)KeQueryInterruptTime () - Dev->LogStart) / 10000;
-    Status = RtlStringCbPrintfA (Line, sizeof (Line), "[%5lld.%03lld] ", Elapsed / 1000, Elapsed % 1000);
-    if (!NT_SUCCESS (Status)) {
-        return;
-    }
-    RtlStringCbLengthA (Line, sizeof (Line), &Length);
-
-    va_start (Args, Format);
-    RtlStringCbVPrintfA (Line + Length, sizeof (Line) - Length - 2, Format, Args);
-    va_end (Args);
-    RtlStringCbCatA (Line, sizeof (Line), "\r\n");
-    RtlStringCbLengthA (Line, sizeof (Line), &Length);
-
-    ZwWriteFile (Dev->LogFile, NULL, NULL, NULL, &Iosb, Line, (ULONG)Length, NULL, NULL);
+    va_list Args;UNREFERENCED_PARAMETER(Dev);va_start(Args,Format);
+    vDbgPrintExWithPrefix("wcn7861: ",DPFLTR_IHVNETWORK_ID,DPFLTR_ERROR_LEVEL,Format,Args);va_end(Args);
 }
 
 LONGLONG
@@ -84,39 +28,6 @@ WcnNowMs (
     )
 {
     return (LONGLONG)(KeQueryInterruptTime () / 10000);
-}
-
-/* Up to 256 bytes, 32 per line. */
-VOID
-WcnLogHex (
-    _In_ PWCN_DEVICE Dev,
-    _In_z_ PCSTR Prefix,
-    _In_reads_bytes_ (Length) const UCHAR *Data,
-    _In_ ULONG Length
-    )
-{
-    static const CHAR Digits[] = "0123456789abcdef";
-    CHAR Line[3 * 32 + 1];
-    ULONG Offset;
-    ULONG Index;
-    ULONG Count;
-
-    if (Length > 256) {
-        Length = 256;
-    }
-    for (Offset = 0; Offset < Length; Offset += 32) {
-        Count = Length - Offset;
-        if (Count > 32) {
-            Count = 32;
-        }
-        for (Index = 0; Index < Count; Index++) {
-            Line[Index * 3] = Digits[Data[Offset + Index] >> 4];
-            Line[Index * 3 + 1] = Digits[Data[Offset + Index] & 0xF];
-            Line[Index * 3 + 2] = ' ';
-        }
-        Line[Count * 3] = 0;
-        WcnLog (Dev, "%s+%03x: %s", Prefix, Offset, Line);
-    }
 }
 
 VOID
@@ -244,34 +155,6 @@ WcnDmaAlloc (
     return WcnDmaAllocAligned (Dev, Length, FILE_OCTA_ALIGNMENT, Dma);
 }
 
-NTSTATUS
-WcnWriteDump (
-    _In_ PCWSTR Path,
-    _In_reads_ (Count) PWCN_DMA Segments,
-    _In_ ULONG Count
-    )
-{
-    OBJECT_ATTRIBUTES Attributes;
-    UNICODE_STRING Name;
-    IO_STATUS_BLOCK Iosb;
-    HANDLE File;
-    ULONG Index;
-    NTSTATUS Status;
-
-    RtlInitUnicodeString (&Name, Path);
-    InitializeObjectAttributes (&Attributes, &Name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
-    Status = ZwCreateFile (&File, FILE_WRITE_DATA | SYNCHRONIZE, &Attributes, &Iosb, NULL, FILE_ATTRIBUTE_NORMAL, 0,
-                           FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE | FILE_WRITE_THROUGH, NULL, 0);
-    if (!NT_SUCCESS (Status)) {
-        return Status;
-    }
-    for (Index = 0; Index < Count && NT_SUCCESS (Status); Index++) {
-        Status = ZwWriteFile (File, NULL, NULL, NULL, &Iosb, Segments[Index].Va, (ULONG)Segments[Index].Length, NULL, NULL);
-    }
-    ZwClose (File);
-    return Status;
-}
-
 VOID
 WcnThread (
     _In_ PVOID Context
@@ -279,22 +162,18 @@ WcnThread (
 {
     PWCN_DEVICE Dev = Context;
     NTSTATUS Status;
-    ULONG Beat;
-
-    WcnLog (Dev, WCN_DRIVER_BANNER ": BAR0 0x%llx (+0x%x) cfg %p dbi %p parf %p",
-            Dev->BarPhysical.QuadPart, Dev->BarLength, Dev->Config, Dev->Dbi, Dev->Parf);
 
     Status = WcnPcieSetup (Dev);
     if (NT_SUCCESS (Status)) {
         Status = WcnPcieConfigSid (Dev);
     }
     if (NT_SUCCESS (Status)) {
-        Status = WcnSmmuSetup (Dev);
-        WcnLog (Dev, "smmu setup: 0x%08x", Status);
+        Status = WcnSmmuSetup ();
+
     }
     if (NT_SUCCESS (Status)) {
         Status = WcnReadFile (WCN_FIRMWARE_PATH, &Dev->Firmware, &Dev->FirmwareSize);
-        WcnLog (Dev, "firmware amss.bin: %Iu bytes, status 0x%08x", Dev->FirmwareSize, Status);
+
     }
     if (NT_SUCCESS (Status)) {
         WcnPcieSwReset (Dev, TRUE);
@@ -307,31 +186,26 @@ WcnThread (
     if (NT_SUCCESS (Status)) {
         Status = WcnMhiStartChannels (Dev);
     }
-    WcnLog (Dev, "bring-up finished: status 0x%08x, isr %ld, msi seen 0x%08lx",
-            Status, Dev->IsrCount, Dev->MsiSeen);
 
     if (Dev->Firmware != NULL) {
         ExFreePoolWithTag (Dev->Firmware, WCN_TAG);
         Dev->Firmware = NULL;
     }
 
-    for (Beat = 0; !Dev->Stop; Beat++) {
+    while (!Dev->Stop) {
         WcnWait (Dev, 100);
         if (Dev->Stop) {
             break;
         }
         WcnMhiService (Dev);
         WcnCeService (Dev);
-        WcnDpService (Dev);
+
         WcnStage6Service (Dev);
+        WcnStage7DpPoll (Dev); /* Reclaim completions before submitting the next batch. */
         WcnStage8Service (Dev);
         WcnStage7Service (Dev);
-        if (Beat % 50 == 0 && Beat < 600 && Dev->Mhi.Bhi != 0) {
-            WcnLog (Dev, "heartbeat: mhi status 0x%08x ee %u isr %ld msi 0x%08lx, ipcr tx %u rx %u, qmi %s%s",
-                    WcnBarRead (Dev, MHI_STATUS), WcnBarRead (Dev, Dev->Mhi.Bhi + BHI_EXECENV), Dev->IsrCount, Dev->MsiSeen,
-                    Dev->Mhi.Chan[0].Packets, Dev->Mhi.Chan[1].Packets, WcnQmiStepName (Dev),
-                    Dev->Qmi.Failed ? " (failed)" : "");
-        }
+        WcnTdlsService (Dev);
+
     }
 
     PsTerminateSystemThread (STATUS_SUCCESS);
@@ -353,9 +227,6 @@ WcnEvtIsr (
         return FALSE;
     }
     WcnDbiWrite (Dev, DBI_MSI_INTR0_STATUS, Pending);
-    InterlockedOr (&Dev->MsiPending, (LONG)Pending);
-    InterlockedOr (&Dev->MsiSeen, (LONG)Pending);
-    InterlockedIncrement (&Dev->IsrCount);
     WdfInterruptQueueDpcForIsr (Interrupt);
     return TRUE;
 }
@@ -401,7 +272,6 @@ WcnEvtPrepareHardware (
         case 0x40400000:
             Dev->Bar = Mapped;
             Dev->BarLength = Desc->u.Memory.Length;
-            Dev->BarPhysical = Desc->u.Memory.Start;
             break;
         case 0x40100000:
             Dev->Config = Mapped;
@@ -455,10 +325,6 @@ WcnEvtReleaseHardware (
         MmUnmapIoSpace (Dev->Parf, Dev->ParfLength);
         Dev->Parf = NULL;
     }
-    if (Dev->LogFile != NULL) {
-        ZwClose (Dev->LogFile);
-        Dev->LogFile = NULL;
-    }
     return STATUS_SUCCESS;
 }
 
@@ -486,6 +352,7 @@ WcnEvtD0EntryPostInterruptsEnabled (
         ZwWaitForSingleObject (Thread, FALSE, NULL);
         ZwClose (Thread);
         WcnMhiPowerDown (Dev);
+    WcnTdlsPowerDown (Dev);
         return Status;
     }
     ZwClose (Thread);
@@ -498,6 +365,7 @@ WcnEvtD0EntryPostInterruptsEnabled (
         Dev->Thread = NULL;
         WcnStage8Stop (Dev);
         WcnMhiPowerDown (Dev);
+    WcnTdlsPowerDown (Dev);
     }
     return Status;
 }
@@ -509,8 +377,7 @@ WcnEvtD0ExitPreInterruptsDisabled (
     )
 {
     PWCN_DEVICE Dev = WcnGetDevice (Device);
-
-    UNREFERENCED_PARAMETER (TargetState);
+    UNREFERENCED_PARAMETER(TargetState);
 
     if (Dev->Thread != NULL) {
         Dev->Stop = TRUE;
@@ -519,8 +386,12 @@ WcnEvtD0ExitPreInterruptsDisabled (
         ObDereferenceObject (Dev->Thread);
         Dev->Thread = NULL;
     }
+
     WcnStage8Stop (Dev);
+
     WcnMhiPowerDown (Dev);
+    WcnTdlsPowerDown (Dev);
+
     return STATUS_SUCCESS;
 }
 

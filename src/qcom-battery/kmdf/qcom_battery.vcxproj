@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|ARM64">
+      <Configuration>Debug</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM64">
+      <Configuration>Release</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{7C4A1E92-3B5D-4A87-9E21-6F0D2C8B4471}</ProjectGuid>
+    <RootNamespace>qcom_battery</RootNamespace>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <Platform Condition="'$(Platform)' == ''">ARM64</Platform>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>False</UseDebugLibraries>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>WDM</DriverType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>True</UseDebugLibraries>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>WDM</DriverType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <TargetName>qcom_battery</TargetName>
+    <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
+    <QcbVersionDate Condition="'$(QcbVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</QcbVersionDate>
+    <QcbRevision Condition="'$(QcbRevision)' == '' and '$(QcbVersionDate)' == '2026-11-04'">19</QcbRevision>
+    <QcbRevision Condition="'$(QcbRevision)' == ''">0</QcbRevision>
+    <QcbDriverDate>$([System.DateTime]::Parse('$(QcbVersionDate)').ToString('MM/dd/yyyy'))</QcbDriverDate>
+    <QcbDriverVersion>$([System.DateTime]::Parse('$(QcbVersionDate)').ToString('yy.M.d')).$(QcbRevision)</QcbDriverVersion>
+    <QcbDriverVersionComma>$([System.String]::Copy('$(QcbDriverVersion)').Replace('.', ','))</QcbDriverVersionComma>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>QCB_DRIVER_VERSION=&quot;$(QcbDriverVersion)&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>battc.lib;ntstrsafe.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+      <DateStamp>$(QcbDriverDate)</DateStamp>
+      <TimeStamp>$(QcbDriverVersion)</TimeStamp>
+    </Inf>
+    <ResourceCompile>
+      <PreprocessorDefinitions>ALS_DRIVER_VERSION=$(QcbDriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(QcbDriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
+    <DriverSign>
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+    </DriverSign>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\driver.c" />
+    <ClCompile Include="..\gauge.c" />
+    <ResourceCompile Include="qcom_battery.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\battery.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Inf Include="qcom_battery.inx" />
+    <FilesToPackage Include="$(TargetPath)" />
+  </ItemGroup>
+  <PropertyGroup>
+    <WoAProjectRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\..'))</WoAProjectRoot>
+    <OutDir>$(WoAProjectRoot)\out\qcom-battery\$(Platform)\$(Configuration)\bin\</OutDir>
+    <IntDir>$(WoAProjectRoot)\out\qcom-battery\$(Platform)\$(Configuration)\obj\</IntDir>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

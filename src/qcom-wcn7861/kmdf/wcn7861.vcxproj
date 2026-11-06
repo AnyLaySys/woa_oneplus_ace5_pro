@@ -45,11 +45,11 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <Inf>
-      <DateStamp>11/02/2026</DateStamp>
-      <TimeStamp>26.11.2.0</TimeStamp>
+      <DateStamp>11/06/2026</DateStamp>
+      <TimeStamp>26.11.6.47</TimeStamp>
     </Inf>
     <ClCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);POOL_NX_OPTIN=1;WCN_STAGE8=1</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);POOL_NX_OPTIN=1</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..;$(DDK_INC_PATH)wlan\2.0</AdditionalIncludeDirectories>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
@@ -62,13 +62,27 @@
     <ClCompile Include="..\driver.c" />
     <ClCompile Include="..\stage8.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
     <ClCompile Include="..\sae.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
+    <ClCompile Include="..\tdls.c" />
+    <ClCompile Include="..\tdls-crypto.c" />
+    <ClCompile Include="..\ft.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
+    <ClCompile Include="..\roaming.cpp"><CompileAs>CompileAsCpp</CompileAs><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
+    <ClCompile Include="..\hotspot.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
     <ClCompile Include="..\stage8-queue.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
     <ClCompile Include="..\ce.c" />
     <ClCompile Include="..\dp.c" />
     <ClCompile Include="..\stage6.c" />
     <ClCompile Include="..\stage7.c" />
+    <ClCompile Include="..\capabilities.c" />
+    <ClCompile Include="..\phy.c" />
+    <ClCompile Include="..\phy-advanced.c" />
+
+    <ClCompile Include="..\aggregation.c" />
+    <ClCompile Include="..\twt.c" />
+    <ClCompile Include="..\channel-switch.c" />
     <ClCompile Include="..\station.c" />
     <ClCompile Include="..\management.c" />
+    <ClCompile Include="..\keys.c" />
+    <ClCompile Include="..\stage8-keys.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
     <ClCompile Include="..\stage7-dp.c" />
     <ClCompile Include="..\pcie.c" />
     <ClCompile Include="..\mhi.c" />
@@ -78,6 +92,7 @@
   <ItemGroup>
     <ClInclude Include="..\wcn7861.h" />
     <ClInclude Include="..\version.h" />
+    <ClInclude Include="..\sae-wire.h" />
     <ClInclude Include="..\stage6-protocol.h" />
     <ClInclude Include="..\stage7-rx-protocol.h" />
     <ClInclude Include="..\stage7-tx-protocol.h" />

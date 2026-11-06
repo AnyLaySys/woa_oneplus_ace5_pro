@@ -17,7 +17,7 @@
 #define TLMM_I2S_LAST           124u
 #define TLMM_I2S_PINS           (TLMM_I2S_LAST - TLMM_I2S_FIRST + 1u)
 
-#define SHM_SIZE                0x10000u
+#define SHM_SIZE                0x20000u
 #define PCM_BUFFERS             2u
 #define PCM_STRIDE              0x3000u
 
@@ -70,6 +70,22 @@ typedef struct _SIA_AUDIO_WAIT {
     ULONG Value;
 } SIA_AUDIO_WAIT;
 
+typedef struct _SIA_FLOW {
+    PUCHAR Blob;
+    ULONG BlobSize;
+    ULONG Offset;
+    ULONG Record;
+    ULONG Bytes;
+    ULONG Port;
+    ULONG Endpoint;
+    ULONG CleanupOffset, CleanupRecord;
+    BOOLEAN Opened;
+    BOOLEAN Streaming;
+    BOOLEAN Failed;
+    BOOLEAN Busy[PCM_BUFFERS];
+    LONGLONG LastDone;
+} SIA_FLOW, *PSIA_FLOW;
+
 typedef struct _SIA_AUDIO {
     PUCHAR Smmu;
     ULONG SmmuSlot[SMMU_STREAMS];
@@ -85,15 +101,11 @@ typedef struct _SIA_AUDIO {
     BOOLEAN ClockOn;
     BOOLEAN PinsOn;
     BOOLEAN AmpsOn;
-    BOOLEAN Failed;
-    BOOLEAN Streaming;
     ULONG PinCtl[TLMM_I2S_PINS];
-    BOOLEAN Busy[PCM_BUFFERS];
-    ULONG Sent;
-    ULONG Done;
-    ULONG BadStatus;
-    ULONG Unexpected;
-    LONGLONG LastDone;
+    ULONG Current;
+    ULONG MicClocks;
+    PSIA_MIC Mic;
+    SIA_FLOW Flow[2];
     SIA_GPR_PACKET Rx;
 } SIA_AUDIO, *PSIA_AUDIO;
 
@@ -160,36 +172,51 @@ AuDispatch (
     Word0 = PayloadLength >= 4 ? *(const ULONG UNALIGNED *)Payload : 0;
     Word1 = PayloadLength >= 8 ? *(const ULONG UNALIGNED *)(Payload + 4) : 0;
 
-    if (Opcode == DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2 ||
-        (Opcode == GPR_IBASIC_RSP_RESULT && Word0 == DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2)) {
-        ULONG Status = Opcode == GPR_IBASIC_RSP_RESULT ? Word1 : (PayloadLength >= 16 ? *(const ULONG UNALIGNED *)(Payload + 12) : 0);
-        ULONGLONG Address = Au->DspAddress + (ULONGLONG)Token * PCM_STRIDE;
-        if (*(const ULONG UNALIGNED *)(Packet->Data + 8) != GPR_PORT_WR_EP ||
-            *(const ULONG UNALIGNED *)(Packet->Data + 12) != GPR_PORT_STREAM ||
-            (Opcode == DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2 &&
-             (PayloadLength < 16 || Word0 != (ULONG)Address || Word1 != (ULONG)(Address >> 32) ||
-              *(const ULONG UNALIGNED *)(Payload + 8) != Au->Handle))) {
-            SiaLog (Dev, "pcm completion ignored: invalid port, address or handle, token 0x%x", Token);
-            return;
-        }
-        if (Token < PCM_BUFFERS && Au->Busy[Token]) {
-            Au->Busy[Token] = FALSE;
-            Au->Done++;
-            Au->LastDone = AuNowMs ();
-            {
-                KIRQL Irql;
-                ULONGLONG Before = (ULONGLONG)InterlockedExchangeAdd64 (&Dev->PlayedBytes, SIA_PCM_BYTES);
-                KeAcquireSpinLock (&Dev->NotifyLock, &Irql);
-                if (Dev->NotifyEvent && Dev->NotifyBytes && Before / Dev->NotifyBytes != (Before + SIA_PCM_BYTES) / Dev->NotifyBytes)
-                    KeSetEvent (Dev->NotifyEvent, IO_NO_INCREMENT, FALSE);
-                KeReleaseSpinLock (&Dev->NotifyLock, Irql);
+    if (Opcode == DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2 || Opcode == 0x05001005u ||
+        (Opcode == GPR_IBASIC_RSP_RESULT && (Word0 == DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2 || Word0 == 0x0400100Bu))) {
+        ULONG Direction = *(const ULONG UNALIGNED *)(Packet->Data + 12) == 0x2011u;
+        PSIA_FLOW Flow = &Au->Flow[Direction];
+        PSIA_PCM Pcm = &Dev->Stream[Direction];
+        ULONGLONG Address = Au->DspAddress + Direction * 0x10000u + (ULONGLONG)Token * PCM_STRIDE;
+        ULONG Bytes = Flow->Bytes;
+        ULONG Status;
+        if (Token >= PCM_BUFFERS || !Flow->Busy[Token] ||
+            *(const ULONG UNALIGNED *)(Packet->Data + 8) != Flow->Endpoint ||
+            *(const ULONG UNALIGNED *)(Packet->Data + 12) != Flow->Port) return;
+        if (!Flow->Streaming) { Flow->Busy[Token] = FALSE; return; }
+        if (Opcode == GPR_IBASIC_RSP_RESULT) {
+            Status = Word1 ? Word1 : 1;
+        } else if (Direction) {
+            if (PayloadLength < 56 || Word1 != (ULONG)Address ||
+                *(const ULONG UNALIGNED *)(Payload + 8) != (ULONG)(Address >> 32) ||
+                *(const ULONG UNALIGNED *)(Payload + 12) != Au->Handle) return;
+            Status = Word0;
+            Bytes = *(const ULONG UNALIGNED *)(Payload + 16);
+            // This firmware's V2 response has a timestamp here, not a sample offset.
+            if (!Status && (!Bytes || Bytes > Flow->Bytes || (Bytes % SIA_CAPTURE_FRAME))) Status = 1;
+            if (!Status && Pcm->Pcm && Flow->Streaming && (Dev->Running & 2)) {
+                KeMemoryBarrier ();
+                for (ULONG I = 0; I < Bytes; I += 4) {
+                    ULONG Word = SiaRead32(Au->Shm, 0x10000u + Token * PCM_STRIDE + I);
+                    *(ULONG *)(Pcm->Pcm + Pcm->ReadOffset) = Word;
+                    Pcm->ReadOffset = (Pcm->ReadOffset + 4) % Pcm->PcmSize;
+                }
             }
+        } else {
+            if (PayloadLength < 16 || Word0 != (ULONG)Address || Word1 != (ULONG)(Address >> 32) ||
+                *(const ULONG UNALIGNED *)(Payload + 8) != Au->Handle) return;
+            Status = *(const ULONG UNALIGNED *)(Payload + 12);
         }
-        if (Status != 0 || Opcode == GPR_IBASIC_RSP_RESULT) {
-            Au->BadStatus++;
-            if (Au->BadStatus <= 8) {
-                SiaLog (Dev, "pcm buffer %lu rsp op 0x%08x status 0x%x", Token, Opcode, Status);
-            }
+        Flow->Busy[Token] = FALSE;
+        Flow->LastDone = AuNowMs ();
+        if (Status) { Flow->Failed = TRUE;  return; }
+        if (Flow->Streaming && Pcm->PcmSize) {
+            KIRQL Irql;
+            ULONGLONG Before = (ULONGLONG)InterlockedExchangeAdd64(&Pcm->PlayedBytes, Bytes);
+            KeAcquireSpinLock(&Pcm->NotifyLock, &Irql);
+            if (Pcm->NotifyEvent && Pcm->NotifyBytes && Before / Pcm->NotifyBytes != (Before + Bytes) / Pcm->NotifyBytes)
+                KeSetEvent(Pcm->NotifyEvent, IO_NO_INCREMENT, FALSE);
+            KeReleaseSpinLock(&Pcm->NotifyLock, Irql);
         }
         return;
     }
@@ -212,13 +239,9 @@ AuDispatch (
         }
     }
 
-    Au->Unexpected++;
-    if (Au->Unexpected <= 32) {
-        SiaLog (Dev, "gpr rx op 0x%08x token 0x%x src 0x%x dst 0x%x len %lu p0 0x%08x p1 0x%08x",
-                Opcode, Token, *(const ULONG UNALIGNED *)(Packet->Data + 8), *(const ULONG UNALIGNED *)(Packet->Data + 12),
-                Packet->Length, Word0, Word1);
-    }
 }
+
+static NTSTATUS AuSubmit(PSIA_DEVICE Dev, PSIA_AUDIO Au, ULONG Direction, ULONG Index);
 
 static
 VOID
@@ -228,9 +251,16 @@ AuPump (
     _Inout_opt_ SIA_AUDIO_WAIT *Wait
     )
 {
+    if(Au->Mic)SiaMicPoll(Au->Mic);
     SiaLinkPoll (Dev);
     while (SiaGprPop (Dev, &Au->Rx)) {
         AuDispatch (Dev, Au, &Au->Rx, Wait);
+    }
+    for (ULONG Direction = 0; Direction < 2; Direction++) {
+        PSIA_FLOW Flow = &Au->Flow[Direction];
+        if (!Flow->Streaming || Flow->Failed || !(Dev->Running & (1u << Direction)) || Dev->Stopping) continue;
+        for (ULONG Index = 0; Index < PCM_BUFFERS; Index++)
+            if (!Flow->Busy[Index] && !NT_SUCCESS(AuSubmit(Dev, Au, Direction, Index))) Flow->Failed = TRUE;
     }
 }
 
@@ -263,7 +293,7 @@ AuTransact (
     if (Value != NULL) {
         *Value = 0;
     }
-    if ((Dev->Stopping != 0 || !Dev->Running) && !Au->Cleanup) {
+    if ((Dev->Stopping != 0 || !(Dev->Running & (1u << Au->Current))) && !Au->Cleanup) {
         return STATUS_CANCELLED;
     }
 
@@ -278,7 +308,7 @@ AuTransact (
         if (Wait.Matched) {
             break;
         }
-        if ((Dev->Stopping != 0 || !Dev->Running) && !Au->Cleanup) {
+        if ((Dev->Stopping != 0 || !(Dev->Running & (1u << Au->Current))) && !Au->Cleanup) {
             return STATUS_CANCELLED;
         }
         if (AuNowMs () - Start > (LONGLONG)TimeoutMs) {
@@ -312,7 +342,6 @@ AuSmrOverlap (
 static
 NTSTATUS
 AuSmmuSetup (
-    _In_ PSIA_DEVICE Dev,
     _In_ PSIA_AUDIO Au
     )
 {
@@ -335,7 +364,6 @@ AuSmmuSetup (
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     Count = SiaRead32 (Au->Smmu, SMMU_IDR0) & 0xFFu;
-    SiaLog (Dev, "smmu idr0=0x%08x smr groups %lu", SiaRead32 (Au->Smmu, SMMU_IDR0), Count);
     if (Count == 0 || Count > SMMU_MAX_SMR) {
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
@@ -353,15 +381,11 @@ AuSmmuSetup (
         }
         if (UfsS2cr == MAXULONG && AuSmrOverlap (Smr, SMMU_UFS_STREAM, 0)) {
             UfsS2cr = SiaRead32 (Au->Smmu, SMMU_S2CR (Slot));
-            SiaLog (Dev, "smmu ufs slot %lu smr=0x%08x s2cr=0x%08x", Slot, Smr, UfsS2cr);
         }
         for (Index = 0; Index < SMMU_STREAMS; Index++) {
             Wanted = SiaStreamMatches[Index];
             if (AuSmrOverlap (Smr, Wanted & 0x7FFFu, (Wanted >> 16) & 0x7FFFu)) {
-                SiaLog (Dev, "smmu stream 0x%x already in slot %lu smr=0x%08x s2cr=0x%08x",
-                        (Wanted & 0x7FFFu), Slot, Smr, SiaRead32 (Au->Smmu, SMMU_S2CR (Slot)));
                 if (Smr != Wanted || Au->SmmuSlot[Index] != MAXULONG) {
-                    SiaLog (Dev, "smmu overlapping stream configuration, refusing slot %lu", Slot);
                     return STATUS_DEVICE_CONFIGURATION_ERROR;
                 }
                 Au->SmmuSlot[Index] = Slot;
@@ -369,7 +393,6 @@ AuSmmuSetup (
         }
     }
     if (UfsS2cr == MAXULONG) {
-        SiaLog (Dev, "smmu ufs stream 0x%x not found", SMMU_UFS_STREAM);
         return STATUS_NOT_FOUND;
     }
     for (Slot = min (Count, SMMU_ALLOC_LIMIT); Slot-- > 0 && FreeCount < SMMU_STREAMS;) {
@@ -385,13 +408,11 @@ AuSmmuSetup (
             ActiveS2cr = SiaRead32 (Au->Smmu, SMMU_S2CR (Slot));
             if (SiaRead32 (Au->Smmu, SMMU_SMR (Slot)) != Wanted ||
                 (ActiveS2cr != UfsS2cr && ((ActiveS2cr >> 16) & 3u) != 1u)) {
-                SiaLog (Dev, "smmu existing slot %lu is owned by another configuration", Slot);
                 return STATUS_DEVICE_CONFIGURATION_ERROR;
             }
             continue;
         }
         if (FreeUsed >= FreeCount) {
-            SiaLog (Dev, "smmu no free smr for stream 0x%x", (Wanted & 0x7FFFu));
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         Slot = FreeSlots[FreeUsed++];
@@ -401,7 +422,6 @@ AuSmmuSetup (
         if ((Au->SmmuSmr[Index] & SMMU_SMR_VALID) != 0 || SavedS2cr == MAXULONG ||
             SiaRead32 (Au->Smmu, SMMU_SMR (Slot)) != Au->SmmuSmr[Index] ||
             SiaRead32 (Au->Smmu, SMMU_S2CR (Slot)) != SavedS2cr) {
-            SiaLog (Dev, "smmu slot %lu changed during allocation", Slot);
             return STATUS_DEVICE_BUSY;
         }
         Au->SmmuActiveS2cr = UfsS2cr;
@@ -412,8 +432,6 @@ AuSmmuSetup (
         }
         KeMemoryBarrier ();
         SiaWrite32 (Au->Smmu, SMMU_SMR (Slot), Wanted);
-        SiaLog (Dev, "smmu slot %lu stream 0x%x mask 0x%x: smr=0x%08x s2cr=0x%08x", Slot, (Wanted & 0x7FFFu), ((Wanted >> 16) & 0x7FFFu),
-                SiaRead32 (Au->Smmu, SMMU_SMR (Slot)), SiaRead32 (Au->Smmu, SMMU_S2CR (Slot)));
         if (SiaRead32 (Au->Smmu, SMMU_SMR (Slot)) != Wanted || SiaRead32 (Au->Smmu, SMMU_S2CR (Slot)) != UfsS2cr) {
             return STATUS_IO_DEVICE_ERROR;
         }
@@ -424,7 +442,6 @@ AuSmmuSetup (
 static
 VOID
 AuSmmuRestore (
-    _In_ PSIA_DEVICE Dev,
     _In_ PSIA_AUDIO Au
     )
 {
@@ -437,18 +454,14 @@ AuSmmuRestore (
             continue;
         }
         if (Au->Handle || Au->MapPending) {
-            SiaLog (Dev, "smmu slot %lu retained while ADSP may own shared memory", Slot);
             continue;
         }
         if (SiaRead32 (Au->Smmu, SMMU_SMR (Slot)) != SiaStreamMatches[Index] ||
             SiaRead32 (Au->Smmu, SMMU_S2CR (Slot)) != Au->SmmuActiveS2cr) {
-            SiaLog (Dev, "smmu slot %lu ownership changed, leaving it untouched", Slot);
             continue;
         }
         SiaWrite32 (Au->Smmu, SMMU_SMR (Slot), Au->SmmuSmr[Index]);
-        SiaLog (Dev, "smmu slot %lu released without writing inactive S2CR", Slot);
     }
-    SiaLog (Dev, "smmu restored");
     MmUnmapIoSpace (Au->Smmu, SMMU_MAP_SIZE);
     Au->Smmu = NULL;
 }
@@ -474,9 +487,6 @@ AuPins (
         }
     }
     Au->PinsOn = On;
-    SiaLog (Dev, "i2s pins %s: gpio121=0x%x gpio122=0x%x gpio123=0x%x gpio124=0x%x", On ? "active" : "restored",
-            SiaRead32 (Dev->Tlmm, 121u * TLMM_STRIDE), SiaRead32 (Dev->Tlmm, 122u * TLMM_STRIDE),
-            SiaRead32 (Dev->Tlmm, 123u * TLMM_STRIDE), SiaRead32 (Dev->Tlmm, 124u * TLMM_STRIDE));
 }
 
 static
@@ -500,8 +510,6 @@ AuMap (
     *(ULONG UNALIGNED *)(Packet + 40) = SHM_SIZE;
     Au->MapPending = TRUE;
     Result = AuTransact (Dev, Au, Packet, sizeof (Packet), APM_CMD_RSP_SHARED_MEM_MAP_REGIONS, 2000, &Status, &Handle);
-    SiaLog (Dev, "apm map shm 0x%llx size 0x%x: 0x%08x status 0x%x handle 0x%08x",
-            Au->ShmPhys.QuadPart, SHM_SIZE, Result, Status, Handle);
     if (!NT_SUCCESS (Result)) {
         return Result;
     }
@@ -531,7 +539,6 @@ AuUnmap (
     SiaGprHeader (Packet, sizeof (Packet), GPR_PORT_STREAM, GPR_PORT_APM, GPR_TOKEN_UNMAP, APM_CMD_SHARED_MEM_UNMAP_REGIONS);
     *(ULONG UNALIGNED *)(Packet + 24) = Au->Handle;
     Result = AuTransact (Dev, Au, Packet, sizeof (Packet), 0, 2000, &Status, NULL);
-    SiaLog (Dev, "apm unmap handle 0x%08x: 0x%08x status 0x%x", Au->Handle, Result, Status);
     if (NT_SUCCESS (Result) && Status == 0) {
         Au->Handle = 0;
         Au->MapPending = FALSE;
@@ -567,8 +574,6 @@ AuClock (
     }
     Result = AuTransact (Dev, Au, Packet, Length, Enable ? PRM_CMD_RSP_REQUEST_HW_RSC : PRM_CMD_RSP_RELEASE_HW_RSC,
                          2000, &Status, NULL);
-    SiaLog (Dev, "prm %s sec mi2s ibit %u Hz: 0x%08x status 0x%x", Enable ? "request" : "release",
-            CLOCK_SEC_MI2S_HZ, Result, Status);
     if (!NT_SUCCESS (Result)) {
         return Result;
     }
@@ -580,7 +585,7 @@ AuClock (
 }
 
 static NTSTATUS
-AuLoadReplay (PSIA_DEVICE Dev, PUCHAR *Blob, ULONG *Size)
+AuLoadReplay (BOOLEAN Capture, PUCHAR *Blob, ULONG *Size)
 {
     HANDLE File;
     OBJECT_ATTRIBUTES Attributes;
@@ -592,18 +597,16 @@ AuLoadReplay (PSIA_DEVICE Dev, PUCHAR *Blob, ULONG *Size)
 
     *Blob = NULL;
     *Size = 0;
-    RtlInitUnicodeString (&Name, SIA_REPLAY_PATH);
+    RtlInitUnicodeString (&Name, Capture ? L"\\SystemRoot\\System32\\drivers\\wcd9395\\replay.bin" : SIA_REPLAY_PATH);
     InitializeObjectAttributes (&Attributes, &Name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = ZwCreateFile (&File, GENERIC_READ | SYNCHRONIZE, &Attributes, &Iosb, NULL, FILE_ATTRIBUTE_NORMAL,
                           FILE_SHARE_READ, FILE_OPEN, FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, NULL, 0);
     if (!NT_SUCCESS (Status)) {
-        SiaLog (Dev, "replay.bin open failed 0x%08x", Status);
         return Status;
     }
     Status = ZwQueryInformationFile (File, &Iosb, &Info, sizeof (Info), FileStandardInformation);
     if (!NT_SUCCESS (Status)) goto close;
     if (Info.EndOfFile.QuadPart < 8 || Info.EndOfFile.QuadPart > RPL_MAX_SIZE) {
-        SiaLog (Dev, "replay.bin bad size %lld", Info.EndOfFile.QuadPart);
         Status = STATUS_INVALID_IMAGE_FORMAT;
         goto close;
     }
@@ -617,10 +620,6 @@ AuLoadReplay (PSIA_DEVICE Dev, PUCHAR *Blob, ULONG *Size)
     if (NT_SUCCESS (Status)) Read = (ULONG)Iosb.Information;
     if (NT_SUCCESS (Status) && (Read != *Size || *(ULONG UNALIGNED *)*Blob != RPL_MAGIC))
         Status = STATUS_INVALID_IMAGE_FORMAT;
-    if (NT_SUCCESS (Status))
-        SiaLog (Dev, "replay.bin %lu bytes, %lu records", *Size, *(ULONG UNALIGNED *)(*Blob + 4));
-    else
-        SiaLog (Dev, "replay.bin read failed 0x%08x (%lu/%lu bytes)", Status, Read, *Size);
 close:
     ZwClose (File);
     if (!NT_SUCCESS (Status)) {
@@ -631,86 +630,44 @@ close:
     return Status;
 }
 
-static
-NTSTATUS
-AuSubmit (
-    _In_ PSIA_DEVICE Dev,
-    _In_ PSIA_AUDIO Au,
-    _In_ ULONG Index
-    )
+static NTSTATUS
+AuSubmit (PSIA_DEVICE Dev, PSIA_AUDIO Au, ULONG Direction, ULONG Index)
 {
-    UCHAR Packet[SIA_GPR_HEADER + 44];
-    ULONGLONG Address = Au->DspAddress + (ULONGLONG)Index * PCM_STRIDE;
-    NTSTATUS Status;
-    ULONG First = min (SIA_PCM_BYTES, Dev->PcmSize - Dev->ReadOffset);
-
-    KeMemoryBarrier ();
-    AuShmWrite (Au, Index * PCM_STRIDE, Dev->Pcm + Dev->ReadOffset, First);
-    if (First < SIA_PCM_BYTES) AuShmWrite (Au, Index * PCM_STRIDE + First, Dev->Pcm, SIA_PCM_BYTES - First);
-    if (Au->Sent % 50 == 0) {
-        ULONG Offset;
-        ULONG Active = 0;
-        ULONG RingActive = 0;
-        for (Offset = 0; Offset < SIA_PCM_BYTES; Offset += 4)
-            Active |= SiaRead32 (Au->Shm, Index * PCM_STRIDE + Offset);
-        for (Offset = 0; Offset < Dev->PcmSize; Offset += 4)
-            RingActive |= *(volatile ULONG *)(Dev->Pcm + Offset);
-        SiaLog (Dev, "pcm payload: packet %lu active bits 0x%08x ring bits 0x%08x offset %lu played %lld",
-                Au->Sent, Active, RingActive, Dev->ReadOffset, Dev->PlayedBytes);
+    UCHAR Packet[SIA_GPR_HEADER + 44] = {0};
+    PSIA_FLOW Flow = &Au->Flow[Direction];
+    PSIA_PCM Pcm = &Dev->Stream[Direction];
+    ULONGLONG Address = Au->DspAddress + Direction * 0x10000u + (ULONGLONG)Index * PCM_STRIDE;
+    ULONG Length = Direction ? 56 : sizeof(Packet);
+    if (!Direction) {
+        ULONG First = min(Flow->Bytes, Pcm->PcmSize - Pcm->ReadOffset);
+        KeMemoryBarrier();
+        AuShmWrite(Au, Index * PCM_STRIDE, Pcm->Pcm + Pcm->ReadOffset, First);
+        if (First < Flow->Bytes) AuShmWrite(Au, Index * PCM_STRIDE + First, Pcm->Pcm, Flow->Bytes - First);
+        Pcm->ReadOffset = (Pcm->ReadOffset + Flow->Bytes) % Pcm->PcmSize;
     }
-    Dev->ReadOffset = (Dev->ReadOffset + SIA_PCM_BYTES) % Dev->PcmSize;
-    RtlZeroMemory (Packet, sizeof (Packet));
-    SiaGprHeader (Packet, sizeof (Packet), GPR_PORT_STREAM, GPR_PORT_WR_EP, Index, DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2);
+    SiaGprHeader(Packet, Length, Flow->Port, Flow->Endpoint, Index, Direction ? 0x0400100Bu : DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2);
     *(ULONG UNALIGNED *)(Packet + 24) = (ULONG)Address;
     *(ULONG UNALIGNED *)(Packet + 28) = (ULONG)(Address >> 32);
     *(ULONG UNALIGNED *)(Packet + 32) = Au->Handle;
-    *(ULONG UNALIGNED *)(Packet + 36) = SIA_PCM_BYTES;
-    KeMemoryBarrier ();
-    Au->Busy[Index] = TRUE;
-    Status = SiaGprSendRaw (Dev, Packet, sizeof (Packet));
-    if (!NT_SUCCESS (Status)) {
-        Au->Busy[Index] = FALSE;
-        SiaLog (Dev, "pcm buffer %lu send failed 0x%08x", Index, Status);
-        return Status;
-    }
-    Au->Sent++;
-    return STATUS_SUCCESS;
+    *(ULONG UNALIGNED *)(Packet + 36) = Flow->Bytes;
+    KeMemoryBarrier();
+    Flow->Busy[Index] = TRUE;
+    NTSTATUS Status = SiaGprSendRaw(Dev, Packet, Length);
+    if (!NT_SUCCESS(Status)) Flow->Busy[Index] = FALSE;
+    return Status;
 }
 
-static
-VOID
-AuAmpsStart (
-    _In_ PSIA_DEVICE Dev,
-    _In_ PSIA_AUDIO Au,
-    _In_reads_bytes_ (Length) const UCHAR *Data,
-    _In_ ULONG Length
-    )
+static VOID
+AuAmpsStart(PSIA_DEVICE Dev, PSIA_AUDIO Au, const UCHAR *Data, ULONG Length)
 {
-    ULONG Index;
-    ULONG Failures = 0;
-    NTSTATUS Status;
-
-    for (Index = 0; Index + 4 <= Length; Index += 4) {
-        if (Index >= 4 && Data[Index] != Data[Index - 4]) {
-            SiaSleep (3);
-        }
-        Status = SiaRegWrite (Dev, Data[Index], Data[Index + 1], *(const USHORT UNALIGNED *)(Data + Index + 2));
-        if (!NT_SUCCESS (Status)) {
-            Failures++;
-            if (Failures <= 4) {
-                SiaLog (Dev, "amp 0x%02x reg 0x%02x write failed 0x%08x", Data[Index], Data[Index + 1], Status);
-            }
-        }
-        if (Data[Index + 1] == 0x31) {
-            SiaSleep (1);
-        }
-    }
     Au->AmpsOn = TRUE;
-    SiaLog (Dev, "amp start: %lu writes, %lu failed", Length / 4, Failures);
-    for (Index = 0; Index < ARRAYSIZE (SiaAmpAddress); Index++) {
-        USHORT Value = 0;
-        Status = SiaRegRead (Dev, SiaAmpAddress[Index], 0x13, &Value);
-        SiaLog (Dev, "amp 0x%02x power readback 0x%04x status 0x%08x", SiaAmpAddress[Index], Value, Status);
+    for(ULONG Index = 0; Index + 4 <= Length; Index += 4) {
+        if(Index >= 4 && Data[Index] != Data[Index - 4]) SiaSleep(3);
+        if(!NT_SUCCESS(SiaRegWrite(Dev, Data[Index], Data[Index + 1], *(const USHORT UNALIGNED *)(Data + Index + 2)))) {
+            Au->Flow[Au->Current].Failed = TRUE;
+            break;
+        }
+        if(Data[Index + 1] == 0x31) SiaSleep(1);
     }
 }
 
@@ -733,82 +690,21 @@ AuAmpsMute (
         SiaSleep (2);
     }
     Au->AmpsOn = FALSE;
-    SiaLog (Dev, "amps muted");
 }
 
 static VOID
 AuStreamStart (PSIA_DEVICE Dev, PSIA_AUDIO Au, const UCHAR *Data, ULONG Length)
 {
-    ULONG Index;
+    PSIA_FLOW Flow = &Au->Flow[Au->Current];
+    ULONG Frame = Au->Current ? SIA_CAPTURE_FRAME : SIA_PCM_FRAME;
     if (Length != 16 || *(const ULONG UNALIGNED *)Data != 0 ||
         *(const ULONG UNALIGNED *)(Data + 4) != PCM_STRIDE ||
-        *(const ULONG UNALIGNED *)(Data + 8) != SIA_PCM_BYTES ||
-        *(const ULONG UNALIGNED *)(Data + 12) != SIA_PCM_FRAME) {
-        Au->Failed = TRUE;
-        return;
-    }
-    Au->Streaming = TRUE;
-    Au->LastDone = AuNowMs ();
-    for (Index = 0; Index < PCM_BUFFERS; Index++) {
-        if (!NT_SUCCESS (AuSubmit (Dev, Au, Index))) {
-            Au->Failed = TRUE;
-            break;
-        }
-    }
-    SiaLog (Dev, "Windows PCM started: 48000 Hz, stereo, packed 24-bit, software volume by Windows");
-}
-
-static VOID
-AuStreamRun (PSIA_DEVICE Dev, PSIA_AUDIO Au)
-{
-    ULONG Index;
-    while (Au->Streaming && Dev->Running && !Dev->Stopping && !Au->Failed) {
-        AuPump (Dev, Au, NULL);
-        for (Index = 0; Index < PCM_BUFFERS; Index++) {
-            if (!Au->Busy[Index]) {
-                if (!NT_SUCCESS (AuSubmit (Dev, Au, Index))) Au->Failed = TRUE;
-            }
-        }
-        if (AuNowMs () - Au->LastDone > 3000 || Au->BadStatus) Au->Failed = TRUE;
-        SiaSleep (1);
-    }
-    Au->Streaming = FALSE;
-    AuAmpsMute (Dev, Au);
-    SiaLog (Dev, "Windows PCM stopped: sent %lu done %lu bad %lu", Au->Sent, Au->Done, Au->BadStatus);
-}
-
-static
-VOID
-AuParamErrors (
-    _In_ PSIA_DEVICE Dev,
-    _In_ PSIA_AUDIO Au,
-    _In_ ULONG Offset,
-    _In_ ULONG Size
-    )
-{
-    ULONG Position = 0;
-    ULONG Reported = 0;
-    ULONG Base;
-    ULONG ParamSize;
-    ULONG Error;
-
-    while (Position + 16 <= Size && Reported < 16) {
-        Base = Offset + Position;
-        if (Base + 16 > SHM_SIZE) {
-            break;
-        }
-        ParamSize = SiaRead32 (Au->Shm, Base + 8);
-        Error = SiaRead32 (Au->Shm, Base + 12);
-        if (Error != 0) {
-            SiaLog (Dev, "  param miid 0x%x pid 0x%08x size %lu error 0x%x", SiaRead32 (Au->Shm, Base), SiaRead32 (Au->Shm, Base + 4),
-                    ParamSize, Error);
-            Reported++;
-        }
-        if (ParamSize > Size) {
-            break;
-        }
-        Position += 16 + ((ParamSize + 7) & ~7u);
-    }
+        *(const ULONG UNALIGNED *)(Data + 8) != Flow->Bytes ||
+        *(const ULONG UNALIGNED *)(Data + 12) != Frame) { Flow->Failed = TRUE; return; }
+    Flow->Streaming = TRUE;
+    Flow->LastDone = AuNowMs();
+    for (ULONG Index = 0; Index < PCM_BUFFERS; Index++)
+        if (!NT_SUCCESS(AuSubmit(Dev, Au, Au->Current, Index))) Flow->Failed = TRUE;
 }
 
 static
@@ -816,7 +712,6 @@ VOID
 AuReplayCmd (
     _In_ PSIA_DEVICE Dev,
     _In_ PSIA_AUDIO Au,
-    _In_ ULONG Record,
     _In_reads_bytes_ (Length) const UCHAR *Data,
     _In_ ULONG Length,
     _In_ ULONG Flags
@@ -829,234 +724,211 @@ AuReplayCmd (
     ULONG OobSize = 0;
     ULONG Status;
     ULONGLONG Address = 0;
-    LONGLONG Start;
     NTSTATUS Result;
 
     if (Length < SIA_GPR_HEADER || Length > SIA_GPR_MAX) {
-        SiaLog (Dev, "rpl %lu bad cmd length %lu", Record, Length);
         return;
     }
     RtlCopyMemory (Packet, Data, Length);
     Header = ((Packet[0] >> 4) & 0xFu) * 4u;
     if (Header != SIA_GPR_HEADER || (*(const ULONG UNALIGNED *)Packet >> 8) != Length) {
-        SiaLog (Dev, "rpl %lu invalid gpr header", Record);
-        Au->Failed = TRUE;
+        Au->Flow[Au->Current].Failed = TRUE;
         return;
     }
     Opcode = *(ULONG UNALIGNED *)(Packet + 20);
     if ((Flags & RPL_FLAG_OOB) != 0) {
         if (Length < Header + 16) {
-            SiaLog (Dev, "rpl %lu oob cmd too short", Record);
             return;
         }
         OobOffset = *(ULONG UNALIGNED *)(Packet + Header);
         OobSize = *(ULONG UNALIGNED *)(Packet + Header + 12);
-        if (OobOffset > SHM_SIZE || OobSize > SHM_SIZE - OobOffset) {
-            SiaLog (Dev, "rpl %lu oob command range invalid", Record);
-            Au->Failed = TRUE;
+        if ((OobOffset & 3u) || OobOffset > 0x10000u || OobSize > 0x10000u - OobOffset) {
+            Au->Flow[Au->Current].Failed = TRUE;
             return;
         }
-        Address = Au->DspAddress + OobOffset;
+        Address = Au->DspAddress + Au->Current * 0x10000u + OobOffset;
         *(ULONG UNALIGNED *)(Packet + Header) = (ULONG)Address;
         *(ULONG UNALIGNED *)(Packet + Header + 4) = (ULONG)(Address >> 32);
         *(ULONG UNALIGNED *)(Packet + Header + 8) = Au->Handle;
     }
 
-    SiaLog (Dev, "rpl %lu begin op 0x%08x%s dsp address 0x%llx size %lu", Record, Opcode,
-            (Flags & RPL_FLAG_OOB) != 0 ? " oob" : " inline", (Flags & RPL_FLAG_OOB) != 0 ? Address : 0, OobSize);
-    Start = AuNowMs ();
     Result = AuTransact (Dev, Au, Packet, Length, 0, 3000, &Status, NULL);
-    SiaLog (Dev, "rpl %2lu op 0x%08x dst 0x%x tok 0x%x len %lu%s: 0x%08x status 0x%x %lld ms", Record, Opcode,
-            *(ULONG UNALIGNED *)(Packet + 12), *(ULONG UNALIGNED *)(Packet + 16), Length,
-            (Flags & RPL_FLAG_OOB) != 0 ? " oob" : "", Result, Status, AuNowMs () - Start);
     if (NT_SUCCESS (Result) && Status == 0) {
+        if (Opcode == 0x01001000u) Au->Flow[Au->Current].Opened = TRUE;
         return;
-    }
-    if ((Flags & RPL_FLAG_OOB) != 0) {
-        AuParamErrors (Dev, Au, OobOffset, OobSize);
     }
     if (!Au->Cleanup) {
-        Au->Failed = TRUE;
+        Au->Flow[Au->Current].Failed = TRUE;
     }
 }
 
-static
-VOID
-AuReplay (
-    _In_ PSIA_DEVICE Dev,
-    _In_ PSIA_AUDIO Au,
-    _In_reads_bytes_ (Size) const UCHAR *Blob,
-    _In_ ULONG Size
-    )
+static VOID
+AuReplay (PSIA_DEVICE Dev, PSIA_AUDIO Au)
 {
-    ULONG Count = *(const ULONG UNALIGNED *)(Blob + 4);
-    ULONG Offset = 8;
-    ULONG Record;
-    ULONG Type;
-    ULONG Flags;
-    ULONG Length;
-    const UCHAR *Data;
-    ULONG OobOffset;
-
-    for (Record = 0; Record < Count; Record++) {
-        if (Offset + 8 > Size) {
-            SiaLog (Dev, "rpl truncated at record %lu", Record);
-            break;
-        }
-        Type = *(const USHORT UNALIGNED *)(Blob + Offset);
-        Flags = *(const USHORT UNALIGNED *)(Blob + Offset + 2);
-        Length = *(const ULONG UNALIGNED *)(Blob + Offset + 4);
-        Data = Blob + Offset + 8;
-        if (Length > Size - Offset - 8) {
-            SiaLog (Dev, "rpl record %lu length %lu out of range", Record, Length);
-            break;
-        }
-        Offset += 8 + ((Length + 3) & ~3u);
-        if ((Au->Failed || Dev->Stopping != 0 || !Dev->Running) && !Au->Cleanup && Type != RPL_STREAM && Type != RPL_AMP) {
-            continue;
-        }
-
+    PSIA_FLOW Flow = &Au->Flow[Au->Current];
+    ULONG Count = *(const ULONG UNALIGNED *)(Flow->Blob + 4);
+    while (Flow->Record < Count) {
+        ULONG Offset = Flow->Offset, Size = Flow->BlobSize;
+        if (Offset > Size || Size - Offset < 8) { Flow->Failed = TRUE; return; }
+        ULONG Type = *(const USHORT UNALIGNED *)(Flow->Blob + Offset);
+        ULONG Flags = *(const USHORT UNALIGNED *)(Flow->Blob + Offset + 2);
+        ULONG Length = *(const ULONG UNALIGNED *)(Flow->Blob + Offset + 4);
+        const UCHAR *Data = Flow->Blob + Offset + 8;
+        if (Length > Size - Offset - 8 || ((Length + 3) & ~3u) > Size - Offset - 8) { Flow->Failed = TRUE; return; }
+        if (Type == RPL_CMD && Flow->Streaming) return;
+        Flow->Offset += 8 + ((Length + 3) & ~3u);
+        Flow->Record++;
+        if ((Flow->Failed || Dev->Stopping || !(Dev->Running & (1u << Au->Current))) && !Au->Cleanup && Type != RPL_STREAM && Type != RPL_AMP) continue;
         switch (Type) {
         case RPL_OOB:
-            if (Length < 4) {
-                break;
-            }
-            OobOffset = *(const ULONG UNALIGNED *)Data;
-            if ((OobOffset & 3u) != 0 || OobOffset > SHM_SIZE || ((Length - 4 + 3) & ~3u) > SHM_SIZE - OobOffset) {
-                SiaLog (Dev, "rpl %lu oob 0x%x+%lu out of range", Record, OobOffset, Length - 4);
-                break;
-            }
-            SiaLog (Dev, "rpl %lu oob write offset 0x%x length %lu", Record, OobOffset, Length - 4);
-            AuShmWrite (Au, OobOffset, Data + 4, Length - 4);
+            if (Length < 4) { Flow->Failed = TRUE; break; }
+            Offset = *(const ULONG UNALIGNED *)Data;
+            if ((Offset & 3u) || Offset > 0x10000u || Length - 4 > 0x10000u - Offset) { Flow->Failed = TRUE; break; }
+            AuShmWrite(Au, Au->Current * 0x10000u + Offset, Data + 4, Length - 4);
             break;
-        case RPL_CMD:
-            if (Au->Streaming) {
-                AuStreamRun (Dev, Au);
-            }
-            AuReplayCmd (Dev, Au, Record, Data, Length, Flags);
-            break;
+        case RPL_CMD: AuReplayCmd(Dev, Au, Data, Length, Flags); break;
         case RPL_STREAM:
-            if (Au->Failed || Dev->Stopping != 0 || !Dev->Running) {
-                SiaLog (Dev, "rpl %lu stream skipped after failure", Record);
-            } else {
-                AuStreamStart (Dev, Au, Data, Length);
-            }
+            if (!Flow->Failed && !Dev->Stopping && (Dev->Running & (1u << Au->Current))) AuStreamStart(Dev, Au, Data, Length);
             break;
         case RPL_AMP:
-            if (Au->Failed || Dev->Stopping != 0 || !Dev->Running) {
-                SiaLog (Dev, "rpl %lu amp start skipped after failure", Record);
-            } else {
-                AuAmpsStart (Dev, Au, Data, Length);
-            }
+            if (!Au->Current && !Flow->Failed && !Dev->Stopping && (Dev->Running & 1)) AuAmpsStart(Dev, Au, Data, Length);
             Au->Cleanup = TRUE;
             break;
-        case RPL_DELAY:
-            if (Length >= 4) {
-                SiaSleep (*(const ULONG UNALIGNED *)Data);
-            }
-            break;
-        default:
-            SiaLog (Dev, "rpl %lu unknown type %lu", Record, Type);
-            break;
+        case RPL_DELAY: if (Length == 4) SiaSleep(*(const ULONG UNALIGNED *)Data); else Flow->Failed = TRUE; break;
+        default: Flow->Failed = TRUE; break;
         }
-    }
-    if (Au->Streaming) {
-        AuStreamRun (Dev, Au);
     }
 }
 
-VOID
-SiaAudioPlay (
-    _In_ PSIA_DEVICE Dev
-    )
+static NTSTATUS
+AuMicClocks(PSIA_DEVICE Dev, PSIA_AUDIO Au, BOOLEAN Enable)
 {
-    PSIA_AUDIO Au;
-    PUCHAR Blob = NULL;
-    ULONG BlobSize = 0;
-    PHYSICAL_ADDRESS Lowest;
-    PHYSICAL_ADDRESS Highest;
-    PHYSICAL_ADDRESS Boundary;
-    NTSTATUS Status;
+    const ULONG Param[] = {0x08001A6Eu, 0x08001032u, PARAM_ID_RSC_AUDIO_HW_CLK, PARAM_ID_RSC_AUDIO_HW_CLK};
+    const ULONG Value[] = {1, 2, 0x30C, 0x307};
+    for (ULONG I = 0; I < 4; I++) {
+        ULONG Index = Enable ? I : 3 - I;
+        if (!Enable && !(Au->MicClocks & (1u << Index))) continue;
+        ULONG Length = Index < 2 ? 60 : Enable ? 76 : 64, Status;
+        UCHAR Packet[76] = {0};
+        SiaGprHeader(Packet,Length,7,2,0x6300+Index,Enable?PRM_CMD_REQUEST_HW_RSC:PRM_CMD_RELEASE_HW_RSC);
+        *(ULONG UNALIGNED *)(Packet+36)=Length-40;
+        *(ULONG UNALIGNED *)(Packet+40)=2;
+        *(ULONG UNALIGNED *)(Packet+44)=Param[Index];
+        *(ULONG UNALIGNED *)(Packet+48)=Length-56;
+        *(ULONG UNALIGNED *)(Packet+56)=Index<2?Value[Index]:1;
+        if(Index>=2) *(ULONG UNALIGNED *)(Packet+60)=Value[Index];
+        if(Index>=2 && Enable) { *(ULONG UNALIGNED *)(Packet+64)=19200000; *(ULONG UNALIGNED *)(Packet+68)=1; }
+        NTSTATUS Result=AuTransact(Dev,Au,Packet,Length,Enable?PRM_CMD_RSP_REQUEST_HW_RSC:PRM_CMD_RSP_RELEASE_HW_RSC,2000,&Status,NULL);
+        if(!NT_SUCCESS(Result)||Status) { if(Enable) return NT_SUCCESS(Result)?STATUS_DEVICE_NOT_READY:Result; }
+        else if(Enable) Au->MicClocks|=1u<<Index;
+        else Au->MicClocks&=~(1u<<Index);
+    }
+    return STATUS_SUCCESS;
+}
 
-    if (Dev->Link == NULL || Dev->Tlmm == NULL) {
-        return;
-    }
-    Au = (PSIA_AUDIO)ExAllocatePool2 (POOL_FLAG_NON_PAGED, sizeof (SIA_AUDIO), SIA_AUDIO_TAG);
-    if (Au == NULL) {
-        SiaLog (Dev, "audio context allocation failed");
-        return;
-    }
+static VOID AuService(PSIA_DEVICE Dev, PVOID Au) { AuPump(Dev,(PSIA_AUDIO)Au,NULL); }
 
-    Status = AuLoadReplay (Dev, &Blob, &BlobSize);
-    if (!NT_SUCCESS (Status)) {
-        goto done;
+static VOID
+AuStopFlow(PSIA_DEVICE Dev, PSIA_AUDIO Au)
+{
+    PSIA_FLOW Flow=&Au->Flow[Au->Current];
+    Au->Cleanup=TRUE;
+    Flow->Streaming=FALSE;
+    Flow->Failed=TRUE;
+    if(Flow->Blob && Flow->Opened) {
+        if(Flow->Offset < Flow->CleanupOffset) { Flow->Offset=Flow->CleanupOffset; Flow->Record=Flow->CleanupRecord; }
+        AuReplay(Dev,Au);
     }
+    if(Au->Current) {
+        if(Au->Mic) { SiaMicStop(Dev,Au->Mic); Au->Mic=NULL; }
+        AuMicClocks(Dev,Au,FALSE);
+    } else {
+        AuAmpsMute(Dev,Au);
+        if(Au->ClockOn) AuClock(Dev,Au,FALSE);
+        if(Au->PinsOn) AuPins(Dev,Au,FALSE);
+    }
+    if(Flow->Blob) ExFreePoolWithTag(Flow->Blob,SIA_AUDIO_TAG);
+    RtlZeroMemory(Flow,sizeof(*Flow));
+    Au->Cleanup=FALSE;
+}
 
-    Status = AuSmmuSetup (Dev, Au);
-    SiaLog (Dev, "smmu setup 0x%08x", Status);
-    if (!NT_SUCCESS (Status)) {
-        goto done;
+VOID
+SiaAudioRun(PSIA_DEVICE Dev)
+{
+    PSIA_AUDIO Au=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*Au),SIA_AUDIO_TAG);
+    NTSTATUS Status=STATUS_INSUFFICIENT_RESOURCES;
+    if(!Au) goto failed;
+    Status=AuSmmuSetup(Au);
+    if(!NT_SUCCESS(Status)) goto done;
+    PHYSICAL_ADDRESS Low={0}, High, Boundary={0}; High.QuadPart=0xffffffffLL;
+    Au->Shm=MmAllocateContiguousMemorySpecifyCache(SHM_SIZE,Low,High,Boundary,MmNonCached);
+    if(!Au->Shm){Status=STATUS_INSUFFICIENT_RESOURCES;goto done;}
+    Au->ShmPhys=MmGetPhysicalAddress(Au->Shm);
+    if(Au->ShmPhys.HighPart || (ULONGLONG)Au->ShmPhys.QuadPart+SHM_SIZE>0x100000000ULL){Status=STATUS_CONFLICTING_ADDRESSES;goto done;}
+    Au->DspAddress=(ULONGLONG)Au->ShmPhys.LowPart|((ULONGLONG)SMMU_LPASS_SID<<32);
+    AuShmWrite(Au,0,NULL,SHM_SIZE);
+    Au->Current=(Dev->Running&1)?0:1;
+    Status=AuMap(Dev,Au);
+    if(!NT_SUCCESS(Status)) goto done;
+    while(Dev->Running && !Dev->Stopping) {
+        for(ULONG Direction=0;Direction<2;Direction++) {
+            PSIA_FLOW Flow=&Au->Flow[Direction]; PSIA_PCM Pcm=&Dev->Stream[Direction];
+            Au->Current=Direction;
+            if((Dev->Running&(1u<<Direction)) && !Flow->Blob) {
+                Flow->Bytes=Direction?SIA_CAPTURE_BYTES:SIA_PCM_BYTES;
+                Flow->Port=Direction?0x2011u:GPR_PORT_STREAM;
+                Flow->Endpoint=Direction?0x46F7u:GPR_PORT_WR_EP;
+                Flow->Offset=8;
+                NTSTATUS StartStatus=AuLoadReplay((BOOLEAN)Direction,&Flow->Blob,&Flow->BlobSize);
+                if(NT_SUCCESS(StartStatus)) {
+                    ULONG Offset=8, Count=*(ULONG UNALIGNED *)(Flow->Blob+4);
+                    for(ULONG I=0;I<Count;I++) {
+                        if(Offset>Flow->BlobSize || Flow->BlobSize-Offset<8) { StartStatus=STATUS_INVALID_IMAGE_FORMAT; break; }
+                        ULONG Length=*(ULONG UNALIGNED *)(Flow->Blob+Offset+4);
+                        if(Length>Flow->BlobSize-Offset-8 || ((Length+3)&~3u)>Flow->BlobSize-Offset-8) { StartStatus=STATUS_INVALID_IMAGE_FORMAT; break; }
+                        ULONG Type=*(USHORT UNALIGNED *)(Flow->Blob+Offset);
+                        Offset+=8+((Length+3)&~3u);
+                        if(Type==RPL_AMP) { Flow->CleanupOffset=Offset; Flow->CleanupRecord=I+1; }
+                    }
+                    if(!Flow->CleanupOffset) StartStatus=STATUS_INVALID_IMAGE_FORMAT;
+                }
+                if(NT_SUCCESS(StartStatus) && Direction) { StartStatus=AuMicClocks(Dev,Au,TRUE); if(NT_SUCCESS(StartStatus)) StartStatus=SiaMicStart(Dev,&Au->Mic,AuService,Au); }
+                if(NT_SUCCESS(StartStatus) && !Direction) { StartStatus=SiaAmpsProbe(Dev); if(NT_SUCCESS(StartStatus)) { AuPins(Dev,Au,TRUE); StartStatus=AuClock(Dev,Au,TRUE); } }
+                if(NT_SUCCESS(StartStatus)) { AuReplay(Dev,Au); if(Flow->Failed||!Flow->Streaming) StartStatus=STATUS_DEVICE_NOT_READY; }
+                Au->Cleanup=FALSE;
+                Pcm->Status=StartStatus;
+                if(!NT_SUCCESS(StartStatus)) { AuStopFlow(Dev,Au); InterlockedAnd(&Dev->Running,~(1L<<Direction)); KeSetEvent(&Pcm->IdleEvent,IO_NO_INCREMENT,FALSE); }
+                KeSetEvent(&Pcm->ReadyEvent,IO_NO_INCREMENT,FALSE);
+            }
+            if(Flow->Blob && (!(Dev->Running&(1u<<Direction)) || Flow->Failed || AuNowMs()-Flow->LastDone>3000)) {
+                if(Dev->Running&(1u<<Direction)) Pcm->Status=STATUS_IO_DEVICE_ERROR;
+                AuStopFlow(Dev,Au); InterlockedAnd(&Dev->Running,~(1L<<Direction));
+                KeSetEvent(&Pcm->IdleEvent,IO_NO_INCREMENT,FALSE);
+            }
+        }
+        AuPump(Dev,Au,NULL); SiaSleep(1);
     }
-
-    Lowest.QuadPart = 0;
-    Highest.QuadPart = 0xFFFFFFFFLL;
-    Boundary.QuadPart = 0;
-    Au->Shm = (PUCHAR)MmAllocateContiguousMemorySpecifyCache (SHM_SIZE, Lowest, Highest, Boundary, MmNonCached);
-    if (Au->Shm == NULL) {
-        SiaLog (Dev, "shm allocation failed");
-        goto done;
-    }
-    Au->ShmPhys = MmGetPhysicalAddress (Au->Shm);
-    if (Au->ShmPhys.HighPart != 0 || (ULONGLONG)Au->ShmPhys.QuadPart + SHM_SIZE > 0x100000000ull) {
-        SiaLog (Dev, "shm outside the 32-bit DMA window");
-        goto done;
-    }
-    Au->DspAddress = (ULONGLONG)Au->ShmPhys.LowPart | ((ULONGLONG)SMMU_LPASS_SID << 32);
-    AuShmWrite (Au, 0, NULL, SHM_SIZE);
-    SiaLog (Dev, "shm va %p pa 0x%llx dsp 0x%llx sid %lu size 0x%x", Au->Shm, Au->ShmPhys.QuadPart,
-            Au->DspAddress, SMMU_LPASS_SID, SHM_SIZE);
-
-    Status = AuMap (Dev, Au);
-    if (!NT_SUCCESS (Status)) {
-        goto done;
-    }
-    AuPins (Dev, Au, TRUE);
-    Status = AuClock (Dev, Au, TRUE);
-    if (!NT_SUCCESS (Status)) {
-        SiaLog (Dev, "audio aborted because i2s clock was not confirmed");
-        Au->Failed = TRUE;
-        goto done;
-    }
-
-    AuReplay (Dev, Au, Blob, BlobSize);
-
 done:
-    Au->Cleanup = TRUE;
-    if (Au->Streaming) {
-        Au->Streaming = FALSE;
+    if(Au) {
+        for(ULONG Direction=0;Direction<2;Direction++) { Au->Current=Direction; if(Au->Flow[Direction].Blob) AuStopFlow(Dev,Au); }
+        Au->Cleanup=TRUE;
+        if(Au->Handle) AuUnmap(Dev,Au);
+        if(Au->Shm) {
+            if(!Au->Handle&&!Au->MapPending) MmFreeContiguousMemorySpecifyCache(Au->Shm,SHM_SIZE,MmNonCached);
+            else Dev->RetainedDma=TRUE;
+        }
+        if(Au->Smmu) AuSmmuRestore(Au);
+        ExFreePoolWithTag(Au,SIA_AUDIO_TAG);
     }
-    AuAmpsMute (Dev, Au);
-    if (Au->ClockOn) {
-        AuClock (Dev, Au, FALSE);
+failed:
+    for(ULONG I=0;I<2;I++) {
+        if(!NT_SUCCESS(Status)) {
+            InterlockedAnd(&Dev->Running,~(1L<<I));
+            if(Dev->Stream[I].Status==STATUS_PENDING) Dev->Stream[I].Status=Status;
+        }
+        if(!(Dev->Running&(1u<<I)) || Dev->Stopping) {
+            KeSetEvent(&Dev->Stream[I].ReadyEvent,IO_NO_INCREMENT,FALSE);
+            KeSetEvent(&Dev->Stream[I].IdleEvent,IO_NO_INCREMENT,FALSE);
+        }
     }
-    if (Au->Handle) {
-        AuUnmap (Dev, Au);
-    }
-    if (Au->PinsOn) {
-        AuPins (Dev, Au, FALSE);
-    }
-    if (Au->Smmu != NULL) {
-        AuSmmuRestore (Dev, Au);
-    }
-    if (Au->Shm != NULL && !Au->Handle && !Au->MapPending) {
-        MmFreeContiguousMemorySpecifyCache (Au->Shm, SHM_SIZE, MmNonCached);
-    } else if (Au->Shm != NULL) {
-        Dev->RetainedDma = TRUE;
-        SiaLog (Dev, "shm retained until reboot because ADSP release was not confirmed: pa 0x%llx size 0x%x", Au->ShmPhys.QuadPart, SHM_SIZE);
-    }
-    if (Blob != NULL) {
-        ExFreePoolWithTag (Blob, SIA_AUDIO_TAG);
-    }
-    SiaLog (Dev, "audio play finished%s", Au->Failed ? " (graph failure)" : "");
-    ExFreePoolWithTag (Au, SIA_AUDIO_TAG);
 }

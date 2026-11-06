@@ -1,12 +1,12 @@
 /* WCN7861 PEACH CE SRNG setup and HTC/WMI event decoding. */
 #include "wcn7861.h"
+#include "hotspot.h"
 
 #define HTC_HEADER_SIZE             8
 #define HTC_MSG_READY               1
 #define HTC_MSG_CONNECT_SERVICE     2
 #define HTC_MSG_CONNECT_RESPONSE    3
 #define HTC_MSG_SETUP_COMPLETE_EXT  5
-#define HTC_SVC_RSVD_CTRL           0x0001
 #define HTC_SVC_WMI_CONTROL         0x0100
 #define HTC_SVC_HTT_DATA            0x0300
 #define HTC_FLAG_DISABLE_CREDIT     (1u << 3)
@@ -17,7 +17,6 @@
 #define WMI_TAG_INIT_CMD            74
 #define WMI_TAG_RESOURCE_CONFIG     75
 #define WMI_TAG_ARRAY_STRUCT        18
-#define WMI_SERVICE_READY_EXT_EVENT 0x4009
 #define WMI_SERVICE_READY_EXT2_EVENT 0x4022
 #define WMI_SERVICE_READY_EVENT     1
 #define WMI_READY_EVENT             2
@@ -130,7 +129,6 @@ WcnCeInitialize (
             return Status;
         }
         if (!Ring->Source) {
-            Ring->BufferCount = Ring->Entries;
             Status = WcnDmaAllocAligned (Dev, Ring->Entries * WCN_CE_RX_BUFFER_SIZE,
                                          0xFFF, &Ring->Buffers);
             if (!NT_SUCCESS (Status)) {
@@ -174,33 +172,11 @@ WcnCeInitialize (
             }
         }
         Ring->Active = TRUE;
-        WcnLog (Dev, "ce%u %s: entries %u desc %u bytes dma 0x%llx", Pipe,
-                Ring->Source ? "source" : "destination", Ring->Entries,
-                Ring->EntrySize, Ring->Desc.La);
-        if (Pipe == 1 || Pipe == 2) {
-            ULONG RingBase = WCN_CE_DST_BASE + Pipe * WCN_CE_STRIDE;
-            WcnLog (Dev, "ce%u regs: desc %08x %08x id %08x misc %08x hpaddr %08x:%08x hp/tp %08x/%08x",
-                    Pipe, WcnRead (Dev, RingBase + WCN_CE_RING_BASE_LSB),
-                    WcnRead (Dev, RingBase + WCN_CE_RING_BASE_MSB),
-                    WcnRead (Dev, RingBase + WCN_CE_RING_ID),
-                    WcnRead (Dev, RingBase + WCN_CE_RING_MISC),
-                    WcnRead (Dev, RingBase + 0x1C), WcnRead (Dev, RingBase + 0x20),
-                    WcnRead (Dev, RingBase + WCN_CE_RING_HP),
-                    WcnRead (Dev, RingBase + WCN_CE_RING_TP));
-            WcnLog (Dev, "ce%u status regs: desc %08x %08x id %08x misc %08x hpaddr %08x:%08x hp/tp %08x/%08x",
-                    Pipe, WcnRead (Dev, RingBase + WCN_CE_DST_STATUS_BASE_LSB),
-                    WcnRead (Dev, RingBase + WCN_CE_DST_STATUS_BASE_MSB),
-                    WcnRead (Dev, RingBase + WCN_CE_DST_STATUS_ID),
-                    WcnRead (Dev, RingBase + WCN_CE_DST_STATUS_MISC),
-                    WcnRead (Dev, RingBase + 0x6C), WcnRead (Dev, RingBase + 0x70),
-                    WcnRead (Dev, RingBase + WCN_CE_DST_STATUS_HP),
-                    WcnRead (Dev, RingBase + WCN_CE_DST_STATUS_TP));
-        }
+
     }
 
     Dev->Ce.Initialized = TRUE;
-    WcnLog (Dev, "ce: rings initialized, src0 0x%08x dst0 0x%08x stride 0x%x",
-            WCN_CE_SRC_BASE, WCN_CE_DST_BASE, WCN_CE_STRIDE);
+
     return STATUS_SUCCESS;
 }
 
@@ -231,14 +207,14 @@ WcnCeReapSource (PWCN_DEVICE Dev, ULONG Pipe)
     }
     Advance=(Raw/Words+Ring->Entries-Ring->Head)%Ring->Entries;
     if(Advance>Used)goto BadPointer; /* Never release an uncompleted/unpublished slot. */
-    if(Switch){Ring->SourceMmio=TRUE;WcnLog(Dev,"ce%u: source consumer uses validated MMIO TP after stalled DMA shadow",Pipe);}
+    if(Switch){Ring->SourceMmio=TRUE;}
     Slot=Ring->Head;
     for(I=0;I<Advance;I++){
         RtlSecureZeroMemory(Ring->Buffers.Va+Slot*WCN_CE_RX_BUFFER_SIZE,WCN_CE_RX_BUFFER_SIZE);
         RtlZeroMemory(Ring->Desc.Va+Slot*Ring->EntrySize,Ring->EntrySize);
         Slot=(Slot+1)%Ring->Entries;
     }
-    Ring->Head=Raw/Words;Dev->Ce.TxReclaimed+=Advance;
+    Ring->Head=Raw/Words;
     return STATUS_SUCCESS;
 BadPointer:
     WcnLog(Dev,"ce%u: invalid source consumer TP=%u reaped=%u producer=%u entries=%u entry-bytes=%u; no DMA reuse",Pipe,Raw,Ring->Head,Ring->Tail,Ring->Entries,Ring->EntrySize);
@@ -262,7 +238,6 @@ WcnCeSendSource (PWCN_DEVICE Dev, ULONG Pipe, const UCHAR *Data, ULONG Length)
     Desc[0]=(ULONG)Address;Desc[1]=(ULONG)((Address>>32)&255)|(Length<<16);Desc[2]=Slot;Desc[3]=0;
     KeMemoryBarrier();Ring->Tail=Next;
     WcnWrite(Dev,WCN_CE_SRC_BASE+Pipe*WCN_CE_STRIDE+WCN_CE_RING_HP,Next*(Ring->EntrySize/4));
-    Dev->Ce.TxPackets++;
     return STATUS_SUCCESS;
 }
 
@@ -279,7 +254,7 @@ WcnCeSendHtc (
         return STATUS_INVALID_PARAMETER;
     }
     Status = WcnCeSendSource (Dev, 0, Data, Length);
-    if (NT_SUCCESS (Status)) WcnLog (Dev, "htc tx: %u bytes", Length);
+
     return Status;
 }
 
@@ -361,10 +336,9 @@ WcnHtcSendConnect (
 {
     UCHAR Packet[HTC_HEADER_SIZE + 8] = { 0 };
     ULONG Flags = HTC_FLAG_DISABLE_CREDIT;
-    ULONG Status;
+    NTSTATUS Status;
 
     *(ULONG *)(Packet + 0) = 8u << 16;
-    *(ULONG *)(Packet + 4) = 0;
     *(ULONG *)(Packet + 8) = HTC_MSG_CONNECT_SERVICE | ((ULONG)Service << 16);
     if (Service == HTC_SVC_WMI_CONTROL) {
         /* WMI control keeps HTC credit flow enabled; PEACH advertises two
@@ -373,11 +347,8 @@ WcnHtcSendConnect (
     }
     *(ULONG *)(Packet + 12) = Flags;
     Status = WcnCeSendHtc (Dev, Packet, sizeof (Packet));
-    if (NT_SUCCESS ((NTSTATUS)Status)) {
-        Dev->Ce.HtcPendingService = Service;
-        WcnLog (Dev, "htc: connect service 0x%04x sent", Service);
-    }
-    return (NTSTATUS)Status;
+
+    return Status;
 }
 
 static
@@ -410,14 +381,13 @@ WcnHtcAdvance (
         Status = WcnCeSendHtc (Dev, Packet, sizeof (Packet));
         if (NT_SUCCESS (Status)) {
             Dev->Ce.HtcState = 7;
-            WcnLog (Dev, "htc: setup-complete-ext sent");
+
         } else {
             WcnLog (Dev, "htc: setup-complete send failed 0x%08x", Status);
         }
         break;
     }
-    default:
-        break;
+
     }
 }
 
@@ -427,10 +397,8 @@ WcnWmiSendInitPeach (
     _In_ PWCN_DEVICE Dev
     )
 {
-    UCHAR Packet[8 + 4 + 32 + 292 + 4] = { 0 };
-    ULONG *P = (ULONG *)(Packet + 8);
-    ULONG *R;
-    ULONG Offset = 8 + 4 + 32;
+    ULONG Packet[(32 + 292 + 4) / 4] = { 0 };
+    ULONG *R = Packet + 9;
     ULONG ChainMask = Dev->Ce.NumRfChains ? ((1u << Dev->Ce.NumRfChains) - 1) : 1;
     NTSTATUS Status;
 
@@ -440,60 +408,48 @@ WcnWmiSendInitPeach (
         return;
     }
 
-    *(ULONG *)(Packet + 0) = ((ULONG)(4 + 32 + 292 + 4) << 16) | Dev->Ce.EndpointWmi;
-    P[0] = WMI_CMD_HDR_INIT;
-    P[1] = (WMI_TAG_INIT_CMD << 16) | 28;
-    P[9] = (WMI_TAG_RESOURCE_CONFIG << 16) | 288;
-    R = (ULONG *)(Packet + Offset + 4);
+    Packet[0] = (WMI_TAG_INIT_CMD << 16) | 28;
+    Packet[8] = (WMI_TAG_RESOURCE_CONFIG << 16) | 288;
     R[0] = 4; R[1] = 16; R[2] = 3; R[3] = 3; R[4] = 2; R[5] = 32;
     R[6] = 16; R[7] = ChainMask; R[8] = ChainMask;
     R[9] = 100; R[10] = 100; R[11] = 100; R[12] = 40;
     R[13] = 2; /* Ethernet RX, converted to Native802.11 at the OS boundary */ R[14] = 4; R[15] = 3; R[16] = 3; R[17] = 8;
     R[21] = 1024; R[27] = 2; R[28] = 0x400; R[29] = 0xa;
-    R[30] = 1; R[31] = 8; R[32] = 2; R[33] = 0x20; R[34] = 0x16;
+    R[30] = WcnService(Dev,363)?2:1; R[31] = 8; R[32] = 2; R[33] = 0x20; R[34] = 0x16;
     R[43] = 0x40020; R[53] = 1; R[56] = 1;
     R[67] = 0x40200 | ((ULONG)Dev->Ce.PeerMetadataVersion << 4);
-    *(ULONG *)(Packet + Offset + 4 + 288) = WMI_TAG_ARRAY_STRUCT << 16;
-    WcnLog (Dev, "wmi: init TLVs tag=%u len=%u resource-tag=%u resource-len=%u host-mem=0",
-            P[1] >> 16, P[1] & 0xffff, P[9] >> 16, P[9] & 0xffff);
-    WcnLogHex (Dev, "wmi init header ", Packet, 64);
-    Status = WcnWmiSend (Dev, WMI_CMD_HDR_INIT, Packet + 12, sizeof (Packet) - 12);
+    Packet[81] = WMI_TAG_ARRAY_STRUCT << 16;
+
+    Status = WcnWmiSend (Dev, WMI_CMD_HDR_INIT, Packet, sizeof (Packet));
     if (NT_SUCCESS (Status)) {
         Dev->Ce.WmiInitSent = TRUE;
-        WcnLog (Dev, "wmi: init command sent (%u bytes)", (ULONG)sizeof (Packet));
+
     } else {
         WcnLog (Dev, "wmi: init send failed 0x%08x", Status);
     }
 }
 
-/* Same post-READY order as ath12k_core_start: DBS mode, then HTT version.
- * Only the control handshake is enabled, not HTT data-ring advertisement. */
+/* Same post-READY order as ath12k_core_start: DBS mode, then HTT version. */
 static VOID
 WcnCeAdvanceReady (PWCN_DEVICE Dev)
 {
     NTSTATUS Status;
     if (!Dev->Ce.WmiReady || Dev->Mhi.SysErr || Dev->Mhi.RddmSaved) return;
     if (!Dev->Ce.HwModeSent) {
-        ULONG Packet[7] = { 0 };
-        Packet[0] = (20u << 16) | Dev->Ce.EndpointWmi;
-        Packet[2] = 0x401e; /* WMI_PDEV_SET_HW_MODE_CMDID */
-        Packet[3] = (515u << 16) | 12;
-        Packet[4] = 0; /* WMI_PDEV_ID_SOC */
-        Packet[5] = 1; /* WMI_HOST_HW_MODE_DBS */
-        Status = WcnWmiSend (Dev, 0x401e, Packet + 3, sizeof (Packet) - 12);
+        /* WMI_PDEV_SET_HW_MODE: SOC pdev0, WMI_HOST_HW_MODE_DBS, no mappings. */
+        ULONG Packet[] = { (515u << 16) | 12, 0, 1, 0 };
+        Status = WcnWmiSend (Dev, 0x401e, Packet, sizeof (Packet));
         if (!NT_SUCCESS (Status)) return;
         Dev->Ce.HwModeSent = TRUE;
-        WcnLog (Dev, "wmi: SET_HW_MODE DBS sent");
+
     }
     if (!Dev->Ce.HttVersionSent) {
-        ULONG Packet[4] = { 0 };
-        Packet[0] = (8u << 16) | Dev->Ce.EndpointHtt;
-        Packet[2] = 0; /* HTT_H2T_MSG_TYPE_VERSION_REQ */
-        Packet[3] = 5u | (4u << 8) | (2u << 16); /* TCL metadata v2 option */
-        Status = WcnHttSend (Dev, Packet + 2, sizeof (Packet) - 8);
+        /* HTT version request, TCL metadata v2; WcnHttSend owns the HTC header. */
+        ULONG Packet[] = { 0, 5u | (4u << 8) | (2u << 16) };
+        Status = WcnHttSend (Dev, Packet, sizeof (Packet));
         if (!NT_SUCCESS (Status)) return;
         Dev->Ce.HttVersionSent = TRUE;
-        WcnLog (Dev, "htt: version request sent (TCL metadata v2)");
+
     }
 }
 
@@ -510,13 +466,13 @@ WcnHtcReceive (
     ULONG Message;
 
     if (Length < HTC_HEADER_SIZE) {
-        WcnLog (Dev, "htc: short packet (%u bytes)", Length);
+
         return;
     }
     Info = *(const ULONG *)Data;
     PayloadLength = (Info >> 16) & 0xFFFF;
     if (PayloadLength > Length - HTC_HEADER_SIZE) {
-        WcnLog (Dev, "htc: payload length %u exceeds CE buffer (%u)", PayloadLength, Length);
+
         return;
     }
     if (((Info >> 8) & 2) != 0) {
@@ -538,14 +494,11 @@ WcnHtcReceive (
         } else if (Endpoint == Dev->Ce.EndpointHtt && Dev->Ce.EndpointHtt && PayloadLength >= 4) {
             ULONG Version = *(const ULONG *)(Data + HTC_HEADER_SIZE);
             WcnStage7Htt (Dev, Data + HTC_HEADER_SIZE, PayloadLength);
+            WcnHotspotHtt(Dev,Data+HTC_HEADER_SIZE,PayloadLength);
             if ((Version & 0xff) == 0 && Dev->Ce.HttVersionSent) {
                 Dev->Ce.HttMajor = (UCHAR)(Version >> 16);
-                Dev->Ce.HttMinor = (UCHAR)(Version >> 8);
                 Dev->Ce.HttVersionReceived = TRUE;
-                WcnLog (Dev, "htt: target version %u.%u%s", Dev->Ce.HttMajor, Dev->Ce.HttMinor,
-                        Dev->Ce.HttMajor == 3 ? " (supported)" : " (unsupported, stage 5 incomplete)");
-            } else {
-                WcnLogHex (Dev, "htt: event ", Data + HTC_HEADER_SIZE, PayloadLength);
+
             }
         }
         return;
@@ -555,11 +508,9 @@ WcnHtcReceive (
     }
     Message = *(const ULONG *)(Data + HTC_HEADER_SIZE) & 0xFFFF;
     if (Message == HTC_MSG_READY && PayloadLength >= 8) {
-        ULONG CreditCount = (*(const ULONG *)(Data + HTC_HEADER_SIZE) >> 16) & 0xFFFF;
         ULONG CreditSize = *(const ULONG *)(Data + HTC_HEADER_SIZE + 4) & 0xFFFF;
-        WcnLog (Dev, "htc: target ready credits=%u credit-size=%u", CreditCount, CreditSize);
+
         Dev->Ce.HtcCreditSize = CreditSize;
-        Dev->Ce.HtcReady = TRUE;
         if (Dev->Ce.HtcState == 0) {
             Dev->Ce.HtcState = 1;
             WcnHtcAdvance (Dev);
@@ -570,8 +521,7 @@ WcnHtcReceive (
         ULONG Response = Flags & 0xFF;
         ULONG Endpoint = (Flags >> 8) & 0xFF;
         ULONG MaxMessage = Flags >> 16;
-        WcnLog (Dev, "htc: service 0x%04x response status %u eid %u max %u",
-                Service, Response, Endpoint, MaxMessage);
+
         if (Response != 0 || MaxMessage == 0) {
             WcnLog (Dev, "htc: service 0x%04x rejected", Service);
             return;
@@ -587,8 +537,6 @@ WcnHtcReceive (
             Dev->Ce.HtcState = 6;
             WcnHtcAdvance (Dev);
         }
-    } else {
-        WcnLogHex (Dev, "htc: control ", Data + HTC_HEADER_SIZE, PayloadLength);
     }
 }
 
@@ -612,18 +560,6 @@ WcnCeService (
     for (Pipe = 0; Pipe < WCN_CE_RING_COUNT; Pipe++) {
         if (Dev->Ce.Ring[Pipe].Source && !NT_SUCCESS(WcnCeReapSource(Dev, Pipe))) return;
     }
-    if (++Dev->Ce.ServiceTicks % 50 == 0) {
-        WcnLog(Dev,"ce tx: source3 reaped=%u producer=%u dma-TP=%u MMIO-mode=%u credits=%u DMA-reclaimed-total=%u",
-               Dev->Ce.Ring[3].Head,Dev->Ce.Ring[3].Tail,((volatile ULONG*)Dev->Ce.Rdp.Va)[67],Dev->Ce.Ring[3].SourceMmio,Dev->Ce.WmiCredits,Dev->Ce.TxReclaimed);
-        ULONG Dst1 = WCN_CE_DST_BASE + WCN_CE_STRIDE;
-        ULONG Dst2 = WCN_CE_DST_BASE + 2 * WCN_CE_STRIDE;
-        volatile ULONG *Rdp = (volatile ULONG *)Dev->Ce.Rdp.Va;
-        WcnLog (Dev, "ce poll: rx %u, ce1 tail/status %u/%u mmio %08x/%08x, ce2 %u/%u mmio %08x/%08x",
-                Dev->Ce.RxPackets, Rdp[82], Rdp[101],
-                WcnRead (Dev, Dst1 + WCN_CE_RING_TP), WcnRead (Dev, Dst1 + WCN_CE_DST_STATUS_HP),
-                Rdp[83], Rdp[102], WcnRead (Dev, Dst2 + WCN_CE_RING_TP),
-                WcnRead (Dev, Dst2 + WCN_CE_DST_STATUS_HP));
-    }
     for (Pipe = 1; Pipe <= 2; Pipe++) {
         Ring = &Dev->Ce.Ring[Pipe];
         Base = WCN_CE_DST_BASE + Pipe * WCN_CE_STRIDE;
@@ -638,19 +574,6 @@ WcnCeService (
                 Length = 0;
             }
             if (Length != 0) {
-                Dev->Ce.RxPackets++;
-                /* Beacons arrive frequently. Stage6 deduplicates/logs APs;
-                 * avoid synchronous hex/file logging for every beacon. */
-                if (Length < 12 || ((*(const ULONG *)(Packet + 8) & 0xffffff) != 0x7001 &&
-                                    (*(const ULONG *)(Packet + 8) & 0xffffff) != 0x1d011)) {
-                    WcnLog (Dev, "ce%u rx #%u: %u bytes status %08x %08x", Pipe,
-                            Dev->Ce.RxPackets - 1, Length, Status[0], Status[1]);
-                    /* Complete the small VDEV_START reply, including newer trailing
-                     * fields. Other event dumps retain the old 64-byte cap. */
-                    ULONG HexLimit = Length >= 12 &&
-                        ((*(const ULONG *)(Packet + 8) & 0xffffff) == 0x5001) ? 128u : 64u;
-                    WcnLogHex (Dev, "ce rx ", Packet, Length > HexLimit ? HexLimit : Length);
-                }
                 WcnHtcReceive (Dev, Packet, Length);
             }
             Ring->StatusHead = (Ring->StatusHead + 1) % Ring->Entries;
@@ -685,56 +608,34 @@ WcnWmiReceive (
     }
     Header = *(const ULONG *)Data;
     EventId = Header & 0x00FFFFFF;
-    if (EventId == 0x1d011) {
-        Dev->Scan.DiagnosticEvents++;
-        if (Dev->Scan.DiagnosticEvents <= 2 || Dev->Scan.DiagnosticEvents % 100 == 0) {
-            WcnLog (Dev, "stage6: firmware diagnostic events=%u (rate-limited; not an AP event)", Dev->Scan.DiagnosticEvents);
-        }
-        if (Dev->Scan.DiagnosticEvents <= 2 || (Dev->Scan.RuntimeScan && Dev->Scan.DiagDumps < 2)) {
-            if (Dev->Scan.RuntimeScan) Dev->Scan.DiagDumps++;
-            WcnLogHex (Dev, "stage6 diag payload ", Data, Length > 160 ? 160 : Length);
-        }
-        return;
-    }
-WcnStage6Receive (Dev, EventId, Data + 4, Length - 4);
+    if(EventId==0x1d011)return;
+    WcnCapabilitiesEvent(Dev,EventId,Data+4,Length-4);
+    WcnStage6Receive (Dev, EventId, Data + 4, Length - 4);
     WcnStage7Receive (Dev, EventId, Data + 4, Length - 4);
-    if (EventId == 0x7001) return;
-    WcnLog (Dev, "wmi: event id 0x%08x length %u", EventId, Length);
+    WcnHotspotWmi(Dev,EventId,Data+4,Length-4);
+    if (EventId == 0x7001 || EventId == 0x7006) return;
+
     TlvLength = 0;
     for (Offset = 4; Offset + 4 <= Length; Offset += 4 + TlvLength) {
         TlvHeader = *(const ULONG *)(Data + Offset);
         TlvLength = TlvHeader & 0xFFFF;
         TlvValue = Data + Offset + 4;
-        WcnLog (Dev, "wmi: tlv tag %u length %u", TlvHeader >> 16, TlvLength);
+
         if (Offset + 4 + TlvLength > Length) break;
         if (EventId == WMI_SERVICE_READY_EVENT && (TlvHeader >> 16) == 32 && TlvLength >= 40) {
             Dev->Ce.NumRfChains = TlvValue[36];
-            WcnLog (Dev, "wcn7861: target rf chains %u", Dev->Ce.NumRfChains);
-            if (TlvLength >= 76) {
-                WcnLog (Dev, "wcn7861: target host memory requests %u",
-                        *(const ULONG *)(TlvValue + 72));
-            }
+            if(TlvLength>=52){Dev->Ce.HtCap=*(const ULONG*)(TlvValue+40);Dev->Ce.VhtCap=*(const ULONG*)(TlvValue+44);
+                }
+
         }
         if (EventId == WMI_SERVICE_READY_EXT2_EVENT && (TlvHeader >> 16) == 820 && TlvLength >= 32) {
             Dev->Ce.PeerMetadataVersion = (UCHAR)(*(const ULONG *)(TlvValue + 28) & 0x3);
-            WcnLog (Dev, "wcn7861: peer metadata version %u", Dev->Ce.PeerMetadataVersion);
+
         }
     }
-    if (EventId == WMI_SERVICE_READY_EVENT) {
-        Dev->Ce.WmiServiceReady = TRUE;
-        WcnLog (Dev, "wmi: service-ready event received (%u bytes)", Length);
-    } else if (EventId == WMI_SERVICE_READY_EXT_EVENT) {
-        Dev->Ce.WmiServiceReadyExt = TRUE;
-        WcnLog (Dev, "wcn7861: service-ready-ext received");
-    } else if (EventId == WMI_SERVICE_READY_EXT2_EVENT) {
+    if (EventId == WMI_SERVICE_READY_EXT2_EVENT) {
         Dev->Ce.WmiServiceReadyExt2 = TRUE;
-        WcnLog (Dev, "wcn7861: service-ready-ext2 received");
-        if (Dev->Ce.WmiServiceReady && !Dev->Ce.WmiInitSent) {
-            WcnWmiSendInitPeach (Dev);
-        }
-    } else if (EventId == 0x4010) {
-        Dev->Ce.HwModeResponseReceived = TRUE;
-        WcnLogHex (Dev, "wmi: SET_HW_MODE response (raw, status not interpreted) ", Data + 4, Length - 4);
+
     } else if (EventId == WMI_READY_EVENT) {
         if (!Dev->Ce.WmiInitSent || !Dev->Dp.ReadyForWmi || Dev->Ce.WmiReady) return;
         if (Length >= 4 + 4 + 52) {
@@ -757,12 +658,7 @@ WcnStage6Receive (Dev, EventId, Data + 4, Length - 4);
                 return;
             }
             Dev->Ce.WmiReady = TRUE;
-            Dev->Dp.ReadyAt = WcnNowMs ();
-            WcnLog (Dev, "wmi: ready event MAC %02x:%02x:%02x:%02x:%02x:%02x",
-                    Dev->Ce.MacAddress[0], Dev->Ce.MacAddress[1], Dev->Ce.MacAddress[2],
-                    Dev->Ce.MacAddress[3], Dev->Ce.MacAddress[4], Dev->Ce.MacAddress[5]);
-        } else {
-            WcnLog (Dev, "wmi: ready event received but payload is short (%u bytes)", Length);
+
         }
     }
 }

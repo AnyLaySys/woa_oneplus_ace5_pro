@@ -4,10 +4,9 @@
 #pragma once
 #define S7_REO_PUSH_REASON_MASK 0x6u
 #define S7_REO_PUSH_REASON_SHIFT 1u
-#define S7_REO_PUSH_ERROR 0u
 #define S7_REO_PUSH_ROUTING 1u
 
-/* All RX TIDs are provisioned before association. Legacy self-test does not
- * negotiate ADDBA: each QoS slot fits base128 plus three ext128 descriptors. */
+/* Base128 plus three ext128 descriptors covers a 256-frame RX BA window. */
+#define S7_RX_BA_MAX 256u
 #define S7_RX_TID_COUNT 17u
 #define S7_RX_QUEUE_STRIDE 512u

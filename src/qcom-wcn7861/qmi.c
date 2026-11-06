@@ -79,12 +79,6 @@ enum {
     QmiStepDone
 };
 
-static const PCSTR QmiStepNames[] = {
-    "idle", "phy-cap", "ind-register", "host-cap", "wait-mem", "wait-mem-ready",
-    "cap", "tme-lite", "regdb", "board", "m3", "aux-uc", "qdss", "wait-fw-ready",
-    "wlan-ini", "wlan-cfg", "wlan-mode", "done"
-};
-
 #pragma pack(push, 1)
 typedef struct _QMI_HDR {
     UCHAR   Type;
@@ -121,35 +115,6 @@ QmiGet64 (
     )
 {
     return QmiGet32 (Data) | ((ULONG64)QmiGet32 (Data + 4) << 32);
-}
-
-/* Copies a QMI string into a printable, NUL-terminated buffer. */
-static
-VOID
-QmiCopyString (
-    _Out_writes_z_ (Size) PCHAR Buffer,
-    _In_ ULONG Size,
-    _In_reads_bytes_ (Length) const UCHAR *Data,
-    _In_ ULONG Length
-    )
-{
-    ULONG Index;
-
-    if (Length > Size - 1) {
-        Length = Size - 1;
-    }
-    for (Index = 0; Index < Length && Data[Index] != 0; Index++) {
-        Buffer[Index] = (Data[Index] >= 0x20 && Data[Index] < 0x7F) ? (CHAR)Data[Index] : '?';
-    }
-    Buffer[Index] = 0;
-}
-
-PCSTR
-WcnQmiStepName (
-    _In_ PWCN_DEVICE Dev
-    )
-{
-    return (Dev->Qmi.Step < RTL_NUMBER_OF (QmiStepNames)) ? QmiStepNames[Dev->Qmi.Step] : "?";
 }
 
 /* --- request encoding (qmi_encdec.c layout: type u8, length u16, value) --- */
@@ -229,7 +194,7 @@ QmiSend (
     NTSTATUS Status;
 
     if (Qmi->TxLength > WCN_QMI_TX_MAX) {
-        WcnLog (Dev, "qmi tx: msg 0x%04x does not fit the buffer", Qmi->TxMsgId);
+
         Qmi->Failed = TRUE;
         return;
     }
@@ -239,7 +204,7 @@ QmiSend (
     Hdr->MsgId = Qmi->TxMsgId;
     Hdr->MsgLen = (USHORT)(Qmi->TxLength - sizeof (QMI_HDR));
     Status = WcnQrtrSendToService (Dev, Qmi->Tx, Qmi->TxLength);
-    WcnLog (Dev, "qmi tx: msg 0x%04x txn %u len %u, status 0x%08x", Hdr->MsgId, Hdr->TxnId, Hdr->MsgLen, Status);
+
     if (!NT_SUCCESS (Status)) {
         Qmi->Failed = TRUE;
         return;
@@ -294,7 +259,7 @@ QmiLoadDmaFile (
     if (NT_SUCCESS (Status)) {
         RtlCopyMemory (Dma->Va, Data, Size);
         KeMemoryBarrier ();
-        WcnLog (Dev, "qmi: staged info image size 0x%Ix dma 0x%llx", Size, Dma->La);
+
     }
     ExFreePoolWithTag (Data, WCN_TAG);
     return Status;
@@ -353,7 +318,7 @@ QmiStartBdfDownload (
 
     Status = WcnReadFile (Path, &Qmi->DownloadData, &Qmi->DownloadSize);
     if (!NT_SUCCESS (Status) || Qmi->DownloadSize == 0 || Qmi->DownloadSize > MAXULONG) {
-        WcnLog (Dev, "qmi: BDF file unavailable status 0x%08x size 0x%Ix", Status, Qmi->DownloadSize);
+
         if (Qmi->DownloadData != NULL) {
             ExFreePoolWithTag (Qmi->DownloadData, WCN_TAG);
             Qmi->DownloadData = NULL;
@@ -365,8 +330,7 @@ QmiStartBdfDownload (
     Qmi->DownloadSegment = 0;
     Qmi->DownloadType = Type;
     Qmi->DownloadNextStep = NextStep;
-    WcnLog (Dev, "qmi: starting BDF download type %u file-id 0x%x size 0x%Ix",
-            Type, Qmi->BoardId, Qmi->DownloadSize);
+
 }
 
 static
@@ -402,8 +366,7 @@ QmiSendBdfChunk (
     Qmi->TxLength += 5 + Chunk;
     QmiPutU8 (Qmi, 0x14, (Remaining <= WCN_QMI_MAX_DATA) ? 1 : 0);
     QmiPutU8 (Qmi, 0x15, (UCHAR)Qmi->DownloadType);
-    WcnLog (Dev, "qmi: BDF type %u segment %u offset 0x%Ix chunk 0x%x remaining 0x%x",
-            Qmi->DownloadType, Qmi->DownloadSegment, Qmi->DownloadOffset, Chunk, Remaining);
+
     QmiSend (Dev);
 }
 
@@ -478,8 +441,7 @@ QmiSendQdssChunk (
     RtlCopyMemory (Qmi->Tx + Position + 5, Qmi->DownloadData + Qmi->DownloadOffset, Chunk);
     Qmi->TxLength += 5 + Chunk;
     QmiPutU8 (Qmi, 0x13, (Remaining <= WCN_QMI_MAX_DATA) ? 1 : 0);
-    WcnLog (Dev, "qmi: QDSS config segment %u offset 0x%Ix chunk 0x%x remaining 0x%x",
-            Qmi->DownloadSegment, Qmi->DownloadOffset, Chunk, Remaining);
+
     QmiSend (Dev);
 }
 
@@ -562,7 +524,6 @@ QmiRequestMem (
     ULONG Offset = 1;
     ULONG Index;
     ULONG Configs;
-    ULONG Config;
     NTSTATUS Status;
     ULONG Alignment;
     SIZE_T AllocationSize;
@@ -575,7 +536,7 @@ QmiRequestMem (
     }
     Count = Value[0];
     if (Count > WCN_QMI_MAX_MEM_SEG) {
-        WcnLog (Dev, "qmi: %u memory segments requested, more than %u", Count, WCN_QMI_MAX_MEM_SEG);
+
         Count = WCN_QMI_MAX_MEM_SEG;
     }
 
@@ -587,12 +548,10 @@ QmiRequestMem (
         Qmi->Mem[Index].Size = QmiGet32 (Value + Offset);
         Qmi->Mem[Index].Type = QmiGet32 (Value + Offset + 4);
         Configs = Value[Offset + 8];
-        WcnLog (Dev, "qmi: mem seg %u type %u size 0x%x (%u configs)", Index, Qmi->Mem[Index].Type, Qmi->Mem[Index].Size, Configs);
+
         Offset += 9;
-        for (Config = 0; Config < Configs && Offset + 13 <= Length; Config++, Offset += 13) {
-            WcnLog (Dev, "qmi:   cfg %u offset 0x%llx size 0x%x secure %u",
-                    Config, QmiGet64 (Value + Offset), QmiGet32 (Value + Offset + 8), Value[Offset + 12]);
-        }
+        if(Configs>(Length-Offset)/13)Configs=(Length-Offset)/13;
+        Offset+=Configs*13; /* Skip firmware per-segment configuration records. */
         Qmi->MemSegCount = Index + 1;
     }
 
@@ -621,105 +580,27 @@ QmiRequestMem (
                 QmiFreeMem (Qmi);
                 if (Qmi->Mem[Index].Size > QMI_MAX_CHUNK_SIZE) {
                     Qmi->MemDelayed = TRUE;
-                    WcnLog (Dev, "qmi: asking the firmware for smaller chunks");
+
                 } else {
                     Qmi->Failed = TRUE;
                 }
                 Qmi->MemRequestPending = !Qmi->Failed;
                 return;
             }
-            WcnLog (Dev, "qmi: mem seg %u at 0x%llx (requested 0x%x, allocated 0x%Ix, alignment 0x%x)",
-                    Index, Qmi->Mem[Index].Dma.La, Qmi->Mem[Index].Size, AllocationSize, Alignment);
+
             break;
-        default:
-            WcnLog (Dev, "qmi: mem seg %u type %u not backed", Index, Qmi->Mem[Index].Type);
-            break;
+
         }
     }
     Qmi->MemRequestPending = TRUE;
 }
 
-/* ath12k_qmi_request_target_cap: decode and log the reply */
-static
-VOID
-QmiLogCap (
-    _In_ PWCN_DEVICE Dev,
-    _In_ UCHAR Type,
-    _In_reads_bytes_ (Length) const UCHAR *Value,
-    _In_ ULONG Length
-    )
+/* Decode only capability fields used by resource and firmware setup. */
+static VOID QmiParseCap(PWCN_DEVICE Dev,UCHAR Type,const UCHAR *Value,ULONG Length)
 {
-    CHAR Text[160];
-    CHAR Pin[33];
-    ULONG Count;
-    ULONG Index;
-    const UCHAR *Entry;
-
-    switch (Type) {
-    case 0x10:
-        if (Length >= 8) {
-            WcnLog (Dev, "cap: chip_id 0x%x chip_family 0x%x", QmiGet32 (Value), QmiGet32 (Value + 4));
-            return;
-        }
-        break;
-    case 0x11:
-        if (Length >= 4) {
-            Dev->Qmi.BoardId = QmiGet32 (Value);
-            WcnLog (Dev, "cap: board_id 0x%x", Dev->Qmi.BoardId);
-            return;
-        }
-        break;
-    case 0x12:
-        if (Length >= 4) {
-            WcnLog (Dev, "cap: soc_id 0x%x", QmiGet32 (Value));
-            return;
-        }
-        break;
-    case 0x13:
-        if (Length >= 5 && 5 + (ULONG)Value[4] <= Length) {
-            QmiCopyString (Text, sizeof (Text), Value + 5, Value[4]);
-            WcnLog (Dev, "cap: fw_version 0x%x build timestamp %s", QmiGet32 (Value), Text);
-            return;
-        }
-        break;
-    case 0x14:
-        QmiCopyString (Text, sizeof (Text), Value, Length);
-        WcnLog (Dev, "cap: fw_build_id %s", Text);
-        return;
-    case 0x1A:
-        if (Length >= 8) {
-            Dev->Qmi.FirmwareCaps = QmiGet64 (Value);
-            WcnLog (Dev, "cap: fw_caps 0x%llx", Dev->Qmi.FirmwareCaps);
-            return;
-        }
-        break;
-    case 0x1C:
-        for (Index = 0; Index + 16 <= Length; Index += 16) {
-            WcnLog (Dev, "cap: dev_mem start 0x%llx size 0x%llx", QmiGet64 (Value + Index), QmiGet64 (Value + Index + 8));
-            if (Index == 0) {
-                Dev->Qmi.CmemBase = QmiGet64 (Value);
-                Dev->Qmi.CmemSize = QmiGet64 (Value + 8);
-            }
-        }
-        return;
-    case 0x22:
-        if (Length >= 1) {
-            Count = Value[0];
-            WcnLog (Dev, "cap: ol_cpr_cfg %u entries (logged only)", Count);
-            for (Index = 0; Index < Count && 1 + (Index + 1) * 48 <= Length; Index++) {
-                Entry = Value + 1 + Index * 48;
-                QmiCopyString (Pin, sizeof (Pin), Entry, 32);
-                WcnLog (Dev, "cap:   %s wake %u (valid %u) sleep %u (valid %u)",
-                        Pin, QmiGet32 (Entry + 36), QmiGet32 (Entry + 32), QmiGet32 (Entry + 44), QmiGet32 (Entry + 40));
-            }
-            return;
-        }
-        break;
-    default:
-        break;
-    }
-    WcnLog (Dev, "cap: tlv 0x%02x length %u", Type, Length);
-    WcnLogHex (Dev, "cap:   ", Value, Length);
+    if(Type==0x11&&Length>=4)Dev->Qmi.BoardId=QmiGet32(Value);
+    else if(Type==0x1a&&Length>=8)Dev->Qmi.FirmwareCaps=QmiGet64(Value);
+    else if(Type==0x1c&&Length>=16){Dev->Qmi.CmemBase=QmiGet64(Value);Dev->Qmi.CmemSize=QmiGet64(Value+8);}
 }
 
 static
@@ -880,8 +761,7 @@ QmiAdvance (
         QmiPutU8 (Qmi, 0x10, 0);
         QmiSend (Dev);
         break;
-    default:
-        break;
+
     }
 }
 
@@ -897,7 +777,7 @@ QmiResponse (
     PWCN_QMI Qmi = &Dev->Qmi;
 
     if (MsgId != Qmi->Outstanding) {
-        WcnLog (Dev, "qmi: response 0x%04x while waiting for 0x%04x", MsgId, Qmi->Outstanding);
+
         return;
     }
     Qmi->Outstanding = 0;
@@ -928,7 +808,7 @@ QmiResponse (
             Qmi->DownloadOffset += Chunk;
             Qmi->DownloadSegment++;
             if (Qmi->DownloadOffset == Qmi->DownloadSize) {
-                WcnLog (Dev, "qmi: BDF type %u download complete", Qmi->DownloadType);
+
                 ExFreePoolWithTag (Qmi->DownloadData, WCN_TAG);
                 Qmi->DownloadData = NULL;
                 Qmi->DownloadSize = 0;
@@ -946,7 +826,7 @@ QmiResponse (
             Qmi->DownloadOffset += Chunk;
             Qmi->DownloadSegment++;
             if (Qmi->DownloadOffset == Qmi->DownloadSize) {
-                WcnLog (Dev, "qmi: QDSS config download complete");
+
                 ExFreePoolWithTag (Qmi->DownloadData, WCN_TAG);
                 Qmi->DownloadData = NULL;
                 Qmi->DownloadSize = 0;
@@ -960,51 +840,47 @@ QmiResponse (
         QmiFreeDma (&Qmi->TmeLite);
         Qmi->Step = QmiStepRegdb;
         if (Result != 0 && Error == QMI_ERR_HARDWARE_RESTRICTED) {
-            WcnLog (Dev, "qmi: TME-L restricted by firmware power policy; continuing like ath12k");
+
             Result = 0;
         }
         break;
     case QMI_WLFW_M3_INFO:
         if (Result == 0) {
-            WcnLog (Dev, "qmi: M3 info accepted");
+
             Qmi->Step = (Qmi->FirmwareCaps & QMI_FW_CAP_AUX_UC) ? QmiStepAuxUc : QmiStepQdss;
         }
         break;
     case QMI_WLFW_AUX_UC_INFO:
         if (Result == 0) {
-            WcnLog (Dev, "qmi: AUX-UC info accepted");
+
             Qmi->Step = QmiStepQdss;
         }
         break;
     case QMI_WLFW_CAP:
         Qmi->Step = QmiStepTmeLite;
-        WcnLog (Dev, "qmi: CAP accepted, board file-id 0x%x fw caps 0x%llx", Qmi->BoardId, Qmi->FirmwareCaps);
+
         break;
     case QMI_WLFW_WLAN_INI:
-        Qmi->WlanIniReady = TRUE;
         Qmi->Step = QmiStepWlanCfg;
         break;
     case QMI_WLFW_WLAN_CFG:
-        Qmi->WlanCfgReady = TRUE;
         Qmi->Step = QmiStepWlanMode;
         break;
     case QMI_WLFW_WLAN_MODE:
         if (Result == 0) {
-            Qmi->WlanModeReady = TRUE;
             Qmi->Step = QmiStepDone;
             {
                 NTSTATUS CeStatus = WcnDpInitialize (Dev);
-                WcnLog (Dev, "dp: init status 0x%08x", CeStatus);
+
                 if (NT_SUCCESS (CeStatus)) {
                     CeStatus = WcnCeInitialize (Dev);
-                    WcnLog (Dev, "ce: init status 0x%08x", CeStatus);
+
                 }
                 if (!NT_SUCCESS (CeStatus)) Qmi->Failed = TRUE;
             }
         }
         break;
-    default:
-        break;
+
     }
     if (Result != 0) {
         WcnLog (Dev, "qmi: msg 0x%04x failed, result %u error %u", MsgId, Result, Error);
@@ -1054,14 +930,13 @@ WcnQmiReceive (
     UCHAR Type;
 
     if (Size < sizeof (QMI_HDR)) {
-        WcnLog (Dev, "qmi rx: short message (%u bytes)", Size);
+
         return;
     }
-    WcnLog (Dev, "qmi rx: type %u txn %u msg 0x%04x len %u", Hdr->Type, Hdr->TxnId, Hdr->MsgId, Hdr->MsgLen);
 
     End = sizeof (QMI_HDR) + Hdr->MsgLen;
     if (End > Size) {
-        WcnLog (Dev, "qmi rx: message length %u exceeds the packet (%u)", Hdr->MsgLen, Size);
+
         End = Size;
     }
     for (Offset = sizeof (QMI_HDR); Offset + 3 <= End; Offset += 3 + Length) {
@@ -1069,20 +944,17 @@ WcnQmiReceive (
         Length = QmiGet16 (Data + Offset + 1);
         Value = Data + Offset + 3;
         if (Offset + 3 + Length > End) {
-            WcnLog (Dev, "qmi rx: tlv 0x%02x length %u runs past the message", Type, Length);
+
             break;
         }
         if (Hdr->Type == QMI_RESPONSE && Type == 0x02 && Length >= 4) {
             Result = QmiGet16 (Value);
             Error = QmiGet16 (Value + 2);
-            WcnLog (Dev, "qmi rx: result %u error %u", Result, Error);
+
         } else if (Hdr->Type == QMI_RESPONSE && Hdr->MsgId == QMI_WLFW_CAP) {
-            QmiLogCap (Dev, Type, Value, Length);
+            QmiParseCap (Dev, Type, Value, Length);
         } else if (Hdr->Type == QMI_INDICATION && Hdr->MsgId == QMI_WLFW_REQUEST_MEM_IND && Type == 0x01) {
             QmiRequestMem (Dev, Value, Length);
-        } else {
-            WcnLog (Dev, "qmi rx: tlv 0x%02x length %u", Type, Length);
-            WcnLogHex (Dev, "qmi rx:   ", Value, Length);
         }
     }
 
@@ -1091,17 +963,15 @@ WcnQmiReceive (
     } else if (Hdr->Type == QMI_INDICATION) {
         switch (Hdr->MsgId) {
         case QMI_WLFW_FW_MEM_READY_IND:
-            WcnLog (Dev, "qmi: firmware memory ready");
+
             Dev->Qmi.MemReadyPending = TRUE;
             break;
         case QMI_WLFW_FW_READY_IND:
-            WcnLog (Dev, "qmi: firmware init done; configuring CE and WLAN mode");
+
             /* FW_READY completes QMI setup; firmware may still access M3/AUX-UC. */
-            Dev->Qmi.FirmwareReady = TRUE;
             Dev->Qmi.Step = QmiStepWlanIni;
             break;
-        default:
-            break;
+
         }
     }
     QmiAdvance (Dev);

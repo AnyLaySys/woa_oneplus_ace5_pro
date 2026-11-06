@@ -81,6 +81,7 @@
     <SiaVersionDate Condition="'$(SiaVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</SiaVersionDate>
 
     <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-10-31'">1</SiaRevision>
+    <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-05'">17</SiaRevision>
     <SiaRevision Condition="'$(SiaRevision)' == ''">0</SiaRevision>
 
     <SiaDriverDate>$([System.DateTime]::Parse('$(SiaVersionDate)').ToString('MM/dd/yyyy'))</SiaDriverDate>
@@ -96,7 +97,6 @@
 
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..</AdditionalIncludeDirectories>
 
-      <PreprocessorDefinitions>SIA_DRIVER_VERSION=&quot;$(SiaDriverVersion)&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
 
       <LanguageStandard_C>stdc17</LanguageStandard_C>
 
@@ -150,6 +150,7 @@
     <ClCompile Include="..\link.c" />
 
     <ClCompile Include="..\audio.c" />
+    <ClCompile Include="..\capture.c" />
     <ResourceCompile Include="sia9177.rc" />
 
   </ItemGroup>

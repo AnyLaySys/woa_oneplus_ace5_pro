@@ -3,9 +3,7 @@
 #define GENI_FORCE_DEFAULT_REG      0x020u
 #define GENI_OUTPUT_CTRL            0x024u
 #define SE_GENI_CGC_CTRL            0x028u
-#define SE_GENI_STATUS              0x040u
 #define GENI_SER_M_CLK_CFG          0x048u
-#define GENI_IF_DISABLE_RO          0x064u
 #define GENI_FW_REVISION_RO         0x068u
 #define SE_GENI_CLK_SEL             0x07Cu
 #define SE_GENI_BYTE_GRAN           0x254u
@@ -28,7 +26,6 @@
 #define SE_GENI_TX_WATERMARK_REG    0x80Cu
 #define SE_GENI_RX_WATERMARK_REG    0x810u
 #define SE_GENI_RX_RFR_WATERMARK_REG 0x814u
-#define SE_GENI_IOS                 0x908u
 #define SE_DMA_TX_IRQ_CLR           0xC44u
 #define SE_DMA_RX_IRQ_CLR           0xD44u
 #define SE_GSI_EVENT_EN             0xE18u
@@ -107,10 +104,8 @@ SiaClocksOn (
     for (Index = 0; Index < 500 && (SiaRead32 (Dev->Gcc, GCC_S4_RCG) & 1u) != 0; Index++) {
         KeStallExecutionProcessor (10);
     }
-    SiaLog (Dev, "gcc s4 rcg cmd=0x%08x cfg=0x%08x", SiaRead32 (Dev->Gcc, GCC_S4_RCG), SiaRead32 (Dev->Gcc, GCC_S4_RCG + 4));
 
     Value = SiaRead32 (Dev->Gcc, GCC_VOTE);
-    SiaLog (Dev, "gcc vote before=0x%08x", Value);
     SiaWr (Dev->Gcc, GCC_VOTE, Value | GCC_VOTE_S_AHB | GCC_VOTE_CORE | GCC_VOTE_S4);
 
     for (Index = 0; Index < 200; Index++) {
@@ -122,8 +117,6 @@ SiaClocksOn (
         }
         KeStallExecutionProcessor (100);
     }
-    SiaLog (Dev, "gcc vote after=0x%08x s_ahb=0x%08x core=0x%08x s4=0x%08x",
-            SiaRead32 (Dev->Gcc, GCC_VOTE), SiaRead32 (Dev->Gcc, GCC_HALT_S_AHB), SiaRead32 (Dev->Gcc, GCC_HALT_CORE), SiaRead32 (Dev->Gcc, GCC_HALT_S4));
     return Index < 200 ? STATUS_SUCCESS : STATUS_IO_TIMEOUT;
 }
 
@@ -137,7 +130,6 @@ SiaPinsOn (
 
     for (Pin = 72; Pin <= 73; Pin++) {
         SiaWr (Dev->Tlmm, Pin * TLMM_STRIDE, (1u << 2) | 3u);
-        SiaLog (Dev, "gpio%lu ctl=0x%08x io=0x%08x", Pin, SiaRead32 (Dev->Tlmm, Pin * TLMM_STRIDE), SiaRead32 (Dev->Tlmm, Pin * TLMM_STRIDE + 4));
     }
 }
 
@@ -166,15 +158,12 @@ SiaI2cInit (
 
     Status = SiaClocksOn (Dev);
     if (!NT_SUCCESS (Status)) {
-        SiaLog (Dev, "clock enable timeout");
         return Status;
     }
     SiaPinsOn (Dev);
 
     Fw = SiaRead32 (Dev->Se, GENI_FW_REVISION_RO);
     Proto = (Fw >> 8) & 0xFFu;
-    SiaLog (Dev, "se fw_rev=0x%08x proto=%lu if_disable=0x%08x status=0x%08x ios=0x%08x",
-            Fw, Proto, SiaRead32 (Dev->Se, GENI_IF_DISABLE_RO), SiaRead32 (Dev->Se, SE_GENI_STATUS), SiaRead32 (Dev->Se, SE_GENI_IOS));
     if (Proto != GENI_PROTO_I2C) {
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
@@ -198,7 +187,6 @@ SiaI2cInit (
     SiaWr (Dev->Se, SE_GENI_CLK_SEL, 0);
     SiaWr (Dev->Se, GENI_SER_M_CLK_CFG, (2u << 4) | 1u);
     SiaWr (Dev->Se, SE_I2C_SCL_COUNTERS, (5u << 20) | (11u << 10) | 22u);
-    SiaLog (Dev, "se configured clk_cfg=0x%08x scl=0x%08x", SiaRead32 (Dev->Se, GENI_SER_M_CLK_CFG), SiaRead32 (Dev->Se, SE_I2C_SCL_COUNTERS));
     return STATUS_SUCCESS;
 }
 
@@ -230,11 +218,9 @@ SiaWaitDone (
         if ((Irq & (M_ERRORS | M_CMD_DONE)) != 0) {
             SiaWr (Dev->Se, SE_GENI_M_IRQ_CLEAR, Irq);
             if ((Irq & M_ERRORS) != 0) {
-                SiaLog (Dev, "i2c error irq=0x%08x status=0x%08x ios=0x%08x", Irq, SiaRead32 (Dev->Se, SE_GENI_STATUS), SiaRead32 (Dev->Se, SE_GENI_IOS));
                 return (Irq & M_GP_IRQ_1) != 0 ? STATUS_NO_SUCH_DEVICE : STATUS_IO_DEVICE_ERROR;
             }
             if (Data != NULL && Read < Length) {
-                SiaLog (Dev, "i2c short read %lu/%lu", Read, Length);
                 return STATUS_DATA_ERROR;
             }
             return STATUS_SUCCESS;
@@ -244,7 +230,6 @@ SiaWaitDone (
         }
         KeStallExecutionProcessor (5);
     }
-    SiaLog (Dev, "i2c timeout irq=0x%08x status=0x%08x ios=0x%08x", SiaRead32 (Dev->Se, SE_GENI_M_IRQ_STATUS), SiaRead32 (Dev->Se, SE_GENI_STATUS), SiaRead32 (Dev->Se, SE_GENI_IOS));
     SiaWr (Dev->Se, SE_GENI_M_CMD_CTRL_REG, 1u << 1);
     KeStallExecutionProcessor (1000);
     SiaWr (Dev->Se, SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);

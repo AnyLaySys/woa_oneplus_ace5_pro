@@ -1,0 +1,30 @@
+#include <windows.h>
+#define STR2(x) #x
+#define STR(x) STR2(x)
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION ALS_DRIVER_VERSION
+ PRODUCTVERSION ALS_DRIVER_VERSION
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DRV
+ FILESUBTYPE VFT2_DRV_SYSTEM
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904b0"
+  BEGIN
+   VALUE "CompanyName", "AnyLaySys\0"
+   VALUE "FileDescription", "Qualcomm WCN7861 Bluetooth UART Controller\0"
+   VALUE "FileVersion", STR(ALS_DRIVER_VERSION_TEXT) "\0"
+   VALUE "InternalName", "qcom_bluetooth\0"
+   VALUE "OriginalFilename", "qcom_bluetooth.sys\0"
+   VALUE "ProductName", "Qualcomm WCN7861 Bluetooth\0"
+   VALUE "ProductVersion", STR(ALS_DRIVER_VERSION_TEXT) "\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1200
+ END
+END

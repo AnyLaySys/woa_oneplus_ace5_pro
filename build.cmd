@@ -10,7 +10,10 @@ set "NAME=%~1"
 set "TARGET="
 if /i "%NAME%"=="syna-s3910" (set "NAME=syna-s3910"& set "TARGET=syna_s3910")
 if /i "%NAME%"=="qcom-audio" (set "NAME=qcom-audio"& set "TARGET=sia9177")
+if /i "%NAME%"=="qcom-bluetooth" (set "NAME=qcom-bluetooth"& set "TARGET=qcom_bluetooth")
 if /i "%NAME%"=="qcom-wcn7861" (set "NAME=qcom-wcn7861"& set "TARGET=wcn7861")
+if /i "%NAME%"=="qcom-battery" (set "NAME=qcom-battery"& set "TARGET=qcom_battery")
+if /i "%NAME%"=="qcom-pmic-glink" (set "NAME=qcom-pmic-glink"& set "TARGET=qcom_pmic_glink")
 if not defined TARGET goto invalid
 set "SRC=%ROOT%\src\%NAME%"
 set "PROJECT="
@@ -59,6 +62,7 @@ set "WOA_BUILD_ENTRY=%~f0"
 set "WOA_ROOT=%ROOT%"
 set "WOA_WINDOWS="
 set "WOA_ALS="
+set "WOA_BLUETOOTH_ADDRESS="
 set "WOA_FORCE=0"
 set "WOA_WHATIF=0"
 shift
@@ -81,6 +85,14 @@ if /i "%~1"=="-AlsRoot" (
   shift
   goto install_args
 )
+if /i "%~1"=="-BluetoothAddress" (
+  if defined WOA_BLUETOOTH_ADDRESS goto invalid
+  if "%~2"=="" goto invalid
+  set "WOA_BLUETOOTH_ADDRESS=%~2"
+  shift
+  shift
+  goto install_args
+)
 if /i "%~1"=="-Force" (
   set "WOA_FORCE=1"
   shift
@@ -94,7 +106,7 @@ if /i "%~1"=="-WhatIf" (
 goto invalid
 :install_run
 if not defined WOA_WINDOWS if not defined WOA_ALS goto invalid
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$text=[IO.File]::ReadAllText($env:WOA_BUILD_ENTRY); $marker=[regex]::Match($text,'(?m)^#<FW-INSTALL>\r?$'); if(-not $marker.Success){throw 'Missing firmware installer body'}; $code=$text.Substring($marker.Index+$marker.Length); & ([scriptblock]::Create($code)) -WindowsDirectory $env:WOA_WINDOWS -AlsRoot $env:WOA_ALS -Force:($env:WOA_FORCE -eq '1') -WhatIf:($env:WOA_WHATIF -eq '1')"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$text=[IO.File]::ReadAllText($env:WOA_BUILD_ENTRY); $marker=[regex]::Match($text,'(?m)^#<FW-INSTALL>\r?$'); if(-not $marker.Success){throw 'Missing firmware installer body'}; $code=$text.Substring($marker.Index+$marker.Length); & ([scriptblock]::Create($code)) -WindowsDirectory $env:WOA_WINDOWS -AlsRoot $env:WOA_ALS -BluetoothAddress $env:WOA_BLUETOOTH_ADDRESS -Force:($env:WOA_FORCE -eq '1') -WhatIf:($env:WOA_WHATIF -eq '1')"
 exit /b %errorlevel%
 
 :invalid
@@ -105,8 +117,11 @@ exit /b 2
 :help
 echo Usage: build.cmd syna-s3910
 echo        build.cmd qcom-audio
+echo        build.cmd qcom-bluetooth
 echo        build.cmd qcom-wcn7861
-echo        build.cmd install-fw -WindowsDirectory "W:\Windows" -AlsRoot "A:\" [-WhatIf] [-Force]
+echo        build.cmd qcom-battery
+echo        build.cmd qcom-pmic-glink
+echo        build.cmd install-fw -WindowsDirectory "W:\Windows" -AlsRoot "A:\" [-BluetoothAddress "XX:XX:XX:XX:XX:XX"] [-WhatIf] [-Force]
 echo Firmware copy requires at least one explicit target. Existing files require -Force.
 exit /b 0
 
@@ -115,6 +130,7 @@ exit /b 0
 param(
     [string]$WindowsDirectory,
     [string]$AlsRoot,
+    [string]$BluetoothAddress,
     [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
@@ -155,9 +171,23 @@ if ($AlsRoot) {
 $payloads = @()
 if ($windowsRoot) {
     $payloads += [pscustomobject]@{ Source = (Join-Path $firmwareRoot 'sia9177\replay.bin'); Root = $windowsRoot; Relative = 'System32\drivers\sia9177\replay.bin' }
+    $payloads += [pscustomobject]@{ Source = (Join-Path $firmwareRoot 'wcd9395\replay.bin'); Root = $windowsRoot; Relative = 'System32\drivers\wcd9395\replay.bin' }
     foreach ($name in @('amss.bin','m3.bin','board.bin','regdb.bin','tmel.bin','aux_ucode.bin','qdss_trace_config.bin')) {
         $payloads += [pscustomobject]@{ Source = (Join-Path $firmwareRoot ('wcn7861\' + $name)); Root = $windowsRoot; Relative = ('System32\drivers\wcn7861\' + $name) }
     }
+}
+if ($windowsRoot) {
+    foreach ($name in @('brhperifw20.mbn','brhperinv20.bin','tmel_peach_20.elf','brhbtfw20.mbn','brhbtnv20.bin')) {
+        $payloads += [pscustomobject]@{ Source = (Join-Path $firmwareRoot ('wcn7861-bt\' + $name)); Root = $windowsRoot; Relative = ('System32\drivers\wcn7861-bt\' + $name) }
+    }
+}
+if ($BluetoothAddress) {
+    if (-not $windowsRoot) { throw 'BluetoothAddress requires WindowsDirectory' }
+    if ($BluetoothAddress -notmatch '^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$') { throw 'BluetoothAddress must contain six hexadecimal bytes separated by colons' }
+    [byte[]]$address = @($BluetoothAddress.Split(':') | ForEach-Object { [Convert]::ToByte($_, 16) })
+    if (@($address | Where-Object { $_ -ne 0 }).Count -eq 0 -or @($address | Where-Object { $_ -ne 255 }).Count -eq 0) { throw 'Invalid Bluetooth address' }
+    [Array]::Reverse($address)
+    $payloads += [pscustomobject]@{ Bytes = $address; Root = $windowsRoot; Relative = 'System32\drivers\wcn7861-bt\address.bin' }
 }
 if ($alsDirectory) {
     $adspRoot = Join-Path $firmwareRoot 'adsp'
@@ -171,8 +201,11 @@ if ($alsDirectory) {
 }
 $plan = @()
 foreach ($file in $payloads) {
-    $source = Get-Item -LiteralPath $file.Source -Force
-    if ($source.PSIsContainer -or ($source.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Firmware input must be a regular file' }
+    $source = $null
+    if (-not $file.Bytes) {
+        $source = Get-Item -LiteralPath $file.Source -Force
+        if ($source.PSIsContainer -or ($source.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Firmware input must be a regular file' }
+    }
     $target = [IO.Path]::GetFullPath((Join-Path $file.Root $file.Relative))
     if (-not $target.StartsWith($file.Root, [StringComparison]::OrdinalIgnoreCase)) { throw 'Destination escapes target root' }
     $cursor = [IO.Path]::GetDirectoryName($target)
@@ -188,13 +221,14 @@ foreach ($file in $payloads) {
         if ($existing.PSIsContainer -or ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Destination must be a regular file' }
         if (-not $Force -and -not $WhatIfPreference) { throw "Target file exists; use WhatIf to review and Force to replace: $target" }
     }
-    $plan += [pscustomobject]@{ Source = $source.FullName; Target = $target }
+    $plan += [pscustomobject]@{ Source = $source.FullName; Bytes = $file.Bytes; Target = $target }
 }
 $copied = 0
 foreach ($file in $plan) {
     if ($PSCmdlet.ShouldProcess($file.Target, 'Copy device firmware')) {
         [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($file.Target)) | Out-Null
-        [IO.File]::Copy($file.Source, $file.Target, $Force.IsPresent)
+        if ($file.Bytes) { [IO.File]::WriteAllBytes($file.Target, $file.Bytes) }
+        else { [IO.File]::Copy($file.Source, $file.Target, $Force.IsPresent) }
         $copied++
     }
 }

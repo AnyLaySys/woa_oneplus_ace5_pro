@@ -143,19 +143,6 @@ MhiPoll (
 }
 
 static
-VOID
-MhiLogBhiError (
-    _In_ PWCN_DEVICE Dev
-    )
-{
-    ULONG Bhi = Dev->Mhi.Bhi;
-
-    WcnLog (Dev, "bhi: errcode 0x%08x dbg1 0x%08x dbg2 0x%08x dbg3 0x%08x",
-            WcnBarRead (Dev, Bhi + BHI_ERRCODE), WcnBarRead (Dev, Bhi + BHI_ERRDBG1),
-            WcnBarRead (Dev, Bhi + BHI_ERRDBG2), WcnBarRead (Dev, Bhi + BHI_ERRDBG3));
-}
-
-static
 NTSTATUS
 MhiRingAlloc (
     _In_ PWCN_DEVICE Dev,
@@ -199,9 +186,7 @@ WcnMhiPrepare (
 
     Mhi->Bhi = WcnBarRead (Dev, MHI_BHIOFF);
     Mhi->Bhie = WcnBarRead (Dev, MHI_BHIEOFF);
-    WcnLog (Dev, "mhi: reglen 0x%x cfg 0x%08x bhi 0x%x bhie 0x%x chdb 0x%x erdb 0x%x",
-            WcnBarRead (Dev, MHI_REGLEN), WcnBarRead (Dev, MHI_CFG), Mhi->Bhi, Mhi->Bhie,
-            WcnBarRead (Dev, MHI_CHDBOFF), WcnBarRead (Dev, MHI_ERDBOFF));
+
     if (Mhi->Bhi == 0 || Mhi->Bhi >= Dev->BarLength || Mhi->Bhie == 0 || Mhi->Bhie >= Dev->BarLength) {
         Mhi->Bhi = 0;
         return STATUS_DEVICE_CONFIGURATION_ERROR;
@@ -215,7 +200,6 @@ WcnMhiPrepare (
     if (NT_SUCCESS (Status)) {
         MhiRddmPrepare (Dev);
     }
-    WcnLog (Dev, "rddm: %u segments, vector table 0x%llx, status 0x%08x", Mhi->Rddm.Segments, Mhi->Rddm.Vector.La, Status);
 
     Status = WcnDmaAlloc (Dev, MHI_MAX_CHANNELS * sizeof (MHI_CTXT), &Mhi->ChanCtxt);
     if (NT_SUCCESS (Status)) {
@@ -255,9 +239,6 @@ WcnMhiPrepare (
         return Status;
     }
 
-    WcnLog (Dev, "mhi: contexts chan 0x%llx event 0x%llx cmd 0x%llx, rings 0x%llx 0x%llx 0x%llx",
-            Mhi->ChanCtxt.La, Mhi->EventCtxt.La, Mhi->CmdCtxt.La,
-            Mhi->Event[0].Mem.La, Mhi->Event[1].Mem.La, Mhi->Cmd.Mem.La);
     return STATUS_SUCCESS;
 }
 
@@ -291,7 +272,6 @@ MhiLoadBhi (
     WcnBarWrite (Dev, Bhi + BHI_IMGADDR_LOW, (ULONG)Dma.La);
     WcnBarWrite (Dev, Bhi + BHI_IMGSIZE, (ULONG)Size);
     WcnBarWrite (Dev, Bhi + BHI_IMGTXDB, Sequence);
-    WcnLog (Dev, "bhi: sbl %Iu bytes at 0x%llx, session 0x%x", Size, Dma.La, Sequence);
 
     while (!Dev->Stop && MhiNowMs () - Start < MHI_BHI_TIMEOUT_MS) {
         TxStatus = WcnBarRead (Dev, Bhi + BHI_STATUS) >> 30;
@@ -300,15 +280,13 @@ MhiLoadBhi (
         }
         WcnWait (Dev, 5);
     }
-    WcnLog (Dev, "bhi: status %u after %lld ms, ee %u, mhi status 0x%08x, isr %ld msi 0x%08lx",
-            TxStatus, MhiNowMs () - Start, MhiExecEnv (Dev), WcnBarRead (Dev, MHI_STATUS),
-            Dev->IsrCount, Dev->MsiSeen);
+
     WdfObjectDelete (Dma.Buffer);
 
     if (TxStatus == BHI_STATUS_SUCCESS) {
         return STATUS_SUCCESS;
     }
-    MhiLogBhiError (Dev);
+
     return (TxStatus == 0) ? STATUS_IO_TIMEOUT : STATUS_DEVICE_HARDWARE_ERROR;
 }
 
@@ -404,7 +382,6 @@ MhiLoadBhie (
     WcnBarWrite (Dev, Mhi->Bhie + BHIE_TXVECSIZE, Mhi->Amss.Segments * 2 * sizeof (ULONG64));
     Value = WcnBarRead (Dev, Mhi->Bhie + BHIE_TXVECDB);
     WcnBarWrite (Dev, Mhi->Bhie + BHIE_TXVECDB, (Value & ~0x3FFFFFFFUL) | Sequence);
-    WcnLog (Dev, "bhie: amss download started, sequence 0x%x", Sequence);
 
     while (!Dev->Stop && MhiNowMs () - Start < MHI_BHIE_TIMEOUT_MS) {
         Value = WcnBarRead (Dev, Mhi->Bhie + BHIE_TXVECSTATUS);
@@ -414,13 +391,11 @@ MhiLoadBhie (
         }
         WcnWait (Dev, 5);
     }
-    WcnLog (Dev, "bhie: status 0x%08x after %lld ms, ee %u, isr %ld",
-            WcnBarRead (Dev, Mhi->Bhie + BHIE_TXVECSTATUS), MhiNowMs () - Start, MhiExecEnv (Dev), Dev->IsrCount);
 
     if (TxStatus == BHIE_STATUS_XFER_COMPL) {
         return STATUS_SUCCESS;
     }
-    MhiLogBhiError (Dev);
+
     return (TxStatus == 0) ? STATUS_IO_TIMEOUT : STATUS_DEVICE_HARDWARE_ERROR;
 }
 
@@ -437,18 +412,17 @@ MhiReady (
     ULONG Index;
 
     if (!MhiPoll (Dev, MHI_CTRL, MHI_CTRL_RESET, 0, 10000)) {
-        WcnLog (Dev, "ready: device did not clear MHI reset (ctrl 0x%08x)", WcnBarRead (Dev, MHI_CTRL));
+
         return STATUS_IO_TIMEOUT;
     }
     if (!MhiPoll (Dev, MHI_STATUS, MHI_STATUS_READY, MHI_STATUS_READY, MHI_READY_TIMEOUT_MS)) {
-        WcnLog (Dev, "ready: device did not enter READY (status 0x%08x ee %u)", WcnBarRead (Dev, MHI_STATUS), MhiExecEnv (Dev));
+
         return STATUS_IO_TIMEOUT;
     }
 
     Mhi->ChDb = WcnBarRead (Dev, MHI_CHDBOFF);
     Mhi->ErDb = WcnBarRead (Dev, MHI_ERDBOFF);
-    WcnLog (Dev, "ready: status 0x%08x ee %u chdb 0x%x erdb 0x%x",
-            WcnBarRead (Dev, MHI_STATUS), MhiExecEnv (Dev), Mhi->ChDb, Mhi->ErDb);
+
     if (Mhi->ChDb + 8 * MHI_MAX_CHANNELS > Dev->BarLength || Mhi->ErDb + 8 * MHI_EVENT_RINGS > Dev->BarLength) {
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
@@ -477,7 +451,6 @@ MhiReady (
     WcnBarWrite (Dev, MHI_CFG, Config);
     Config &= ~0xFF000000UL;
     WcnBarWrite (Dev, MHI_CFG, Config);
-    WcnLog (Dev, "ready: mhicfg 0x%08x", WcnBarRead (Dev, MHI_CFG));
 
     /* hand every software event ring to the device, minus one element */
     for (Index = 0; Index < MHI_EVENT_RINGS; Index++) {
@@ -489,7 +462,7 @@ MhiReady (
 
     MhiSetState (Dev, MHI_STATE_M0);
     Mhi->Ready = TRUE;
-    WcnLog (Dev, "ready: M0 requested, ctrl 0x%08x", WcnBarRead (Dev, MHI_CTRL));
+
     return STATUS_SUCCESS;
 }
 
@@ -605,7 +578,7 @@ MhiCommandCompletion (
     PWCN_CHAN Chan;
 
     if (Ptr < Ring->Mem.La || Ptr >= Ring->Mem.La + Ring->Length || (Ptr & 0xF) != 0) {
-        WcnLog (Dev, "cmd: completion 0x%llx outside the command ring", Ptr);
+
         return;
     }
     Tre = (PMHI_ELEMENT)(Ring->Mem.Va + (ULONG)(Ptr - Ring->Mem.La));
@@ -637,7 +610,7 @@ MhiProcessControlEvents (
         KeMemoryBarrier ();
         DeviceRp = MhiCtxtGet (Ring->Ctxt, CTXT_RP);
         if (DeviceRp < Ring->Mem.La || DeviceRp >= Ring->Mem.La + Ring->Length) {
-            WcnLog (Dev, "event: ring 0 rp 0x%llx outside the ring", DeviceRp);
+
             Mhi->SysErr = TRUE;
             break;
         }
@@ -648,8 +621,6 @@ MhiProcessControlEvents (
         Element = (PMHI_ELEMENT)(Ring->Mem.Va + Ring->Rp);
         Type = (Element->Dword[1] >> 16) & 0xFF;
         Code = Element->Dword[0] >> 24;
-        WcnLog (Dev, "event: type 0x%02x code 0x%02x ptr 0x%llx dw 0x%08x 0x%08x",
-                Type, Code, Element->Ptr, Element->Dword[0], Element->Dword[1]);
 
         switch (Type) {
         case MHI_PKT_STATE_CHANGE:
@@ -661,9 +632,9 @@ MhiProcessControlEvents (
                 if (Mhi->MissionMode) {
                     MhiRingEventDoorbells (Dev);
                 }
-                WcnLog (Dev, "mhi: M0");
+
             } else if (Code == MHI_STATE_SYS_ERR) {
-                WcnLog (Dev, "mhi: SYS_ERR state change, ee %u", MhiExecEnv (Dev));
+
                 Mhi->SysErr = TRUE;
             }
             break;
@@ -675,7 +646,6 @@ MhiProcessControlEvents (
         case MHI_PKT_EE_EVENT:
             Mhi->Ee = Code;
             if (Code == MHI_EE_SBL) {
-                Mhi->SblSeen = TRUE;
                 Status = MhiLoadBhie (Dev);
                 if (!NT_SUCCESS (Status)) {
                     Mhi->SysErr = TRUE;
@@ -688,8 +658,6 @@ MhiProcessControlEvents (
             }
             break;
 
-        default:
-            break;
         }
 
         Ring->Wp = (Ring->Wp + sizeof (MHI_ELEMENT)) % Ring->Length;
@@ -722,20 +690,18 @@ WcnMhiPowerUp (
     WcnBarWrite (Dev, Mhi->Bhi + BHI_INTVEC, 0);
     Ee = MhiExecEnv (Dev);
     State = MhiState (Dev);
-    WcnLog (Dev, "power up: ee %u state 0x%x ctrl 0x%08x status 0x%08x",
-            Ee, State, WcnBarRead (Dev, MHI_CTRL), WcnBarRead (Dev, MHI_STATUS));
 
     if (State == MHI_STATE_SYS_ERR) {
         WcnBarWrite (Dev, MHI_CTRL, WcnBarRead (Dev, MHI_CTRL) | MHI_CTRL_RESET);
         if (!MhiPoll (Dev, MHI_CTRL, MHI_CTRL_RESET, 0, 10000)) {
-            WcnLog (Dev, "power up: SYS_ERR reset did not clear");
+
             return STATUS_IO_TIMEOUT;
         }
         WcnBarWrite (Dev, Mhi->Bhi + BHI_INTVEC, 0);
     }
 
     if (Ee == MHI_EE_PBL) {
-        WcnLog (Dev, "bhi: serial 0x%08x", WcnBarRead (Dev, Mhi->Bhi + BHI_SERIALNU));
+
         Status = MhiLoadBhi (Dev, Dev->Firmware, (Dev->FirmwareSize < MHI_SBL_SIZE) ? Dev->FirmwareSize : MHI_SBL_SIZE);
         if (!NT_SUCCESS (Status)) {
             return Status;
@@ -750,13 +716,12 @@ WcnMhiPowerUp (
             RestSize -= MHI_SBL_SIZE;
         }
         Status = MhiAllocBhie (Dev, &Mhi->Amss, Rest, RestSize);
-        WcnLog (Dev, "bhie: %Iu bytes in %u segments, vector table 0x%llx, status 0x%08x",
-                RestSize, Mhi->Amss.Segments, Mhi->Amss.Vector.La, Status);
+
         if (!NT_SUCCESS (Status)) {
             return Status;
         }
     } else if (Ee != MHI_EE_AMSS) {
-        WcnLog (Dev, "power up: ee %u is neither PBL nor AMSS", Ee);
+
         return STATUS_DEVICE_NOT_READY;
     }
 
@@ -772,29 +737,26 @@ WcnMhiPowerUp (
         }
         Value = WcnBarRead (Dev, MHI_STATUS);
         if ((Value & MHI_STATUS_SYSERR) != 0) {
-            WcnLog (Dev, "mhi: SYSERR in status 0x%08x", Value);
+
             Mhi->SysErr = TRUE;
             break;
         }
         if (MhiNowMs () > Report) {
-            WcnLog (Dev, "waiting: ee %u state 0x%x status 0x%08x er0 rp 0x%llx isr %ld msi 0x%08lx",
-                    MhiExecEnv (Dev), MhiState (Dev), Value, MhiCtxtGet (Mhi->Event[0].Ctxt, CTXT_RP), Dev->IsrCount, Dev->MsiSeen);
+
             Report += 2000;
         }
         if (MhiNowMs () - Start > MHI_MISSION_TIMEOUT_MS) {
-            WcnLog (Dev, "mhi: no mission mode after %u ms", MHI_MISSION_TIMEOUT_MS);
-            MhiLogBhiError (Dev);
+
             return STATUS_IO_TIMEOUT;
         }
         WcnWait (Dev, 10);
     }
 
     if (Mhi->SysErr || !Mhi->MissionMode) {
-        MhiLogBhiError (Dev);
+
         return STATUS_DEVICE_HARDWARE_ERROR;
     }
-    WcnLog (Dev, "MISSION MODE: ee %u state 0x%x after %lld ms, isr %ld msi 0x%08lx",
-            Mhi->Ee, MhiState (Dev), MhiNowMs () - Start, Dev->IsrCount, Dev->MsiSeen);
+
     return STATUS_SUCCESS;
 }
 
@@ -845,7 +807,7 @@ MhiStartChannel (
     Chan->Completed = FALSE;
     Status = MhiSendCommand (Dev, Id, MHI_CMD_START_CHAN);
     if (!NT_SUCCESS (Status)) {
-        WcnLog (Dev, "chan %u: START not queued 0x%08x", Id, Status);
+
         return Status;
     }
     Deadline = MhiNowMs () + 2000;
@@ -856,9 +818,7 @@ MhiStartChannel (
         }
         WcnWait (Dev, 10);
     }
-    WcnLog (Dev, "chan %u: START %s, ccs %u, ring 0x%llx buffers 0x%llx chcfg 0x%08x",
-            Id, Chan->Completed ? "completed" : "timed out", Chan->Ccs,
-            Chan->Ring.Mem.La, Chan->Buffers.La, Ctxt->Dword0);
+
     if (!Chan->Completed) {
         return STATUS_IO_TIMEOUT;
     }
@@ -895,7 +855,7 @@ WcnMhiStartChannels (
         MhiQueueTre (Dl, Slot, MHI_CHAN_BUF_LEN);
     }
     MhiRingChannelDoorbell (Dev, Dl);
-    WcnLog (Dev, "chan %u: %u receive buffers of %u bytes queued", MHI_IPCR_DL, MHI_CHAN_ELEMENTS - 1, MHI_CHAN_BUF_LEN);
+
     WcnQrtrStart (Dev);
     return STATUS_SUCCESS;
 }
@@ -955,7 +915,7 @@ MhiTransferEvent (
     BOOLEAN Requeued = FALSE;
 
     if (Chan == NULL || !Chan->Running) {
-        WcnLog (Dev, "chan %u: event code 0x%x on a channel that is not running", Id, Code);
+
         return;
     }
     Ring = &Chan->Ring;
@@ -965,7 +925,7 @@ MhiTransferEvent (
     case MHI_EV_CC_EOB:
     case MHI_EV_CC_OVERFLOW:
         if (Event->Ptr < Ring->Mem.La || Event->Ptr >= Ring->Mem.La + Ring->Length || (Event->Ptr & 0xF) != 0) {
-            WcnLog (Dev, "chan %u: event 0x%llx points outside the TRE ring", Id, Event->Ptr);
+
             return;
         }
         if (Code == MHI_EV_CC_OVERFLOW) {
@@ -981,7 +941,6 @@ MhiTransferEvent (
             }
             Slot = Chan->Slot[Ring->Rp / sizeof (MHI_ELEMENT)];
             Ring->Rp = (Ring->Rp + sizeof (MHI_ELEMENT)) % Ring->Length;
-            Chan->Packets++;
             if (Id == MHI_IPCR_DL) {
                 WcnQrtrReceive (Dev, Chan->Buffers.Va + (SIZE_T)Slot * MHI_CHAN_BUF_LEN, Bytes);
                 MhiQueueTre (Chan, Slot, MHI_CHAN_BUF_LEN);
@@ -1000,9 +959,6 @@ MhiTransferEvent (
         }
         break;
 
-    default:
-        WcnLog (Dev, "chan %u: event code 0x%x length %u ptr 0x%llx", Id, Code, Length, Event->Ptr);
-        break;
     }
 }
 
@@ -1024,10 +980,6 @@ MhiProcessDataEvents (
         KeMemoryBarrier ();
         DeviceRp = MhiCtxtGet (Ring->Ctxt, CTXT_RP);
         if (DeviceRp < Ring->Mem.La || DeviceRp >= Ring->Mem.La + Ring->Length) {
-            if (!Mhi->DataRingBad) {
-                Mhi->DataRingBad = TRUE;
-                WcnLog (Dev, "event: ring 1 rp 0x%llx outside the ring", DeviceRp);
-            }
             break;
         }
         if ((ULONG)(DeviceRp - Ring->Mem.La) == Ring->Rp) {
@@ -1038,8 +990,6 @@ MhiProcessDataEvents (
         Type = (Element->Dword[1] >> 16) & 0xFF;
         if (Type == MHI_PKT_TX_EVENT) {
             MhiTransferEvent (Dev, Element);
-        } else {
-            WcnLog (Dev, "event: ring 1 type 0x%02x dw 0x%08x 0x%08x", Type, Element->Dword[0], Element->Dword[1]);
         }
 
         Ring->Wp = (Ring->Wp + sizeof (MHI_ELEMENT)) % Ring->Length;
@@ -1054,38 +1004,9 @@ MhiProcessDataEvents (
 }
 
 /* main.c / ath12k coredump: collect the RDDM upload once the device asserts */
-static
-VOID
-MhiSaveRddm (
-    _In_ PWCN_DEVICE Dev
-    )
+static VOID MhiLatchRddm(PWCN_DEVICE Dev)
 {
-    PWCN_MHI Mhi = &Dev->Mhi;
-    LONGLONG Start = MhiNowMs ();
-    ULONG RxStatus = 0;
-    NTSTATUS Status;
-
-    Mhi->RddmSaved = TRUE;
-    MhiLogBhiError (Dev);
-    WcnLog (Dev, "rddm: device in RDDM, mhi status 0x%08x, rx status 0x%08x",
-            WcnBarRead (Dev, MHI_STATUS), WcnBarRead (Dev, Mhi->Bhie + BHIE_RXVECSTATUS));
-    if (Mhi->Rddm.Segments == 0) {
-        return;
-    }
-    while (!Dev->Stop && MhiNowMs () - Start < 20000) {
-        RxStatus = WcnBarRead (Dev, Mhi->Bhie + BHIE_RXVECSTATUS) >> 30;
-        if (RxStatus != 0) {
-            break;
-        }
-        WcnWait (Dev, 10);
-    }
-    WcnLog (Dev, "rddm: rx status 0x%08x after %lld ms",
-            WcnBarRead (Dev, Mhi->Bhie + BHIE_RXVECSTATUS), MhiNowMs () - Start);
-    if (RxStatus != BHIE_STATUS_XFER_COMPL) {
-        return;
-    }
-    Status = WcnWriteDump (L"\\SystemRoot\\wcn7861-rddm.bin", Mhi->Rddm.Segment, Mhi->Rddm.Segments);
-    WcnLog (Dev, "rddm: %u bytes written to wcn7861-rddm.bin, status 0x%08x", Mhi->Rddm.Segments * MHI_SEG_LEN, Status);
+    Dev->Mhi.RddmSaved=TRUE;WcnLog(Dev,"firmware RDDM failure; data path stopped");
 }
 
 /* Called from the bring-up thread after power up: keeps the event rings drained. */
@@ -1104,6 +1025,6 @@ WcnMhiService (
         MhiProcessDataEvents (Dev);
     }
     if (!Mhi->RddmSaved && MhiExecEnv (Dev) == MHI_EE_RDDM) {
-        MhiSaveRddm (Dev);
+        MhiLatchRddm (Dev);
     }
 }

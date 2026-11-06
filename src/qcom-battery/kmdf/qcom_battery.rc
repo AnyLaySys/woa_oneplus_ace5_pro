@@ -1,0 +1,33 @@
+#include <windows.h>
+
+#define ALS_STRINGIFY_INNER(x) #x
+#define ALS_STRINGIFY(x) ALS_STRINGIFY_INNER(x)
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION ALS_DRIVER_VERSION
+ PRODUCTVERSION ALS_DRIVER_VERSION
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DRV
+ FILESUBTYPE VFT2_DRV_SYSTEM
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904B0"
+  BEGIN
+   VALUE "CompanyName", "AnyLaySys\0"
+   VALUE "FileDescription", "Qualcomm Battery Fuel Gauge Driver\0"
+   VALUE "FileVersion", ALS_STRINGIFY(ALS_DRIVER_VERSION_TEXT) "\0"
+   VALUE "InternalName", "qcom_battery.sys\0"
+   VALUE "OriginalFilename", "qcom_battery.sys\0"
+   VALUE "ProductName", "AnyLaySys Battery Gauge Driver\0"
+   VALUE "ProductVersion", ALS_STRINGIFY(ALS_DRIVER_VERSION_TEXT) "\0"
+
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x0409, 1200
+ END
+END

@@ -127,7 +127,6 @@ SiaSmemFind (
 static
 PUCHAR
 SiaSmemAlloc (
-    _In_ PSIA_DEVICE Dev,
     _In_ PSIA_LINK Link,
     _In_ ULONG Item,
     _In_ ULONG Size
@@ -140,7 +139,6 @@ SiaSmemAlloc (
     ULONG Base;
 
     if (!SiaSmemLock (Link)) {
-        SiaLog (Dev, "smem lock timeout owner=%lu", SiaRead32 (Link->Mutex, 0));
         return NULL;
     }
     Found = SiaSmemFind (Link, Item, NULL);
@@ -158,12 +156,7 @@ SiaSmemAlloc (
             KeMemoryBarrier ();
             SiaWrite32 (Link->Smem, Link->Partition + 12, Free + 16 + Aligned);
             Found = Link->Smem + Base + 16;
-            SiaLog (Dev, "smem alloc item %lu size 0x%x at 0x%x", Item, Aligned, Free);
-        } else {
-            SiaLog (Dev, "smem alloc item %lu no space free=0x%x cached=0x%x", Item, Free, Cached);
         }
-    } else {
-        SiaLog (Dev, "smem item %lu already exists", Item);
     }
     SiaSmemUnlock (Link);
     return Found;
@@ -178,43 +171,6 @@ SiaKick (
 {
     KeMemoryBarrier ();
     SiaWrite32 (Link->Ipcc, IPCC_SEND_ID, (IPCC_CLIENT_LPASS << 16) | Signal);
-}
-
-static
-VOID
-SiaSmp2pPoll (
-    _In_ PSIA_DEVICE Dev,
-    _In_ PSIA_LINK Link
-    )
-{
-    ULONG Valid;
-    ULONG Index;
-    ULONG Byte;
-    ULONG Value;
-    CHAR Name[17];
-
-    if (Link->In == NULL) {
-        Link->In = SiaSmemFind (Link, SMP2P_IN_ITEM, &Link->InSize);
-        if (Link->In == NULL) {
-            return;
-        }
-    }
-    Valid = Rd16 (Link->In, 14);
-    for (Index = 0; Index < Valid && Index < 16 && 20 + (Index + 1) * 20 <= Link->InSize; Index++) {
-        Value = SiaRead32 (Link->In, 20 + Index * 20 + 16);
-        if (Index < Link->LastInValid && Value == Link->LastInValues[Index]) {
-            continue;
-        }
-        for (Byte = 0; Byte < 16; Byte += 4) {
-            *(ULONG UNALIGNED *)(Name + Byte) = SiaRead32 (Link->In, 20 + Index * 20 + Byte);
-        }
-        Name[16] = 0;
-        SiaLog (Dev, "smp2p in entry %lu \"%s\" = 0x%08x", Index, Name, Value);
-        Link->LastInValues[Index] = Value;
-    }
-    if (Valid != Link->LastInValid) {
-        Link->LastInValid = Valid;
-    }
 }
 
 static
@@ -289,29 +245,27 @@ SiaGlinkIntent (PSIA_LINK Link, ULONG Iid, ULONG Size)
     SiaGlinkSend (Link, (const UCHAR *)Intent, sizeof (Intent));
 }
 
-static
-VOID
-SiaGlinkOpenAudio (
-    _In_ PSIA_DEVICE Dev,
-    _In_ PSIA_LINK Link,
-    _In_ ULONG Rcid
-    )
+static VOID
+SiaGlinkRequestAudio (PSIA_LINK Link)
 {
     static const CHAR Name[] = "adsp_apps";
     UCHAR Msg[8 + sizeof (Name)];
-    ULONG Index;
-
-    Link->AudioRcid = Rcid;
-    SiaGlinkCmd (Link, GLINK_CMD_OPEN_ACK, (USHORT)Rcid, 0);
+    if (Link->AudioOpening) return;
     *(USHORT UNALIGNED *)(Msg + 0) = GLINK_CMD_OPEN;
     *(USHORT UNALIGNED *)(Msg + 2) = GLINK_AUDIO_LCID;
     *(ULONG UNALIGNED *)(Msg + 4) = sizeof (Name);
     RtlCopyMemory (Msg + 8, Name, sizeof (Name));
-    SiaGlinkSend (Link, Msg, sizeof (Msg));
-    for (Index = 1; Index <= GLINK_LOCAL_INTENTS; Index++) {
+    Link->AudioOpening = SiaGlinkSend (Link, Msg, sizeof (Msg));
+}
+
+static VOID
+SiaGlinkOpenAudio (PSIA_LINK Link, ULONG Rcid)
+{
+    Link->AudioRcid = Rcid;
+    SiaGlinkCmd (Link, GLINK_CMD_OPEN_ACK, (USHORT)Rcid, 0);
+    SiaGlinkRequestAudio (Link);
+    for (ULONG Index = 1; Index <= GLINK_LOCAL_INTENTS; Index++)
         SiaGlinkIntent (Link, Index, GLINK_LOCAL_INTENT_SIZE);
-    }
-    SiaLog (Dev, "glink adsp_apps rcid %lu opened, %u local intents", Rcid, GLINK_LOCAL_INTENTS);
 }
 
 static
@@ -415,7 +369,6 @@ SiaLinkPoll (
         Head = SiaRead32 (Link->Desc, 12);
         Tail = SiaRead32 (Link->Desc, 8);
         if (Head >= Link->RxLength || Tail >= Link->RxLength) {
-            SiaLog (Dev, "glink invalid rx pointers head %lu tail %lu length %lu", Head, Tail, Link->RxLength);
             return;
         }
         Avail = (Head < Tail) ? Link->RxLength - Tail + Head : Head - Tail;
@@ -430,11 +383,10 @@ SiaLinkPoll (
 
         switch (Cmd) {
         case GLINK_CMD_VERSION:
-            SiaLog (Dev, "glink rx VERSION %u features 0x%x", Param1, Param2);
             SiaGlinkCmd (Link, GLINK_CMD_VERSION_ACK, 1, GLINK_FEATURES & Param2);
             break;
         case GLINK_CMD_VERSION_ACK:
-            SiaLog (Dev, "glink rx VERSION_ACK %u features 0x%x", Param1, Param2);
+            SiaGlinkRequestAudio (Link);
             break;
         case GLINK_CMD_OPEN:
             Size = 8 + (((Param2 & 0xFFFF) + 7) & ~7u);
@@ -444,20 +396,24 @@ SiaLinkPoll (
             RtlZeroMemory (Name, sizeof (Name));
             SiaFifoRead (Link, Tail + 8, Name, min ((Param2 & 0xFFFF), sizeof (Name) - 1));
             Name[sizeof (Name) - 1] = 0;
-            SiaLog (Dev, "glink rx OPEN rcid %u name \"%s\"", Param1, Name);
             if (strcmp ((const char *)Name, "adsp_apps") == 0) {
-                SiaGlinkOpenAudio (Dev, Link, Param1);
+                SiaGlinkOpenAudio (Link, Param1);
             }
+            break;
+        case GLINK_CMD_CLOSE:
+            SiaGlinkCmd (Link, GLINK_CMD_CLOSE_ACK, Param1, 0);
+            if (Param1 == Link->AudioRcid) { Link->AudioRcid = 0; Link->IntentCount = 0; }
+            break;
+        case GLINK_CMD_CLOSE_ACK:
+            if (Param1 == GLINK_AUDIO_LCID) { Link->AudioOpenAcked = FALSE; Link->AudioOpening = FALSE; }
             break;
         case GLINK_CMD_OPEN_ACK:
             if (Param1 == GLINK_AUDIO_LCID) {
                 Link->AudioOpenAcked = TRUE;
-                SiaLog (Dev, "glink rx OPEN_ACK adsp_apps");
             }
             break;
         case GLINK_CMD_INTENT:
             if (Param2 > (Link->RxLength - 8) / 8) {
-                SiaLog (Dev, "glink invalid intent count %lu", Param2);
                 return;
             }
             Size = 8 + Param2 * 8;
@@ -478,7 +434,6 @@ SiaLinkPoll (
             }
             break;
         case GLINK_CMD_RX_INTENT_REQ:
-            SiaLog (Dev, "glink rx RX_INTENT_REQ rcid %u size %lu", Param1, Param2);
             if (Link->AudioRcid != 0 && Param1 == Link->AudioRcid) {
                 SiaGlinkIntent (Link, 100, max (Param2, GLINK_LOCAL_INTENT_SIZE));
                 SiaGlinkCmd (Link, GLINK_CMD_INTENT_REQ_ACK, GLINK_AUDIO_LCID, 1);
@@ -491,7 +446,6 @@ SiaLinkPoll (
             }
             SiaFifoRead (Link, Tail + 8, Name, 8);
             if (*(ULONG UNALIGNED *)Name > Link->RxLength - 16) {
-                SiaLog (Dev, "glink invalid data chunk %lu", *(ULONG UNALIGNED *)Name);
                 return;
             }
             Size = (16 + *(ULONG UNALIGNED *)Name + 7) & ~7u;
@@ -499,24 +453,18 @@ SiaLinkPoll (
                 return;
             }
             if (Link->AudioRcid != 0 && Param1 == Link->AudioRcid) {
-                if (*(ULONG UNALIGNED *)(Name + 4) != 0 || Cmd == GLINK_CMD_TX_DATA_CONT) {
-                    SiaLog (Dev, "glink rx multi-chunk data chunk %lu left %lu", *(ULONG UNALIGNED *)Name, *(ULONG UNALIGNED *)(Name + 4));
-                } else {
+                if (*(ULONG UNALIGNED *)(Name + 4) == 0 && Cmd != GLINK_CMD_TX_DATA_CONT)
                     SiaQueuePush (Link, Tail + 16, *(ULONG UNALIGNED *)Name);
-                }
                 SiaWrite32 (Link->Desc, 8, (Tail + Size) % Link->RxLength);
                 SiaGlinkCmd (Link, GLINK_CMD_RX_DONE_REUSE, GLINK_AUDIO_LCID, Param2);
                 continue;
             }
             break;
-        case GLINK_CMD_CLOSE:
-        case GLINK_CMD_CLOSE_ACK:
         case GLINK_CMD_READ_NOTIF:
         case GLINK_CMD_SIGNALS:
         case GLINK_CMD_INTENT_REQ_ACK:
             break;
         default:
-            SiaLog (Dev, "glink rx cmd %u p1 %u p2 0x%x", Cmd, Param1, Param2);
             break;
         }
         SiaWrite32 (Link->Desc, 8, (Tail + Size) % Link->RxLength);
@@ -551,7 +499,6 @@ SiaGprSendRaw (
         SiaSleep (1);
     }
     if (Index >= Link->IntentCount) {
-        SiaLog (Dev, "gpr send: no remote intent for %lu bytes (count %lu)", Length, Link->IntentCount);
         return STATUS_DEVICE_BUSY;
     }
     *(USHORT UNALIGNED *)(Msg + 0) = GLINK_CMD_TX_DATA;
@@ -568,7 +515,6 @@ SiaGprSendRaw (
         SiaLinkPoll (Dev);
         SiaSleep (1);
     }
-    SiaLog (Dev, "gpr send: tx fifo full");
     return STATUS_DEVICE_BUSY;
 }
 
@@ -614,13 +560,11 @@ SiaLinkStart (
     Physical.QuadPart = IPCC_PHYS;
     Link->Ipcc = (PUCHAR)MmMapIoSpaceEx (Physical, PAGE_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
     if (Link->Smem == NULL || Link->Mutex == NULL || Link->Ipcc == NULL) {
-        SiaLog (Dev, "link map failed");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     Toc = SMEM_SIZE - 0x1000;
     if (SiaRead32 (Link->Smem, Toc) != SMEM_TOC_MAGIC) {
-        SiaLog (Dev, "smem toc magic 0x%08x", SiaRead32 (Link->Smem, Toc));
         return STATUS_DEVICE_NOT_READY;
     }
     Count = SiaRead32 (Link->Smem, Toc + 8);
@@ -634,46 +578,45 @@ SiaLinkStart (
         }
     }
     if (Link->Partition == 0 || SiaRead32 (Link->Smem, Link->Partition) != SMEM_PART_MAGIC) {
-        SiaLog (Dev, "apps-adsp partition missing");
         return STATUS_DEVICE_NOT_READY;
     }
 
-    SiaSmp2pPoll (Dev, Link);
-    Link->Out = SiaSmemAlloc (Dev, Link, SMP2P_OUT_ITEM, SMP2P_ITEM_SIZE);
+    Link->In = SiaSmemFind (Link, SMP2P_IN_ITEM, &Link->InSize);
+    Link->Out = SiaSmemAlloc (Link, SMP2P_OUT_ITEM, SMP2P_ITEM_SIZE);
     if (Link->Out == NULL) {
         return STATUS_DEVICE_NOT_READY;
     }
-    for (Index = 0; Index < SMP2P_ITEM_SIZE; Index += 4) {
-        SiaWrite32 (Link->Out, Index, 0);
+    if (SiaRead32 (Link->Out, 0) != SMP2P_MAGIC) {
+        for (Index = 0; Index < SMP2P_ITEM_SIZE; Index += 4) {
+            SiaWrite32 (Link->Out, Index, 0);
+        }
+        SiaWrite32 (Link->Out, 0, SMP2P_MAGIC);
+        Wr16 (Link->Out, 8, 0);
+        Wr16 (Link->Out, 10, 2);
+        Wr16 (Link->Out, 12, 16);
+        Wr16 (Link->Out, 14, 0);
+        KeMemoryBarrier ();
+        SiaWrite32 (Link->Out, 4, (1u << 8) | ((Link->In != NULL && READ_REGISTER_UCHAR (Link->In + 4) != 0) ? READ_REGISTER_UCHAR (Link->In + 4) : 2u));
     }
-    SiaWrite32 (Link->Out, 0, SMP2P_MAGIC);
-    Wr16 (Link->Out, 8, 0);
-    Wr16 (Link->Out, 10, 2);
-    Wr16 (Link->Out, 12, 16);
-    Wr16 (Link->Out, 14, 0);
-    KeMemoryBarrier ();
-    SiaWrite32 (Link->Out, 4, (1u << 8) | ((Link->In != NULL && READ_REGISTER_UCHAR (Link->In + 4) != 0) ? READ_REGISTER_UCHAR (Link->In + 4) : 2u));
     SiaKick (Link, IPCC_SIGNAL_SMP2P);
 
     Link->Desc = SiaSmemFind (Link, GLINK_DESC_ITEM, &Count);
     Link->TxFifo = SiaSmemFind (Link, GLINK_TX_ITEM, &Link->TxLength);
     if (Link->Desc == NULL || Link->TxFifo == NULL) {
-        SiaLog (Dev, "glink smem items missing");
         return STATUS_DEVICE_NOT_READY;
     }
-    SiaWrite32 (Link->Desc, 8, 0);
-    SiaWrite32 (Link->Desc, 4, 0);
+    // Keep live transport cursors. Reopen the audio channel, not the whole edge.
+    SiaGlinkCmd (Link, GLINK_CMD_CLOSE, GLINK_AUDIO_LCID, 0);
+    for (Tick = 0; Tick < 100; Tick++) { SiaLinkPoll (Dev); SiaSleep (1); }
     SiaGlinkCmd (Link, GLINK_CMD_VERSION, 1, GLINK_FEATURES);
 
     for (Tick = 0; Tick < 3000 && !(Link->AudioOpenAcked && Link->IntentCount > 0); Tick++) {
         if (Dev->Stopping != 0) {
             return STATUS_CANCELLED;
         }
-        SiaSmp2pPoll (Dev, Link);
         SiaLinkPoll (Dev);
         SiaSleep (1);
     }
-    SiaLog (Dev, "link: adsp_apps open %u remote intents %lu after %lu ms", Link->AudioOpenAcked, Link->IntentCount, Tick);
     if (!Link->AudioOpenAcked || Link->IntentCount == 0) {
         return STATUS_IO_TIMEOUT;
     }
@@ -688,7 +631,6 @@ SiaLinkStart (
             SiaLinkPoll (Dev);
             while (SiaGprPop (Dev, &Rsp)) {
                 if (Rsp.Length >= 28 && *(ULONG UNALIGNED *)(Rsp.Data + 20) == APM_CMD_RSP_SPF_STATE) {
-                    SiaLog (Dev, "apm spf state %lu", *(ULONG UNALIGNED *)(Rsp.Data + 24));
                     if (*(ULONG UNALIGNED *)(Rsp.Data + 24) == 1) {
                         return STATUS_SUCCESS;
                     }
@@ -710,6 +652,10 @@ SiaLinkStop (
 
     if (Link == NULL) {
         return;
+    }
+    if (Link->AudioOpenAcked) {
+        SiaGlinkCmd (Link, GLINK_CMD_CLOSE, GLINK_AUDIO_LCID, 0);
+        for (ULONG Tick = 0; Tick < 100 && Link->AudioOpenAcked; Tick++) { SiaLinkPoll (Dev); SiaSleep (1); }
     }
     if (Link->Ipcc != NULL) {
         MmUnmapIoSpace (Link->Ipcc, PAGE_SIZE);

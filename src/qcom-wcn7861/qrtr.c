@@ -14,10 +14,8 @@
 
 #define QRTR_TYPE_DATA          1
 #define QRTR_TYPE_HELLO         2
-#define QRTR_TYPE_BYE           3
 #define QRTR_TYPE_NEW_SERVER    4
 #define QRTR_TYPE_DEL_SERVER    5
-#define QRTR_TYPE_DEL_CLIENT    6
 #define QRTR_TYPE_RESUME_TX     7
 
 #define QRTR_PORT_CTRL          0xFFFFFFFE
@@ -87,8 +85,7 @@ QrtrSend (
     Hdr.DstNode = DstNode;
     Hdr.DstPort = DstPort;
     Status = WcnMhiSend (Dev, &Hdr, sizeof (Hdr), Payload, Size);
-    WcnLog (Dev, "qrtr tx: type %u %x:%x -> %x:%x size %u, status 0x%08x",
-            Type, QRTR_LOCAL_NODE, SrcPort, DstNode, DstPort, Size, Status);
+
     return Status;
 }
 
@@ -146,8 +143,7 @@ WcnQrtrStart (
     )
 {
     RtlZeroMemory (&Dev->Qrtr, sizeof (Dev->Qrtr));
-    Dev->Qrtr.StartMs = WcnNowMs ();
-    WcnLog (Dev, "qrtr: local node %u, client port 0x%x, waiting for the firmware HELLO", QRTR_LOCAL_NODE, QRTR_CLIENT_PORT);
+
 }
 
 /* af_qrtr.c qrtr_endpoint_post + the ns.c control handling the host needs */
@@ -170,11 +166,8 @@ WcnQrtrReceive (
     ULONG Size;
     ULONG HdrLength;
     BOOLEAN ConfirmRx;
-
-    Qrtr->Received++;
     if (Length < sizeof (QRTR_HDR_V2) || (Length & 3) != 0) {
-        WcnLog (Dev, "qrtr rx: %u byte packet ignored", Length);
-        WcnLogHex (Dev, "qrtr rx:   ", Data, Length);
+
         return;
     }
 
@@ -202,19 +195,15 @@ WcnQrtrReceive (
         ConfirmRx = (Hdr->Flags & 1) != 0;
         Size = Hdr->Size;
     } else {
-        WcnLog (Dev, "qrtr rx: unknown version %u, %u bytes", Version, Length);
-        WcnLogHex (Dev, "qrtr rx:   ", Data, Length);
+
         return;
     }
     if (DstPort == QRTR_PORT_CTRL_LEGACY) {
         DstPort = QRTR_PORT_CTRL;
     }
 
-    WcnLog (Dev, "qrtr rx: v%u type %u %x:%x -> %x:%x size %u%s",
-            Version, Type, SrcNode, SrcPort, DstNode, DstPort, Size, ConfirmRx ? " confirm_rx" : "");
     if (Size == 0 || HdrLength + Size > Length) {
-        WcnLog (Dev, "qrtr rx: size %u does not fit the %u byte packet", Size, Length);
-        WcnLogHex (Dev, "qrtr rx:   ", Data, Length);
+
         return;
     }
     Payload = Data + HdrLength;
@@ -222,8 +211,6 @@ WcnQrtrReceive (
 
     switch (Type) {
     case QRTR_TYPE_HELLO:
-        Qrtr->HelloSeen = TRUE;
-        Qrtr->RemoteNode = SrcNode;
         QrtrSayHello (Dev, SrcNode);
         break;
 
@@ -232,9 +219,7 @@ WcnQrtrReceive (
         if (Size < sizeof (QRTR_CTRL)) {
             break;
         }
-        WcnLog (Dev, "qrtr: %s service 0x%x instance 0x%x (version %u, instance %u) at %x:%x",
-                (Type == QRTR_TYPE_NEW_SERVER) ? "new server" : "del server",
-                Ctrl->Arg[0], Ctrl->Arg[1], Ctrl->Arg[1] & 0xFF, Ctrl->Arg[1] >> 8, Ctrl->Arg[2], Ctrl->Arg[3]);
+
         if (Type == QRTR_TYPE_NEW_SERVER && Ctrl->Arg[0] == QMI_WLFW_SERVICE && !Qrtr->WlfwFound) {
             Qrtr->WlfwFound = TRUE;
             Qrtr->WlfwNode = Ctrl->Arg[2];
@@ -246,16 +231,11 @@ WcnQrtrReceive (
     case QRTR_TYPE_DATA:
         if (DstPort == QRTR_CLIENT_PORT) {
             WcnQmiReceive (Dev, Payload, Size);
-        } else {
-            WcnLogHex (Dev, "qrtr rx:   ", Payload, Size);
         }
         if (ConfirmRx) {
             QrtrResumeTx (Dev, DstPort, SrcNode, SrcPort);
         }
         break;
 
-    default:
-        WcnLogHex (Dev, "qrtr rx:   ", Payload, Size);
-        break;
     }
 }

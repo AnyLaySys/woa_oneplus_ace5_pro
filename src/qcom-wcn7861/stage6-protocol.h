@@ -2,9 +2,7 @@
  * Outbound command tags independently checked against current PEACH ELF. */
 #pragma once
 #define S6_WMI_PDEV_SET_PARAM_CMDID 0x4003u
-#define S6_WMI_VDEV_SET_PARAM_CMDID 0x5008u
 #define S6_WMI_TAG_PDEV_SET_PARAM_CMD 0x52u
-#define S6_WMI_TAG_VDEV_SET_PARAM_CMD 0x5fu
 #define S6_WMI_PDEV_PARAM_TX_CHAIN_MASK 0x1u
 #define S6_WMI_PDEV_PARAM_RX_CHAIN_MASK 0x2u
 #define S6_WMI_VDEV_PARAM_NSS 0x22u

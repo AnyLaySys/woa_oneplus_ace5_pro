@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|ARM64"><Configuration>Debug</Configuration><Platform>ARM64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM64"><Configuration>Release</Configuration><Platform>ARM64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{7F8F86DA-24C6-48F9-9D95-107E522B40F2}</ProjectGuid>
+    <RootNamespace>qcom_bluetooth</RootNamespace>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <Platform Condition="'$(Platform)' == ''">ARM64</Platform>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <TargetName>qcom_bluetooth</TargetName>
+    <KmdfLibraryVersion>1.33</KmdfLibraryVersion>
+    <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
+    <QbtVersionDate Condition="'$(QbtVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</QbtVersionDate>
+    <QbtRevision Condition="'$(QbtRevision)' == ''">4</QbtRevision>
+    <QbtDriverDate>$([System.DateTime]::Parse('$(QbtVersionDate)').ToString('MM/dd/yyyy'))</QbtDriverDate>
+    <QbtDriverVersion>$([System.DateTime]::Parse('$(QbtVersionDate)').ToString('yy.M.d')).$(QbtRevision)</QbtDriverVersion>
+    <QbtDriverVersionComma>$([System.String]::Copy('$(QbtDriverVersion)').Replace('.', ','))</QbtDriverVersionComma>
+    <WoAProjectRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..'))</WoAProjectRoot>
+    <OutDir>$(WoAProjectRoot)\out\qcom-bluetooth\$(Platform)\$(Configuration)\bin\</OutDir>
+    <IntDir>$(WoAProjectRoot)\out\qcom-bluetooth\$(Platform)\$(Configuration)\obj\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>..;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <WarningLevel>Level4</WarningLevel>
+    </ClCompile>
+    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>$(QbtDriverDate)</DateStamp><TimeStamp>$(QbtDriverVersion)</TimeStamp></Inf>
+    <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=$(QbtDriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(QbtDriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
+    <DriverSign><FileDigestAlgorithm>sha256</FileDigestAlgorithm></DriverSign>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\driver.c" /><ClCompile Include="..\uart.c" /><ClCompile Include="..\firmware.c" />
+    <ClInclude Include="..\bluetooth.h" /><ClInclude Include="..\h4.h" /><ClInclude Include="..\ibs.h" />
+    <ResourceCompile Include="qcom_bluetooth.rc" />
+    <Inf Include="qcom_bluetooth.inx" /><FilesToPackage Include="$(TargetPath)" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
