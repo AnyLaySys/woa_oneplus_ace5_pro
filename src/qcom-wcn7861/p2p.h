@@ -1,0 +1,12 @@
+/* SPDX-License-Identifier: BSD-3-Clause-Clear */
+#pragma once
+NTSTATUS WcnP2pCreate(PWCN_DEVICE D);
+VOID WcnP2pDestroy(PWCN_DEVICE D);
+VOID WcnP2pStop(PWCN_DEVICE D);
+VOID WcnP2pDmaCleanup(PWCN_DEVICE D);
+VOID WcnP2pService(PWCN_DEVICE D);
+VOID WcnP2pWmi(PWCN_DEVICE D,ULONG Event,const UCHAR *P,ULONG N);
+BOOLEAN WcnP2pScanOwned(PWCN_DEVICE D);
+ULONG WcnStage8AssocIes(PWCN_DEVICE D,PWCN_JOIN J,UCHAR *Out,ULONG Capacity);
+NTSTATUS WcnP2pPauseListen(PWCN_DEVICE D);
+BOOLEAN WcnStage8Provisioning(PWCN_DEVICE D,PWCN_JOIN J);

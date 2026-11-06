@@ -2,10 +2,7 @@
 
 #include <ntddk.h>
 #include <batclass.h>
-
-#ifndef QCB_DRIVER_VERSION
-#define QCB_DRIVER_VERSION "26.11.4.19"
-#endif
+#include "power.h"
 
 #define BAT_GAUGE_ADDRESS       0x55u
 #define BAT_GPIO_SDA            66u
@@ -27,24 +24,16 @@
 #define BQ_REG_DESIGN           0x3Cu
 
 #define BAT_POLL_MS             5000u
-#define BAT_STOP_MS             5000u
 #define BAT_SLICE_MS            250u
 #define BAT_PENDING_MAX          32u
 #define BAT_BATTERY_TAG         1u
-#define BAT_LOG_RING            64u
-#define BAT_LOG_LINE            128u
-#define BAT_LOG_PATH            L"\\SystemRoot\\qcom_battery.log"
-#define BAT_DEVICE_NAME         L"Hummer-4.57V-6.1Ah"
-
-typedef struct _BAT_LOG_ENTRY
-{
-    CHAR Text[BAT_LOG_LINE];
-} BAT_LOG_ENTRY;
+#define BAT_DEVICE_NAME         L"OnePlus Ace 5 Pro Battery"
 
 typedef struct _BAT_SNAPSHOT
 {
     BOOLEAN Valid;
-    BOOLEAN Discharging;
+    BOOLEAN Online;
+    ULONGLONG SampleTimeMs;
     ULONG   Soc;
     ULONG   VoltageMv;
     ULONG   RemainingMah;
@@ -64,7 +53,7 @@ typedef struct _BAT_DEVICE
     BATTERY_MINIPORT_INFO_V1_1 Info;
     UNICODE_STRING             DeviceName;
     PUCHAR                     Tlmm;
-    PVOID                      Thread;
+    HANDLE                     Thread;
     KEVENT                     StopEvent;
     volatile LONG              Stopping;
     BOOLEAN                    I2cReady;
@@ -72,23 +61,8 @@ typedef struct _BAT_DEVICE
     KSPIN_LOCK                 PendingLock;
     PIRP                       Pending[BAT_PENDING_MAX];
     BAT_SNAPSHOT               Now;
-    HANDLE                     LogFile;
-    BAT_LOG_ENTRY              LogRing[BAT_LOG_RING];
-    volatile LONG              LogHead;
-    volatile LONG              LogTail;
+    QCB_SOURCE                 Source;
 } BAT_DEVICE, *PBAT_DEVICE;
-
-VOID
-BatLog (
-    _In_ PBAT_DEVICE Dev,
-    _In_z_ _Printf_format_string_ PCSTR Format,
-    ...
-    );
-
-VOID
-BatLogFlush (
-    _In_ PBAT_DEVICE Dev
-    );
 
 VOID
 BatSnapshotGet (

@@ -336,6 +336,8 @@ SiaQueuePush (
     Link->QueueHead = Next;
 }
 
+#include "usb.inc"
+
 VOID
 SiaLinkPoll (
     _In_ PSIA_DEVICE Dev
@@ -365,6 +367,7 @@ SiaLinkPoll (
         }
     }
 
+    if (!Dev->Stopping && Link->VersionReady) SiaUsbPoll (Link);
     for (Messages = 0; Messages < 128; Messages++) {
         Head = SiaRead32 (Link->Desc, 12);
         Tail = SiaRead32 (Link->Desc, 8);
@@ -380,26 +383,43 @@ SiaLinkPoll (
         Param1 = *(USHORT UNALIGNED *)(Msg + 2);
         Param2 = *(ULONG UNALIGNED *)(Msg + 4);
         Size = 8;
-
+        ULONG Frame[2] = {0};
+        if (Cmd == GLINK_CMD_OPEN) Size = 8 + (((Param2 & 0xffff) + 7) & ~7u);
+        else if (Cmd == GLINK_CMD_INTENT) {
+            if (Param2 > (Link->RxLength - 8) / 8) return;
+            Size = 8 + Param2 * 8;
+        } else if (Cmd == GLINK_CMD_TX_DATA || Cmd == GLINK_CMD_TX_DATA_CONT) {
+            if (Avail < 16) return;
+            SiaFifoRead (Link, Tail + 8, (UCHAR *)Frame, sizeof (Frame));
+            if (Frame[0] > Link->RxLength - 16) return;
+            Size = (16 + Frame[0] + 7) & ~7u;
+        }
+        if (Avail < Size) return;
+        if (SiaUsbHandle (Link, Cmd, Param1, Param2, Tail, Frame)) {
+            SiaWrite32 (Link->Desc, 8, (Tail + Size) % Link->RxLength);
+            continue;
+        }
         switch (Cmd) {
         case GLINK_CMD_VERSION:
             SiaGlinkCmd (Link, GLINK_CMD_VERSION_ACK, 1, GLINK_FEATURES & Param2);
             break;
         case GLINK_CMD_VERSION_ACK:
-            SiaGlinkRequestAudio (Link);
-            break;
-        case GLINK_CMD_OPEN:
-            Size = 8 + (((Param2 & 0xFFFF) + 7) & ~7u);
-            if (Avail < Size) {
-                return;
+            if (Param1 == 1 && Param2 == GLINK_FEATURES) {
+                Link->VersionReady = TRUE;
+                if (Link->AudioRcid) SiaGlinkOpenAudio (Link, Link->AudioRcid);
+                else SiaGlinkRequestAudio (Link);
             }
-            RtlZeroMemory (Name, sizeof (Name));
-            SiaFifoRead (Link, Tail + 8, Name, min ((Param2 & 0xFFFF), sizeof (Name) - 1));
-            Name[sizeof (Name) - 1] = 0;
+            break;
+        case GLINK_CMD_OPEN: {
+            ULONG Length = min (Param2 & 0xffff, sizeof (Name) - 1);
+            SiaFifoRead (Link, Tail + 8, Name, Length);
+            Name[Length] = 0;
             if (strcmp ((const char *)Name, "adsp_apps") == 0) {
-                SiaGlinkOpenAudio (Link, Param1);
+                Link->AudioRcid = Param1;
+                if (Link->VersionReady) SiaGlinkOpenAudio (Link, Param1);
             }
             break;
+        }
         case GLINK_CMD_CLOSE:
             SiaGlinkCmd (Link, GLINK_CMD_CLOSE_ACK, Param1, 0);
             if (Param1 == Link->AudioRcid) { Link->AudioRcid = 0; Link->IntentCount = 0; }
@@ -413,13 +433,6 @@ SiaLinkPoll (
             }
             break;
         case GLINK_CMD_INTENT:
-            if (Param2 > (Link->RxLength - 8) / 8) {
-                return;
-            }
-            Size = 8 + Param2 * 8;
-            if (Avail < Size) {
-                return;
-            }
             if (Link->AudioRcid != 0 && Param1 == Link->AudioRcid) {
                 for (Index = 0; Index < Param2; Index++) {
                     SiaFifoRead (Link, Tail + 8 + Index * 8, Name, 8);
@@ -441,20 +454,9 @@ SiaLinkPoll (
             break;
         case GLINK_CMD_TX_DATA:
         case GLINK_CMD_TX_DATA_CONT:
-            if (Avail < 16) {
-                return;
-            }
-            SiaFifoRead (Link, Tail + 8, Name, 8);
-            if (*(ULONG UNALIGNED *)Name > Link->RxLength - 16) {
-                return;
-            }
-            Size = (16 + *(ULONG UNALIGNED *)Name + 7) & ~7u;
-            if (Avail < Size) {
-                return;
-            }
             if (Link->AudioRcid != 0 && Param1 == Link->AudioRcid) {
-                if (*(ULONG UNALIGNED *)(Name + 4) == 0 && Cmd != GLINK_CMD_TX_DATA_CONT)
-                    SiaQueuePush (Link, Tail + 16, *(ULONG UNALIGNED *)Name);
+                if (Frame[1] == 0 && Cmd != GLINK_CMD_TX_DATA_CONT)
+                    SiaQueuePush (Link, Tail + 16, Frame[0]);
                 SiaWrite32 (Link->Desc, 8, (Tail + Size) % Link->RxLength);
                 SiaGlinkCmd (Link, GLINK_CMD_RX_DONE_REUSE, GLINK_AUDIO_LCID, Param2);
                 continue;
@@ -605,9 +607,7 @@ SiaLinkStart (
     if (Link->Desc == NULL || Link->TxFifo == NULL) {
         return STATUS_DEVICE_NOT_READY;
     }
-    // Keep live transport cursors. Reopen the audio channel, not the whole edge.
-    SiaGlinkCmd (Link, GLINK_CMD_CLOSE, GLINK_AUDIO_LCID, 0);
-    for (Tick = 0; Tick < 100; Tick++) { SiaLinkPoll (Dev); SiaSleep (1); }
+    // Negotiate before opening either channel; retain the shared FIFO cursors.
     SiaGlinkCmd (Link, GLINK_CMD_VERSION, 1, GLINK_FEATURES);
 
     for (Tick = 0; Tick < 3000 && !(Link->AudioOpenAcked && Link->IntentCount > 0); Tick++) {
@@ -652,6 +652,13 @@ SiaLinkStop (
 
     if (Link == NULL) {
         return;
+    }
+    if (Link->Usb.Acked && Link->Usb.Rcid) {
+        OtgShutdown (&Link->Usb.Otg, KeQueryInterruptTime () / 10000);
+        for (ULONG Tick = 0; Tick < 5500 && (OtgActive (&Link->Usb.Otg) || Link->Usb.Otg.Touched); Tick++) {
+            SiaUsbPoll (Link); SiaLinkPoll (Dev); SiaSleep (1);
+        }
+        SiaGlinkCmd (Link, GLINK_CMD_CLOSE, SIA_USB_LCID, 0);
     }
     if (Link->AudioOpenAcked) {
         SiaGlinkCmd (Link, GLINK_CMD_CLOSE, GLINK_AUDIO_LCID, 0);

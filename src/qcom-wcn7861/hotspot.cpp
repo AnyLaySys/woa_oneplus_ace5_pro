@@ -13,11 +13,13 @@ extern "C" {
 #include "security-policy.h"
 }
 #include "sae-wire.h"
+#include "p2p-wire.h"
 struct HOTSPOT_SAE {UCHAR Tx[488];ULONG Length,Sequence,Attempts,Generation,SentGeneration;LONGLONG At;BOOLEAN Sending,PeerConfirm,ConfirmSent,Validated,Authenticated;};
 struct HOTSPOT_KEY {UCHAR Bytes[16];BOOLEAN Valid;};
 struct HOTSPOT_CLIENT {
     UCHAR Client[6];USHORT ClientListen;ULONG Auth;HOTSPOT_SAE Sae;ULONG64 MgmtRxPn,MgmtTxPn;BOOLEAN SaQueryPending;UCHAR SaQueryId[2];
     WCN_JOIN_AP ClientPhy;WCN_BA Ba[16];ULONG ClientStep,ClientRetry,QueueTid,PeerId,Ast,Hash;
+    BOOLEAN Provisioning,P2pPeer;
     BOOLEAN Used,ClientMapped,ClientCreated,OsPeer,NotifyDisconnect,Associated,Authorized,AssocConfirmed,DeleteSent,DeleteConfirmed,Unmapped,MgmtBusy;
     ULONG MgmtStatus;LONGLONG ClientAt;WCN_DMA Reo,Retired[8];ULONG RetiredCount;
     UCHAR Assoc[1024];ULONG AssocLength;WDI_MESSAGE_HEADER AssocHeader;BOOLEAN AssocPending;
@@ -30,8 +32,9 @@ struct HOTSPOT {
     HOTSPOT_CLIENT Clients[WCN_HOTSPOT_CLIENTS],*Current,*MgmtClient,*TaskClient,*KeyClient[4];ULONG StopClient;
     BOOLEAN Coexist20,ResizeRequested;ULONG ResizeStep,ResizePeer;LONGLONG ResizeAt;
     ULONG Frequency,Power,Gain,BeaconPeriod,Dtim,Step,MacId,Sequence;BOOLEAN Created,Started,Running,Failed,SelfMapped,Stopped,BeamformSet,AggregationSet;
+    ULONG ReleaseStep,SelfPeerId;BOOLEAN SelfDeleteConfirmed,SelfUnmapped,VdevDeleted;
     ULONG SelfAst,SelfHash;WCN_DMA Mgmt;ULONG Wire[512],MgmtId,MgmtStatus;BOOLEAN MgmtBusy;LONGLONG MgmtAt,At;
-    UCHAR Beacon[1024],Advert[512],ProbeAdvert[512];ULONG BeaconLength,TimOffset,AdvertLength,ProbeAdvertLength;
+    UCHAR Beacon[1536],Advert[512],ProbeAdvert[512];ULONG BeaconLength,TimOffset,AdvertLength,ProbeAdvertLength;
     UINT16 Task;WDI_MESSAGE_HEADER TaskHeader;
     WIFIREQUEST KeyRequest,DefaultRequest,AdvertRequest;LONGLONG DefaultAt,AdvertAt;S8_KEY Keys[4];ULONG KeyCount,KeyStep,KeyStatus;BOOLEAN KeyDone,DefaultPending,KeyDelete;LONGLONG KeyAt;
     BOOLEAN AllowPsk,AllowSae,PmfConfigured,SaeCapable;WCN_IGTK Igtk[2];UCHAR DefaultMgmtKey;
@@ -79,7 +82,7 @@ NTSTATUS HotspotCapabilities(PWCN_DEVICE D)
     RtlCopyMemory(H->DeviceMac,H->Mac,6);H->DeviceMac[5]^=2;
     auto &C=H->Caps;WIFI_WIFIDIRECT_CAPABILITIES_INIT(&C);C.WFDRoleCount=C.ConcurrentGOCount=C.ConcurrentClientCount=1;
     // Native WiFi requires device/GO/client capability bits together; client MLME is not yet verified.
-    C.GOClientTableSize=(UCHAR)WCN_HOTSPOT_CLIENTS;C.AssociationTableSize=WCN_HOTSPOT_CLIENTS;C.DiscoveryFilterListSize=C.DesiredSSIDListSize=C.PrivacyExemptionListSize=1;C.ScanSSIDListSize=4;
+    C.GOClientTableSize=(UCHAR)WCN_HOTSPOT_CLIENTS;C.AssociationTableSize=WCN_HOTSPOT_CLIENTS;C.DiscoveryFilterListSize=C.DesiredSSIDListSize=C.PrivacyExemptionListSize=1;C.ScanSSIDListSize=4; // Native ExtAP attach requires at least four scan SSIDs.
     C.DefaultKeyTableSize=4;C.MaxVendorSpecificExtensionIESize=512;C.GOon5GHzBandSupported=TRUE;
     RtlCopyMemory(C.DeviceAddress,H->DeviceMac,6);RtlCopyMemory(H->RoleAddress.Address,H->Mac,6);C.NumInterfaceAddresses=1;C.InterfaceAddressList=&H->RoleAddress;
     auto S=(S8*)D->Stage8;H->SaeCapable=S->PmfAvailable&&S->Tlv.PeerVersion>=WDI_VERSION_2_0_11;H->DefaultMgmtKey=4;
@@ -97,9 +100,9 @@ NTSTATUS HotspotDirectDevice(WDFDEVICE Device,WIFIDIRECT_DEVICE_INIT *Init)
 S8 *HotspotAdapter(PWCN_DEVICE D)
 {
     auto H=Hs(D);if(!H)return nullptr;auto S=H->Go;
-    if(S){if(!S->AdapterGone||S->TxQueue[0]||S->TxQueue[1]||S->RxQueue||H->Running||H->Task)return nullptr;RtlSecureZeroMemory(S,sizeof(*S));S->J=&D->Join;}
+    if(S){bool Queued=S->RxQueue!=nullptr;for(auto Q:S->TxQueue)if(Q)Queued=true;if(!S->AdapterGone||Queued||H->Running||H->Task||(D->P2pClient&&(S->Resetting||D->P2pJoin.Started||D->P2pJoin.Resetting||D->P2pJoin.PeerCreated||D->P2pJoin.VdevStarted)))return nullptr;RtlSecureZeroMemory(S,sizeof(*S));S->J=&D->Join;}
     else{S=(S8*)ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(S8),WCN_TAG);if(!S)return nullptr;H->Go=S;}
-    S->D=D;S->HotspotRole=S->P2pRole=TRUE;D->RoleStage8=S;S->Radio=TRUE;S->Tlv=((S8*)D->Stage8)->Tlv;KeInitializeSpinLock(&S->Lock);RtlCopyMemory(S->Mac,H->Mac,6);return S;
+    S->D=D;S->J=D->P2pClient?&D->P2pJoin:&D->Join;S->HotspotRole=!D->P2pClient;S->P2pRole=TRUE;D->RoleStage8=S;S->Radio=TRUE;S->Tlv=((S8*)D->Stage8)->Tlv;KeInitializeSpinLock(&S->Lock);RtlCopyMemory(S->Mac,H->Mac,6);return S;
 }
 static const WCN_JOIN_AP *Hstation(HOTSPOT *H,ULONG Frequency)
 {
@@ -111,7 +114,7 @@ static bool Hchannel(HOTSPOT *H,const WDI_TASK_START_AP_PARAMETERS &P)
 {
     auto D=H->D;for(ULONG Pass=0;Pass<5;Pass++)for(ULONG I=0;I<D->Scan.ChannelCount;I++){
         auto C=&D->Scan.Channel[I];if((((S8*)D->Stage8)->DisabledBands|(H->Go?H->Go->DisabledBands:0))&(WcnIs2g(C->Frequency)?1u:2u))continue;if(C->Flags&(1u|2u|8u|64u|2048u))continue;
-        if(!WcnConnectFrequency(C->Frequency))continue;bool Allowed=!P.Optional.APBandChannelList_IsPresent||!P.APBandChannelList.ElementCount;
+        if(!WcnConnectFrequency(C->Frequency)||(P2pGroupFrequency(D)&&P2pGroupFrequency(D)!=C->Frequency))continue;bool Allowed=!P.Optional.APBandChannelList_IsPresent||!P.APBandChannelList.ElementCount;
         for(ULONG J=0;J<P.APBandChannelList.ElementCount;J++){auto B=&P.APBandChannelList.pElements[J];if(B->BandID!=(WcnIs2g(C->Frequency)?WDI_BAND_ID_2400:WDI_BAND_ID_5000))continue;
             if(!B->Optional.ChannelList_IsPresent||!B->ChannelList.ElementCount)Allowed=true;
             for(ULONG K=0;K<B->ChannelList.ElementCount;K++)if(B->ChannelList.pElements[K]==WcnFrequencyChannel(C->Frequency))Allowed=true;}
@@ -189,12 +192,12 @@ static ULONG Hies(HOTSPOT *H,UCHAR *F,BOOLEAN Tim)
     F[N++]=3;F[N++]=1;F[N++]=(UCHAR)WcnFrequencyChannel(H->Frequency);
     if(Tim){H->TimOffset=36+N;F[N++]=5;F[N++]=4;F[N++]=0;F[N++]=(UCHAR)H->Dtim;F[N++]=0;F[N++]=0;}
     N+=WcnRsnBuildAp(F+N,H->AllowPsk,H->AllowSae);N+=WcnPhyBuildIes(H->D,&H->Radio,F+N,TRUE);N+=WcnPhyOperationIes(&H->Radio,F+N);
-    if(WcnIs2g(H->Frequency)&&H->Radio.Ht&&H->Radio.Width==40){static const USHORT Obss[]={20,10,300,200,20,5,25};F[N++]=74;F[N++]=14;for(auto V:Obss){Jputle16(F+N,V);N+=2;}}return N;
+    if(WcnIs2g(H->Frequency)&&H->Radio.Ht&&H->Radio.Width==40){static const USHORT Obss[]={20,10,300,200,20,5,25};F[N++]=74;F[N++]=14;for(auto V:Obss){Jputle16(F+N,V);N+=2;}}static const UCHAR WpsOui[]={0,0x50,0xf2,4};N+=P2pGroupIes(H->D,H->Ssid,H->SsidLength,F+N,1024-N,!P2pVendor(Tim?H->Advert:H->ProbeAdvert,Tim?H->AdvertLength:H->ProbeAdvertLength,WpsOui));return N;
 }
 static NTSTATUS Hbeacon(HOTSPOT *H)
 {
     UCHAR *F=H->Beacon;RtlZeroMemory(F,sizeof(H->Beacon));F[0]=0x80;RtlFillMemory(F+4,6,255);RtlCopyMemory(F+10,H->Mac,6);RtlCopyMemory(F+16,H->Mac,6);
-    Jputle16(F+32,H->BeaconPeriod);Jputle16(F+34,0x0411);ULONG N=36+Hies(H,F+36,TRUE);N+=HextraIes(H,F+N,H->Advert,H->AdvertLength);H->BeaconLength=N;
+    Jputle16(F+32,H->BeaconPeriod);Jputle16(F+34,0x0411);ULONG N=36+Hies(H,F+36,TRUE);if(N+H->AdvertLength+3>sizeof(H->Beacon))return STATUS_INVALID_BUFFER_SIZE;N+=HextraIes(H,F+N,H->Advert,H->AdvertLength);H->BeaconLength=N;
     ULONG *B=H->Wire;RtlZeroMemory(B,sizeof(H->Wire));B[0]=Jtlv(103,52);B[1]=1;B[2]=H->TimOffset;B[3]=N;B[14]=Jtlv(105,8);B[17]=Jtlv(17,(N+3)&~3u);RtlCopyMemory(B+18,F,N);
     return WcnWmiSend(H->D,0x7003,B,72+((N+3)&~3u));
 }
@@ -323,33 +326,32 @@ bool HotspotCommand(S8 *S,WIFIREQUEST R,const WDI_MESSAGE_HEADER &Header,UINT16 
     case WDI_TASK_STOP_AP:case WDI_TASK_DOT11_RESET:
         if(!Role){St=STATUS_SUCCESS;S8Complete(R,St);S8Indicate(S,&Header,WDI_INDICATION_DOT11_RESET_COMPLETE,St);return true;}
         if(H->Task)St=STATUS_DEVICE_BUSY;else{H->Task=Id;H->TaskHeader=Header;H->Step=19;H->At=WcnNowMs();H->Running=FALSE;H->StopClient=0;for(auto &C:H->Clients){C.NotifyDisconnect=FALSE;C.ClientStep=0;}H->Go->AssocIndicated=FALSE;S8SetLink(H->Go,false);St=STATUS_SUCCESS;}break;
-    case WDI_TASK_CHANGE_OPERATION_MODE:{WDI_TASK_CHANGE_OPERATION_MODE_PARAMETERS A;auto Ns=ParseWdiTaskChangeOperationModeToIhv(N,P,&S->Tlv,&A);St=Ns==NDIS_STATUS_SUCCESS&&!H->Running&&((Role&&A.OperationMode==WDI_OPERATION_MODE_P2P_GO)||(!Role&&A.OperationMode==WDI_OPERATION_MODE_P2P_DEVICE))?STATUS_SUCCESS:STATUS_NOT_SUPPORTED;CleanupParsedWdiTaskChangeOperationMode(&A);S8Complete(R,St);if(NT_SUCCESS(St))S8Indicate(S,&Header,WDI_INDICATION_CHANGE_OPERATION_MODE_COMPLETE,St);return true;}
     case WDI_SET_ADVERTISEMENT_INFORMATION:{
-        WDI_SET_ADVERTISEMENT_INFORMATION_PARAMETERS A;auto Ns=ParseWdiSetAdvertisementInformationToIhv(N,P,&S->Tlv,&A);St=Ns==NDIS_STATUS_SUCCESS?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;bool Changed=false;
+        WDI_SET_ADVERTISEMENT_INFORMATION_PARAMETERS A;auto Ns=ParseWdiSetAdvertisementInformationToIhv(N,P,&S->Tlv,&A);St=Ns==NDIS_STATUS_SUCCESS?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;bool Shared=A.Optional.DeviceInformation_IsPresent||A.Optional.DeviceCapability_IsPresent||A.Optional.GroupOwnerCapability_IsPresent||A.Optional.SecondaryDeviceTypeList_IsPresent;bool Changed=Shared;
         if(NT_SUCCESS(St)&&A.Optional.AdditionalIEs_IsPresent){auto B=&A.AdditionalIEs;
             if(B->AdditionalBeaconIEs.ElementCount>sizeof(H->Advert)||B->AdditionalProbeResponseIEs.ElementCount>sizeof(H->ProbeAdvert))St=STATUS_INVALID_BUFFER_SIZE;
             else if(!HvalidIes(B->AdditionalBeaconIEs.pElements,B->AdditionalBeaconIEs.ElementCount)||!HvalidIes(B->AdditionalProbeResponseIEs.pElements,B->AdditionalProbeResponseIEs.ElementCount))St=STATUS_NOT_SUPPORTED;
             else if(Role&&H->AdvertRequest)St=STATUS_DEVICE_BUSY;
             else if(Role){
-                Changed=H->AdvertLength!=B->AdditionalBeaconIEs.ElementCount||!Jeq(H->Advert,B->AdditionalBeaconIEs.pElements,H->AdvertLength);
+                Changed=Changed||H->AdvertLength!=B->AdditionalBeaconIEs.ElementCount||!Jeq(H->Advert,B->AdditionalBeaconIEs.pElements,H->AdvertLength);
                 H->AdvertLength=B->AdditionalBeaconIEs.ElementCount;H->ProbeAdvertLength=B->AdditionalProbeResponseIEs.ElementCount;
                 if(H->AdvertLength)RtlCopyMemory(H->Advert,B->AdditionalBeaconIEs.pElements,H->AdvertLength);
                 if(H->ProbeAdvertLength)RtlCopyMemory(H->ProbeAdvert,B->AdditionalProbeResponseIEs.pElements,H->ProbeAdvertLength);
             }}
         CleanupParsedWdiSetAdvertisementInformation(&A);
-        // Device-port metadata does not rewrite a different port's AP beacon.
-        if(NT_SUCCESS(St)&&Role&&H->Running&&Changed){
+        // Role-specific IEs stay port-scoped; shared P2P identity refreshes the GO.
+        if(NT_SUCCESS(St)&&(Role||Shared)&&H->Running&&Changed){
             H->AdvertRequest=R;H->AdvertAt=WcnNowMs();return true;}
         break;}
-    case WDI_SET_P2P_LISTEN_STATE:{WDI_SET_P2P_LISTEN_STATE_PARAMETERS A;auto Ns=ParseWdiSetP2pListenStateToIhv(N,P,&S->Tlv,&A);St=Ns==NDIS_STATUS_SUCCESS&&A.ListenState==0?STATUS_SUCCESS:STATUS_NOT_SUPPORTED;CleanupParsedWdiSetP2pListenState(&A);break;}
     case WDI_TASK_SEND_AP_ASSOCIATION_RESPONSE:{
         WDI_TASK_SEND_AP_ASSOCIATION_RESPONSE_PARAMETERS A;auto Ns=ParseWdiTaskSendApAssociationResponseToIhv(N,P,&S->Tlv,&A);St=STATUS_INVALID_PARAMETER;auto Peer=Ns==NDIS_STATUS_SUCCESS?Hfind(H,A.IncomingRequestInfo.AssocRequestParams.PeerMacAddress.Address):nullptr;if(Peer)H->Current=Peer;
         if(Peer&&Role&&H->Running&&H->Current->ClientCreated&&H->Current->ClientMapped&&!H->Current->AssocPending&&Jeq(A.IncomingRequestInfo.AssocRequestParams.PeerMacAddress.Address,H->Current->Client,6)&&!A.IncomingRequestInfo.AssocRequestParams.IsReassociationRequest&&A.VendorIEs.ElementCount<=512&&HvalidIes(A.VendorIEs.pElements,A.VendorIEs.ElementCount)){
             H->Current->AssocLength=Hheader(H,H->Current->Assoc,0x10,H->Current->Client);Jputle16(H->Current->Assoc+24,0x0411);Jputle16(H->Current->Assoc+26,A.AssocResponseParameters.AcceptRequest?0:A.AssocResponseParameters.ReasonCode);Jputle16(H->Current->Assoc+28,(USHORT)(0xc000|Haid(H)));H->Current->AssocLength=30;
             H->Current->Assoc[H->Current->AssocLength++]=1;ULONG C=H->RateCount>8?8:H->RateCount;H->Current->Assoc[H->Current->AssocLength++]=(UCHAR)C;RtlCopyMemory(H->Current->Assoc+H->Current->AssocLength,H->Rates,C);H->Current->AssocLength+=C;
             if(H->RateCount>C){H->Current->Assoc[H->Current->AssocLength++]=50;H->Current->Assoc[H->Current->AssocLength++]=H->RateCount-(UCHAR)C;RtlCopyMemory(H->Current->Assoc+H->Current->AssocLength,H->Rates+C,H->RateCount-C);H->Current->AssocLength+=H->RateCount-C;}
-            H->Current->AssocLength+=WcnRsnBuild(H->Current->Assoc+H->Current->AssocLength,H->Current->Auth,H->Current->ClientPhy.Pmf,H->Current->Auth==WCN_AUTH_SAE);
+            if(!H->Current->Provisioning)H->Current->AssocLength+=WcnRsnBuild(H->Current->Assoc+H->Current->AssocLength,H->Current->Auth,H->Current->ClientPhy.Pmf,H->Current->Auth==WCN_AUTH_SAE);
             H->Current->AssocLength+=WcnPhyBuildIes(H->D,&H->Current->ClientPhy,H->Current->Assoc+H->Current->AssocLength,TRUE);H->Current->AssocLength+=WcnPhyOperationIes(&H->Radio,H->Current->Assoc+H->Current->AssocLength);
+            static const UCHAR P2pOui[]={0x50,0x6f,0x9a,9};if(H->Current->P2pPeer&&!P2pVendor(A.VendorIEs.pElements,A.VendorIEs.ElementCount,P2pOui)){UCHAR Status[]={221,8,0x50,0x6f,0x9a,9,0,1,0,(UCHAR)(A.AssocResponseParameters.AcceptRequest?0:1)};RtlCopyMemory(H->Current->Assoc+H->Current->AssocLength,Status,sizeof(Status));H->Current->AssocLength+=sizeof(Status);}
             RtlCopyMemory(H->Current->Assoc+H->Current->AssocLength,A.VendorIEs.pElements,A.VendorIEs.ElementCount);H->Current->AssocLength+=A.VendorIEs.ElementCount;
             H->Current->AssocHeader=Header;H->Current->AssocPending=TRUE;H->Current->AssocConfirmed=H->Current->Associated=H->Current->Authorized=H->Current->PairKey.Valid=FALSE;H->Current->ClientStep=A.AssocResponseParameters.AcceptRequest?10:12;H->Current->ClientAt=WcnNowMs();St=STATUS_SUCCESS;}
         CleanupParsedWdiTaskSendApAssociationResponse(&A);break;}
@@ -395,7 +397,7 @@ static NTSTATUS HstartStep(HOTSPOT *H)
         {wmi_vdev_up_cmd C={};JHDR(&C,92);C.vdev_id=1;RtlCopyMemory(C.vdev_bssid.addr,H->Mac,6);return WcnWmiSend(D,S7_WMI_VDEV_UP_CMDID,&C,sizeof(C));}
     case 11:
         WcnWrite(D,0xa44094,(1u<<1)|(1u<<10)|(1u<<14)|(H->MacId<<15));WcnWrite(D,0xa44098,(2u<<1)|(1u<<10)|(1u<<14)|(H->MacId<<15));
-        H->Running=TRUE;H->Go->AssocIndicated=TRUE;S8SetLink(H->Go,true);Hfinish(H,STATUS_SUCCESS);return STATUS_PENDING;
+        H->Running=TRUE;H->Go->AssocIndicated=TRUE;S8SetLink(H->Go,true);P2pChannel(H->Go,H->Frequency);Hfinish(H,STATUS_SUCCESS);return STATUS_PENDING;
     default:return STATUS_INVALID_DEVICE_STATE;
     }
 }
@@ -452,7 +454,7 @@ static void HclientService(HOTSPOT *H)
         if(C->ClientStep&&WcnNowMs()-C->ClientAt>5000){if(C->ClientStep<19)HclientDrop(H);else Hfail(H,"client deletion ownership confirmation timeout");}}
     if(C->Auth==WCN_AUTH_SAE)HsaeService(H);
     if(C->SaQueryPending&&C->Authorized&&!C->ClientStep&&!H->Task){UCHAR B[]={8,1,0,0};RtlCopyMemory(B+2,C->SaQueryId,2);NTSTATUS St=WcnHotspotActionSend(D,B,sizeof(B));if(NT_SUCCESS(St))C->SaQueryPending=FALSE;else if(St!=STATUS_DEVICE_BUSY)HclientDrop(H); }
-    if(H->Running&&C->Associated&&C->PairKey.Valid&&H->GroupKey[H->DefaultKey].Valid&&!H->DefaultPending&&(!C->ClientPhy.Pmf||H->Igtk[0].Valid||H->Igtk[1].Valid)&&!C->Authorized){NTSTATUS St=WcnPeerParam(D,1,C->Client,3,1);if(NT_SUCCESS(St)){C->Authorized=TRUE;}else if(St!=STATUS_DEVICE_BUSY)Hfail(H,"controlled port authorize");}
+    if(H->Running&&C->Associated&&!C->Provisioning&&C->PairKey.Valid&&H->GroupKey[H->DefaultKey].Valid&&!H->DefaultPending&&(!C->ClientPhy.Pmf||H->Igtk[0].Valid||H->Igtk[1].Valid)&&!C->Authorized){NTSTATUS St=WcnPeerParam(D,1,C->Client,3,1);if(NT_SUCCESS(St)){C->Authorized=TRUE;}else if(St!=STATUS_DEVICE_BUSY)Hfail(H,"controlled port authorize");}
     if(H->Running&&C->Authorized&&!C->ClientStep&&!H->Task)WcnAggregationServicePeer(D,1,&C->ClientPhy,C->Ba,C->Client,C->Reo.La,C->MgmtBusy,C->MgmtStatus);
 }
 static void HadvertService(HOTSPOT *H)
@@ -499,7 +501,7 @@ void HotspotService(PWCN_DEVICE D)
     HkeysService(H);if(H->Failed||HresizeService(H))return;HadvertService(H);
     if(H->Task==WDI_TASK_START_AP){auto Secondary=(S8*)D->SecondaryStage8;
         if(!WcnStage8SecondaryIdle(D)&&((Secondary&&Secondary->Resetting)||!WcnHotspotTriple(D,&D->Join.Ap,&D->Secondary.Ap))){if(WcnNowMs()-H->At>15000)Hfail(H,"secondary STA resource handoff timeout");return;}if(!D->Scan.Passed||!D->Scan.CountryReady){if(WcnNowMs()-H->At>5000)Hfail(H,"regulatory discovery not ready");return;}
-        if(!H->Mgmt.Buffer){NTSTATUS A=WcnDmaAllocAligned(D,1024,0xfff,&H->Mgmt);if(!NT_SUCCESS(A)){Hfail(H,"management DMA allocation");return;}}
+        if(!H->Mgmt.Buffer){NTSTATUS A=WcnDmaAllocAligned(D,1536,0xfff,&H->Mgmt);if(!NT_SUCCESS(A)){Hfail(H,"management DMA allocation");return;}}
         NTSTATUS St=WcnStage7DpInit(D,&D->Join);if(!NT_SUCCESS(St)){Hfail(H,"shared data path preparation");return;}
         St=HstartStep(H);if(St==STATUS_SUCCESS){H->Step++;H->At=WcnNowMs();}else if(St!=STATUS_PENDING&&St!=STATUS_DEVICE_BUSY){Hfail(H,"AP start command transport");return;}if(H->Task&&WcnNowMs()-H->At>5000)Hfail(H,"AP start hardware confirmation timeout");}
     else if(H->Task==WDI_TASK_DISCONNECT){H->Current=H->TaskClient;auto C=H->Current;if(C&&C->Used){if(C->ClientStep<19)HclientDrop(H);HclientService(H);}if(!C||!C->Used)Hfinish(H,STATUS_SUCCESS);}
@@ -511,7 +513,7 @@ void HotspotService(PWCN_DEVICE D)
         case 20:if(H->MgmtBusy)return;HfinishAdvert(H,STATUS_CANCELLED);H->DefaultPending=FALSE;if(H->DefaultRequest){auto R=H->DefaultRequest;H->DefaultRequest=nullptr;S8Complete(R,STATUS_CANCELLED);}if(H->KeyRequest){auto R=H->KeyRequest;H->KeyRequest=nullptr;S8Complete(R,STATUS_CANCELLED);}RtlSecureZeroMemory(H->Keys,sizeof(H->Keys));if(H->Started){ULONG B[]={Jtlv(94,4),1};St=WcnWmiSend(D,0x5007,B,sizeof(B));}break;
         case 21:if(H->StopClient<WCN_HOTSPOT_CLIENTS){H->Current=&H->Clients[H->StopClient];if(H->Current->Used){if(H->Current->ClientStep<19)HclientDrop(H);HclientService(H);}else H->StopClient++;H->At=WcnNowMs();return;}break;
         case 22:if(H->Started){ULONG B[]={Jtlv(93,4),1};St=WcnWmiSend(D,0x5006,B,sizeof(B));}else H->Stopped=TRUE;break;
-        case 23:if(!H->Stopped)St=STATUS_PENDING;else{for(ULONG I=0;I<WCN_TX_SLOTS;I++)if(D->Runtime.TxUsed[I]&0x80)return;S8ClearStaging(H->Go);H->Started=FALSE;RtlSecureZeroMemory(H->Igtk,sizeof(H->Igtk));RtlSecureZeroMemory(H->GroupKey,sizeof(H->GroupKey));Hfinish(H,STATUS_SUCCESS);return;}break;
+        case 23:if(!H->Stopped)St=STATUS_PENDING;else{for(ULONG I=0;I<WCN_TX_SLOTS;I++)if(D->Runtime.TxUsed[I]&0x80)return;S8ClearStaging(H->Go);P2pRoleStopped(D);H->Go->Connect=FALSE;H->Started=FALSE;RtlSecureZeroMemory(H->Igtk,sizeof(H->Igtk));RtlSecureZeroMemory(H->GroupKey,sizeof(H->GroupKey));Hfinish(H,STATUS_SUCCESS);return;}break;
         default:St=STATUS_INVALID_DEVICE_STATE;break;}
         if(St==STATUS_SUCCESS){H->Step++;H->At=WcnNowMs();}else if(St!=STATUS_PENDING&&St!=STATUS_DEVICE_BUSY){Hfail(H,"AP stop transport");return;}if(WcnNowMs()-H->At>5000)Hfail(H,"AP stop ownership confirmation timeout");}
     if(H->DefaultPending){NTSTATUS St=Hparam(H,33,H->DefaultKey);if(St==STATUS_DEVICE_BUSY&&H->DefaultRequest&&WcnNowMs()-H->DefaultAt>2500)St=STATUS_IO_TIMEOUT;if(NT_SUCCESS(St)){H->DefaultPending=FALSE;if(H->DefaultRequest){auto R=H->DefaultRequest;H->DefaultRequest=nullptr;S8Complete(R,STATUS_SUCCESS);}}else if(St!=STATUS_DEVICE_BUSY){Hfail(H,"default GTK selection");return;}}
@@ -520,12 +522,13 @@ void HotspotService(PWCN_DEVICE D)
 }
 extern "C" VOID WcnHotspotHtt(PWCN_DEVICE D,const UCHAR *P,ULONG N)
 {
-    auto H=Hs(D);if(!H||H->Failed||N<4)return;ULONG Info=Jle32(P),T=Info&255;
+    auto H=Hs(D);if(!H||D->P2pClient||N<4)return;ULONG Info=Jle32(P),T=Info&255;
     if((T==3||T==0x1e||T==0x2b)&&N>=16&&((Info>>8)&255)==1){ULONG Ast=T==0x2b?Jle32(P+12)&65535:Jle32(P+8)>>16,Hash=T==0x2b?Jle32(P+12)>>16:Jle32(P+12)&65535;
-        if(Jeq(P+4,H->Mac,6)){H->SelfAst=Ast;H->SelfHash=Hash;H->SelfMapped=TRUE;}
+        if(Jeq(P+4,H->Mac,6)){H->SelfAst=Ast;H->SelfHash=Hash;H->SelfPeerId=Info>>16;H->SelfMapped=TRUE;}
         else if(auto C=Hfind(H,P+4)){C->PeerId=Info>>16;C->Ast=Ast;C->Hash=Hash;C->ClientMapped=TRUE;}
 
-    }else if(T==4||T==0x1f)for(auto &C:H->Clients)if(C.Used&&C.ClientMapped&&(Info>>16)==C.PeerId){C.Unmapped=TRUE;C.Authorized=FALSE;}
+    }else if((T==4||T==0x1f)&&H->ReleaseStep&&H->SelfMapped&&(Info>>16)==H->SelfPeerId)H->SelfUnmapped=TRUE;
+    else if(T==4||T==0x1f)for(auto &C:H->Clients)if(C.Used&&C.ClientMapped&&(Info>>16)==C.PeerId){C.Unmapped=TRUE;C.Authorized=FALSE;}
 }
 static bool HinitClient(HOTSPOT *H,const UCHAR Mac[6],ULONG Auth)
 {
@@ -536,13 +539,13 @@ static bool HinitClient(HOTSPOT *H,const UCHAR Mac[6],ULONG Auth)
         Q[2]=3|(Ac<<5)|(1u<<21)|(1u<<25)|(1u<<27)|(I==16?1u<<8:1u<<11);if(I<16)for(ULONG K=0;K<3;K++)Q[(128+K*128)/4]=((0xadbeefu+K*0x100000u)<<8)|(9u<<4)|4;}
     C->Used=TRUE;C->Auth=Auth;RtlCopyMemory(C->Client,Mac,6);RtlZeroMemory(C->Ba,sizeof(C->Ba));RtlSecureZeroMemory(&C->Sae,sizeof(C->Sae));RtlSecureZeroMemory(&C->PairKey,sizeof(C->PairKey));
     C->MgmtRxPn=C->MgmtTxPn=0;C->SaQueryPending=FALSE;C->QueueTid=C->ClientRetry=0;C->ClientStep=1;C->ClientAt=C->Sae.At=WcnNowMs();
-    C->DeleteSent=C->DeleteConfirmed=C->Unmapped=C->Associated=C->Authorized=C->AssocConfirmed=FALSE;return true;
+    C->Provisioning=C->P2pPeer=FALSE;C->DeleteSent=C->DeleteConfirmed=C->Unmapped=C->Associated=C->Authorized=C->AssocConfirmed=FALSE;return true;
 }
 static void HmgmtRx(HOTSPOT *H,const UCHAR *P,ULONG N)
 {
     ULONG L;const UCHAR *B=Jfind(P,N,44,&L);if(!B||L<68||(Jle32(B+20)&0x39))return;ULONG Len=Jle32(B+16);const UCHAR *F=Jfind(P,N,17,&L);if(!F||Len>L||Len<24||(Jle16(F)&0x030f))return;ULONG Type=F[0]&0xfc;
     if(Type==0x40){if(!H->Running||H->ResizeRequested||H->Task||H->Current->ClientStep||H->Current->AssocPending||HbaBusy(H)||H->MgmtBusy||(Jle32(B+64)&&Jle32(B+64)!=H->Frequency))return;
-        bool Ssid=false;for(ULONG I=24;I<Len;){if(Len-I<2||F[I+1]>Len-I-2)return;if(F[I]==0){if(Ssid)return;Ssid=TRUE;if(F[I+1]&&(F[I+1]!=H->SsidLength||!Jeq(F+I+2,H->Ssid,H->SsidLength)))return;}I+=F[I+1]+2;}if(!Ssid)return;UCHAR R[1024];Hheader(H,R,0x50,F+10);RtlCopyMemory(R+24,H->Beacon+24,12);ULONG Size=36+Hies(H,R+36,FALSE);Size+=HextraIes(H,R+Size,H->ProbeAdvert,H->ProbeAdvertLength);Hmgmt(H,R,Size);return;}
+        bool Ssid=false;for(ULONG I=24;I<Len;){if(Len-I<2||F[I+1]>Len-I-2)return;if(F[I]==0){if(Ssid)return;Ssid=TRUE;if(F[I+1]&&(F[I+1]!=H->SsidLength||!Jeq(F+I+2,H->Ssid,H->SsidLength)))return;}I+=F[I+1]+2;}if(!Ssid)return;UCHAR R[1536];Hheader(H,R,0x50,F+10);RtlCopyMemory(R+24,H->Beacon+24,12);ULONG Size=36+Hies(H,R+36,FALSE);if(Size+H->ProbeAdvertLength+3>sizeof(R))return;Size+=HextraIes(H,R+Size,H->ProbeAdvert,H->ProbeAdvertLength);Hmgmt(H,R,Size);return;}
     if(!Jeq(F+4,H->Mac,6)||!Jeq(F+16,H->Mac,6)||(F[10]&1))return;
     bool AuthStart=Type==0xb0&&Len>=30&&Jle16(F+26)==1&&(Jle16(F+24)==0||Jle16(F+24)==3)&&H->Running&&!H->Task;
     ULONG Auth=AuthStart&&Jle16(F+24)==3?WCN_AUTH_SAE:WCN_AUTH_PSK;
@@ -570,14 +573,16 @@ static void HmgmtRx(HOTSPOT *H,const UCHAR *P,ULONG N)
         if(H->Current->Auth==WCN_AUTH_SAE&&!H->Current->Sae.Authenticated)return;
         if(H->ResizeRequested)return;
         if(WcnIs2g(H->Frequency)&&H->Radio.Width==40){for(ULONG I=28;I<Len;){if(Len-I<2||F[I+1]>Len-I-2)return;if(F[I]==45&&F[I+1]==26&&(Jle16(F+I+2)&0x4000)){Hrequest20(H);return;}I+=F[I+1]+2;}}
-        RtlZeroMemory(&H->Current->ClientPhy,sizeof(H->Current->ClientPhy));H->Current->ClientPhy.Capability=Jle16(F+24);H->Current->ClientListen=Jle16(F+26);if(!(H->Current->ClientPhy.Capability&16)||!H->Current->ClientListen)return;
+        RtlZeroMemory(&H->Current->ClientPhy,sizeof(H->Current->ClientPhy));H->Current->ClientPhy.Capability=Jle16(F+24);H->Current->ClientListen=Jle16(F+26);if(!H->Current->ClientListen||(!(H->Current->ClientPhy.Capability&16)&&!H->Go->WpsEnabled))return;
         bool Rsn=false,Ssid=false;ULONG RateMask=0;H->Current->ClientPhy.RateCount=0;
         for(ULONG I=28;I<Len;){if(Len-I<2||F[I+1]>Len-I-2)return;ULONG K=F[I+1];
             if(F[I]==0){if(Ssid||K!=H->SsidLength||!Jeq(F+I+2,H->Ssid,K))return;Ssid=true;}
             if(F[I]==1||F[I]==50)for(ULONG J=0;J<K;J++)for(ULONG A=0;A<H->RateCount;A++)if((F[I+2+J]&127)==(H->Rates[A]&127))RateMask|=1u<<A;
-            if(F[I]==48){BOOLEAN Pmf=H->AllowSae;if(Rsn||!WcnRsnAccept(F+I+2,K,H->Current->Auth,&Pmf))return;H->Current->ClientPhy.Pmf=Pmf;Rsn=true;}I+=K+2;}if(!Rsn||!Ssid)return;
+            if(F[I]==48){BOOLEAN Pmf=H->AllowSae;if(Rsn||!WcnRsnAccept(F+I+2,K,H->Current->Auth,&Pmf))return;H->Current->ClientPhy.Pmf=Pmf;Rsn=true;}I+=K+2;}if(!Ssid)return;
+        static const UCHAR P2pOui[]={0x50,0x6f,0x9a,9},WpsOui[]={0,0x50,0xf2,4};H->Current->P2pPeer=P2pVendor(F+28,Len-28,P2pOui);
+        H->Current->Provisioning=!Rsn&&H->Go->WpsEnabled&&H->AllowPsk&&H->Current->P2pPeer&&P2pVendor(F+28,Len-28,WpsOui);if(!Rsn&&!H->Current->Provisioning)return;
         for(ULONG I=0;I<H->RateCount;I++){if((H->Rates[I]&128)&&!(RateMask&(1u<<I)))return;if(RateMask&(1u<<I)){UCHAR Rate=H->Rates[I]&127;H->Current->ClientPhy.Rates[H->Current->ClientPhy.RateCount++]=Rate;}}if(!H->Current->ClientPhy.RateCount)return;
-        auto Phy=&H->Current->ClientPhy;Phy->Frequency=H->Frequency;Phy->Auth=H->Current->Auth;
+        auto Phy=&H->Current->ClientPhy;Phy->Frequency=H->Frequency;Phy->Auth=H->Current->Provisioning?WCN_AUTH_OPEN:H->Current->Auth;
         if(Len>1536)return;auto Synthetic=(UCHAR*)H->Wire;RtlZeroMemory(Synthetic,36);RtlCopyMemory(Synthetic+36,F+28,Len-28);ULONG SizePhy=Len+8;SizePhy+=WcnPhyOperationIes(&H->Radio,Synthetic+SizePhy);
         if(!WcnPhySelect(H->D,Synthetic,SizePhy,Phy))return;
 
@@ -587,7 +592,10 @@ static void HmgmtRx(HOTSPOT *H,const UCHAR *P,ULONG N)
 }
 extern "C" VOID WcnHotspotWmi(PWCN_DEVICE D,ULONG Event,const UCHAR *P,ULONG N)
 {
-    auto H=Hs(D);if(!H||H->Failed||!Jtlvs(P,N))return;ULONG L;const UCHAR *F;
+    auto H=Hs(D);if(!H||!Jtlvs(P,N))return;ULONG L;const UCHAR *F;
+    if(Event==0x5006){F=Jfind(P,N,450,&L);if(F&&L>=4&&Jle32(F)==1)H->VdevDeleted=TRUE;return;}
+    if(Event==0x6007){F=Jfind(P,N,451,&L);if(F&&L>=12&&Jle32(F)==1&&Jeq(F+4,H->Mac,6))H->SelfDeleteConfirmed=TRUE;}
+    if(H->Failed||D->P2pClient)return;
     if(Event==0x7001){if(H->Running)HmgmtRx(H,P,N);return;}
     if(Event==0x7006){F=Jfind(P,N,423,&L);if(F&&L>=12&&H->MgmtBusy&&Jle32(F)==H->MgmtId&&D->MgmtInUse[1]==H->MgmtId&&Jle32(F+8)>=1&&Jle32(F+8)<=2){H->MgmtStatus=Jle32(F+4);H->MgmtBusy=FALSE;if(H->MgmtClient){H->MgmtClient->MgmtStatus=H->MgmtStatus;H->MgmtClient->MgmtBusy=FALSE;auto A=&H->MgmtClient->Sae;if(A->Sending&&A->Sequence==2&&!H->MgmtStatus&&A->Validated&&A->PeerConfirm){A->ConfirmSent=A->Authenticated=TRUE;}H->MgmtClient=nullptr;}D->MgmtInUse[1]=0;}return;}
     if(Event==0x5001){F=Jfind(P,N,40,&L);if(!F||L<36||Jle32(F)!=1)return;if(Jle32(F+12)||Jle32(F+24)>1||!Jle32(F+28)||!Jle32(F+32)){Hfail(H,"firmware AP vdev start rejected");return;}H->MacId=Jle32(F+24);ULONG Nss=Jle32(F+28)<Jle32(F+32)?Jle32(F+28):Jle32(F+32);if(H->Radio.Nss>Nss)H->Radio.Nss=(UCHAR)Nss;H->Radio.RateKbps=WcnPhyRate(&H->Radio);H->Started=TRUE;}
@@ -600,7 +608,7 @@ bool HotspotAuthorized(PWCN_DEVICE D,const UCHAR *Peer)
 {auto H=Hs(D);if(!H||!H->Running)return false;if(Peer[0]&1)return H->GroupKey[H->DefaultKey].Valid;auto C=Hfind(H,Peer);return C&&C->Authorized;}
 extern "C" BOOLEAN WcnHotspotRx(PWCN_DEVICE D,const UCHAR *B,ULONG N,ULONG Pad,BOOLEAN Error,const ULONG *Desc)
 {
-    auto H=Hs(D);if(!H||!Jeq(B+204,H->Mac,6))return FALSE;auto C=Hfind(H,B+210);if(!H->Running||!C||!C->Associated)return TRUE;
+    auto H=Hs(D);if(!H||D->P2pClient||!Jeq(B+204,H->Mac,6))return FALSE;auto C=Hfind(H,B+210);if(!H->Running||!C||!C->Associated)return TRUE;
     ULONG Fc=Jle16(B+200),Valid=Jle32(B+176),I2=Jle32(B+148),Meta=Error?Desc[4]:Desc[3],Mpdu=Error?Desc[3]:Desc[2],Msdu=Error?Desc[5]:Desc[4];
     if((Fc&0x030c)!=0x0108||D->Ce.PeerMetadataVersion>1||((Meta>>16)&255)!=1||(Meta&(D->Ce.PeerMetadataVersion==1?0x3fffu:0xffffu))!=C->PeerId)return TRUE;
     const UCHAR *F=B+392+Pad;bool Eapol=Jbe16(F+12)==0x888e;
@@ -627,16 +635,16 @@ void HotspotStop(PWCN_DEVICE D)
 }
 extern "C" VOID WcnHotspotDmaCleanup(PWCN_DEVICE D)
 {
-    auto H=Hs(D);if(!H)return;if(H->Mgmt.Buffer){WdfObjectDelete(H->Mgmt.Buffer);RtlZeroMemory(&H->Mgmt,sizeof(H->Mgmt));}
+    auto H=Hs(D);if(!H)return;WcnP2pDmaCleanup(D);if(H->Mgmt.Buffer){WdfObjectDelete(H->Mgmt.Buffer);RtlZeroMemory(&H->Mgmt,sizeof(H->Mgmt));}
     for(auto &C:H->Clients){if(C.Reo.Buffer){WdfObjectDelete(C.Reo.Buffer);RtlZeroMemory(&C.Reo,sizeof(C.Reo));}for(ULONG I=0;I<C.RetiredCount;I++)if(C.Retired[I].Buffer)WdfObjectDelete(C.Retired[I].Buffer);C.RetiredCount=0;}
 }
 void HotspotDestroy(PWCN_DEVICE D)
 {auto H=Hs(D);if(!H)return;if(H->Go){RtlSecureZeroMemory(H->Go,sizeof(S8));ExFreePoolWithTag(H->Go,WCN_TAG);}RtlSecureZeroMemory(H,sizeof(*H));ExFreePoolWithTag(H,WCN_TAG);D->Hotspot=nullptr;}
 
 extern "C" BOOLEAN WcnHotspotActive(PWCN_DEVICE D)
-{auto H=Hs(D);return H&&(H->Running||H->Task==WDI_TASK_START_AP||H->Task==WDI_TASK_STOP_AP||(H->Started&&!H->Stopped));}
+{auto H=Hs(D);return (D->P2pClient&&H&&H->Go&&(H->Go->Connect||H->Go->ScanPending||H->Go->ScanIssued||H->Go->Resetting||D->P2pJoin.Started||D->P2pJoin.PeerCreated||D->P2pJoin.VdevStarted))||(H&&(H->Running||H->Task==WDI_TASK_START_AP||H->Task==WDI_TASK_STOP_AP||(H->Started&&!H->Stopped)));}
 extern "C" ULONG WcnHotspotFrequency(PWCN_DEVICE D)
-{auto H=Hs(D);return H&&WcnHotspotActive(D)?H->Frequency:0;}
+{auto H=Hs(D);return H&&!D->P2pClient&&WcnHotspotActive(D)?H->Frequency:0;}
 extern "C" BOOLEAN WcnHotspotTriple(PWCN_DEVICE D,const WCN_JOIN_AP *Primary,const WCN_JOIN_AP *Secondary)
 {
     ULONG F=WcnHotspotFrequency(D);if(!WcnTripleChannel(Primary->Frequency,Secondary?Secondary->Frequency:0,F))return FALSE;
@@ -646,3 +654,29 @@ extern "C" BOOLEAN WcnHotspotTriple(PWCN_DEVICE D,const WCN_JOIN_AP *Primary,con
     ULONG PeerLow=A->CenterFrequency-A->Width/2,PeerHigh=A->CenterFrequency+A->Width/2;
     return (Low>=PeerLow&&High<=PeerHigh)||(PeerLow>=Low&&PeerHigh<=High);
 }
+
+ULONG HotspotDevicePort(PWCN_DEVICE D){auto H=Hs(D);return H?H->DevicePort:MAXULONG;}
+const UCHAR *HotspotDeviceMac(PWCN_DEVICE D){auto H=Hs(D);return H?H->DeviceMac:nullptr;}
+/* A role vdev cannot change STA/AP type while any old peer or DMA is owned. */
+NTSTATUS HotspotReleaseRole(PWCN_DEVICE D)
+{
+ auto H=Hs(D);auto S=H?H->Go:nullptr;if(!H||!S)return STATUS_DEVICE_NOT_READY;
+ if(D->Mhi.SysErr||D->Mhi.RddmSaved||D->Ce.SourceFailed||D->Dp.Failed)return STATUS_DEVICE_HARDWARE_ERROR;
+ if(H->Task||H->Running||H->MgmtBusy||S->Connect||S->Resetting||H->KeyRequest||H->AdvertRequest)return STATUS_DEVICE_BUSY;
+ for(auto &C:H->Clients)if(C.Used)return STATUS_DEVICE_BUSY;
+ for(ULONG I=0;I<WCN_TX_SLOTS;I++)if(D->Runtime.TxUsed[I]&&(D->Runtime.TxUsed[I]&0x80))return STATUS_DEVICE_BUSY;
+ if(D->P2pClient&&(D->P2pJoin.Started||D->P2pJoin.PeerCreated||D->P2pJoin.VdevStarted||D->P2pJoin.MgmtBusy))return STATUS_DEVICE_BUSY;
+ bool Created=D->P2pClient?D->P2pJoin.Created!=FALSE:H->Created!=FALSE;
+ if(!Created){H->Failed=S->Fatal=FALSE;H->ReleaseStep=0;return STATUS_SUCCESS;}
+ NTSTATUS St;
+ switch(H->ReleaseStep){
+ case 0:H->SelfDeleteConfirmed=H->SelfUnmapped=H->VdevDeleted=FALSE;
+     if(!D->P2pClient&&H->SelfMapped){St=Hpeer(H,H->Mac,TRUE);if(!NT_SUCCESS(St))return St;H->ReleaseStep=1;return STATUS_PENDING;}H->ReleaseStep=2;return STATUS_PENDING;
+ case 1:if(!H->SelfDeleteConfirmed||!H->SelfUnmapped)return STATUS_PENDING;H->SelfMapped=FALSE;H->ReleaseStep=2;return STATUS_PENDING;
+ case 2:{ULONG B[]={Jtlv(87,4),1};St=WcnWmiSend(D,0x5002,B,sizeof(B));if(!NT_SUCCESS(St))return St;H->ReleaseStep=3;return STATUS_PENDING;}
+ case 3:if(!H->VdevDeleted)return STATUS_PENDING;H->Created=D->P2pJoin.Created=FALSE;H->Started=H->SelfMapped=H->AggregationSet=H->BeamformSet=FALSE;H->Stopped=TRUE;H->ReleaseStep=0;H->Failed=S->Fatal=FALSE;RtlSecureZeroMemory(H->GroupKey,sizeof(H->GroupKey));RtlSecureZeroMemory(H->Igtk,sizeof(H->Igtk));H->DefaultKey=0;H->DefaultMgmtKey=4;return STATUS_SUCCESS;
+ default:return STATUS_INVALID_DEVICE_STATE;
+ }
+}
+
+bool HotspotAdvertBusy(PWCN_DEVICE D){auto H=Hs(D);return H&&H->AdvertRequest;}

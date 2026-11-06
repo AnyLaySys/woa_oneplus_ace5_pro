@@ -87,10 +87,6 @@ BatI2cInit (
     BatPinIdle (Dev, BAT_GPIO_SCL);
     BatDelay ();
 
-    BatLog (Dev, "gpio sda_idle=%u scl_idle=%u sda_low=%u scl_low=%u",
-            SdaIdle, SclIdle, SdaLow, SclLow);
-    BatLogFlush (Dev);
-
     if (SdaIdle == 0 || SclIdle == 0) {
         return STATUS_IO_DEVICE_ERROR;
     }
@@ -142,7 +138,7 @@ BatBusRecovery (
     }
     if (Clocks != 0) {
         BatI2cStop (Dev);
-        BatLog (Dev, "bus recovery clocks=%u", Clocks);
+        
     }
 }
 
@@ -254,7 +250,7 @@ BatI2cReadWord (
     return STATUS_SUCCESS;
 }
 
-static VOID
+static BOOLEAN
 BatGaugeRead (
     _In_ PBAT_DEVICE Dev,
     _In_ UCHAR Reg,
@@ -263,10 +259,9 @@ BatGaugeRead (
 {
     USHORT Raw = 0;
 
-    if (!NT_SUCCESS (BatI2cReadWord (Dev, BAT_GAUGE_ADDRESS, Reg, &Raw))) {
-        Raw = 0;
-    }
-    *Value = Raw;
+    NTSTATUS Status = BatI2cReadWord (Dev, BAT_GAUGE_ADDRESS, Reg, &Raw);
+    *Value = NT_SUCCESS (Status) ? Raw : 0;
+    return NT_SUCCESS (Status);
 }
 
 BOOLEAN
@@ -279,42 +274,44 @@ BatGaugeSample (
     NTSTATUS Status;
     KIRQL OldIrql;
     BOOLEAN Changed;
+    BOOLEAN Complete = TRUE;
 
     if (!Dev->I2cReady) {
         return FALSE;
     }
 
+    RtlZeroMemory (&S, sizeof (S));
     Status = BatI2cReadWord (Dev, BAT_GAUGE_ADDRESS, BQ_REG_VOLT, &Volt);
     if (!NT_SUCCESS (Status)) {
-        BatLog (Dev, "gauge offline status=0x%08x", Status);
-        return FALSE;
+        
+        goto Store;
     }
 
-    RtlZeroMemory (&S, sizeof (S));
-    S.Valid = TRUE;
     S.VoltageMv = Volt;
-    BatGaugeRead (Dev, BQ_REG_TEMP, &S.TempDeciK);
-    BatGaugeRead (Dev, BQ_REG_SOC, &S.Soc);
-    BatGaugeRead (Dev, BQ_REG_REMAIN, &S.RemainingMah);
-    BatGaugeRead (Dev, BQ_REG_FCC, &S.FullMah);
-    BatGaugeRead (Dev, BQ_REG_CYCLES, &S.CycleCount);
-    BatGaugeRead (Dev, BQ_REG_DESIGN, &S.DesignMah);
+    Complete &= BatGaugeRead (Dev, BQ_REG_TEMP, &S.TempDeciK);
+    Complete &= BatGaugeRead (Dev, BQ_REG_SOC, &S.Soc);
+    Complete &= BatGaugeRead (Dev, BQ_REG_REMAIN, &S.RemainingMah);
+    Complete &= BatGaugeRead (Dev, BQ_REG_FCC, &S.FullMah);
+    Complete &= BatGaugeRead (Dev, BQ_REG_CYCLES, &S.CycleCount);
+    Complete &= BatGaugeRead (Dev, BQ_REG_DESIGN, &S.DesignMah);
     {
         USHORT Current = 0;
-        (VOID)BatI2cReadWord (Dev, BAT_GAUGE_ADDRESS, BQ_REG_CURRENT, &Current);
+        Status = BatI2cReadWord (Dev, BAT_GAUGE_ADDRESS, BQ_REG_CURRENT, &Current);
         S.CurrentMa = (LONG)(SHORT)Current;
     }
 
-    S.Discharging = S.CurrentMa < 0;
+    S.Valid = Complete && NT_SUCCESS (Status) && S.TempDeciK >= 2332 && S.TempDeciK <= 3532 &&
+              S.VoltageMv >= 5000 && S.VoltageMv <= 10000 && S.Soc <= 100 && S.FullMah != 0;
+    if (S.Valid) S.SampleTimeMs = KeQueryInterruptTime () / 10000;
 
-    BatLog (Dev, "sample v=%u soc=%u rem=%u fcc=%u des=%u cur=%d cyc=%u d=%u", S.VoltageMv, S.Soc,
-            S.RemainingMah, S.FullMah, S.DesignMah, S.CurrentMa, S.CycleCount,
-            (ULONG)S.Discharging);
-
+Store:
     KeAcquireSpinLock (&Dev->Lock, &OldIrql);
-    Changed = (S.Valid != Dev->Now.Valid) || (S.Soc != Dev->Now.Soc) ||
+    ULONGLONG Now = KeQueryInterruptTime () / 10000;
+    S.Online = Dev->Source.Valid && Dev->Source.Online && Dev->Source.TimeMs <= Now &&
+               Now - Dev->Source.TimeMs <= QCB_POWER_MAX_AGE_MS;
+    Changed = (S.Online != Dev->Now.Online) || (S.Valid != Dev->Now.Valid) || (S.Soc != Dev->Now.Soc) ||
               (S.VoltageMv != Dev->Now.VoltageMv) || (S.RemainingMah != Dev->Now.RemainingMah) ||
-              (S.FullMah != Dev->Now.FullMah) || (S.Discharging != Dev->Now.Discharging) ||
+              (S.FullMah != Dev->Now.FullMah) ||
               (S.CurrentMa != Dev->Now.CurrentMa);
     Dev->Now = S;
     KeReleaseSpinLock (&Dev->Lock, OldIrql);
@@ -334,15 +331,15 @@ BatPollThread (
 
     for (;;) {
         if (BatGaugeSample (Dev)) {
-            if (Dev->ClassData == NULL) {
+            if (Dev->ClassData == NULL && Dev->Now.Valid) {
                 Status = BatMiniportInit (Dev);
-                BatLog (Dev, "deferred miniport init 0x%08x", Status);
+                
             }
             if (Dev->ClassData != NULL) {
                 (VOID)BatteryClassStatusNotify (Dev->ClassData);
             }
         }
-        BatLogFlush (Dev);
+        
         for (Slice = 0; Slice < BAT_POLL_MS / BAT_SLICE_MS; Slice++) {
             BatPendingDrain (Dev, STATUS_INVALID_DEVICE_REQUEST);
             Timeout.QuadPart = -10000LL * BAT_SLICE_MS;
@@ -356,7 +353,7 @@ BatPollThread (
         }
     }
     BatPendingDrain (Dev, STATUS_CANCELLED);
-    BatLogFlush (Dev);
+    
     PsTerminateSystemThread (STATUS_SUCCESS);
 }
 
@@ -386,19 +383,15 @@ BatQueryStatus (
 
     RtlZeroMemory (Status, sizeof (*Status));
     BatSnapshotGet (Dev, &S);
+    Status->PowerState = S.Online ? BATTERY_POWER_ON_LINE : 0;
     if (!S.Valid) {
         Status->Capacity = BATTERY_UNKNOWN_CAPACITY;
         Status->Rate = BATTERY_UNKNOWN_CURRENT;
         return STATUS_SUCCESS;
     }
 
-    if (S.CurrentMa < 0) {
-        Status->PowerState = BATTERY_DISCHARGING;
-    } else if (S.CurrentMa > 0) {
-        Status->PowerState = BATTERY_POWER_ON_LINE | BATTERY_CHARGING;
-    } else {
-        Status->PowerState = BATTERY_POWER_ON_LINE;
-    }
+    if (S.CurrentMa < 0) Status->PowerState |= BATTERY_DISCHARGING;
+    if (S.CurrentMa > 0) Status->PowerState |= BATTERY_CHARGING;
     if (S.Soc <= 5) {
         Status->PowerState |= BATTERY_CRITICAL;
     }
@@ -406,8 +399,7 @@ BatQueryStatus (
     Status->Capacity = S.RemainingMah;
     Status->Voltage = S.VoltageMv;
     Status->Rate = S.CurrentMa;
-    BatLog (Dev, "status st=0x%x cap=%u v=%u rate=%d ok=%u", Status->PowerState,
-            Status->Capacity, Status->Voltage, Status->Rate, (ULONG)S.Valid);
+    
     return STATUS_SUCCESS;
 }
 
@@ -441,7 +433,7 @@ BatQueryInformation (
         }
         Info = (PBATTERY_INFORMATION)Buffer;
         RtlZeroMemory (Info, sizeof (*Info));
-        Info->Capabilities = BATTERY_SYSTEM_BATTERY;
+        Info->Capabilities = BATTERY_SYSTEM_BATTERY | BATTERY_CAPACITY_RELATIVE;
         Info->Technology = 1;
         Info->Chemistry[0] = 'L';
         Info->Chemistry[1] = 'I';
@@ -453,8 +445,7 @@ BatQueryInformation (
         Info->DefaultAlert2 = S.DesignMah / 20;
         Info->CycleCount = S.CycleCount;
         *ReturnedLength = sizeof (*Info);
-        BatLog (Dev, "info des=%u fcc=%u ok=%u", Info->DesignedCapacity,
-                Info->FullChargedCapacity, (ULONG)S.Valid);
+        
         return STATUS_SUCCESS;
 
     case BatteryGranularityInformation:

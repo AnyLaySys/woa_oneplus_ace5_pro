@@ -1,5 +1,4 @@
 /* KMDF resource and power lifecycle; passive-level radio worker. */
-#include "version.h"
 #include <ntifs.h> /* documented ZwWaitForSingleObject for thread-create rollback */
 #include "wcn7861.h"
 

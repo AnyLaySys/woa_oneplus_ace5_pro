@@ -46,7 +46,7 @@
   <ItemDefinitionGroup>
     <Inf>
       <DateStamp>11/06/2026</DateStamp>
-      <TimeStamp>26.11.6.47</TimeStamp>
+      <TimeStamp>26.11.6.53</TimeStamp>
     </Inf>
     <ClCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);POOL_NX_OPTIN=1</PreprocessorDefinitions>
@@ -66,6 +66,7 @@
     <ClCompile Include="..\tdls-crypto.c" />
     <ClCompile Include="..\ft.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
     <ClCompile Include="..\roaming.cpp"><CompileAs>CompileAsCpp</CompileAs><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
+    <ClCompile Include="..\p2p.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
     <ClCompile Include="..\hotspot.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
     <ClCompile Include="..\stage8-queue.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
     <ClCompile Include="..\ce.c" />

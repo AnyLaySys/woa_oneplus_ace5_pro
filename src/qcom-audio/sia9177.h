@@ -1,5 +1,6 @@
 #pragma once
 #include <ntddk.h>
+#include "usb.h"
 
 #define SIA_PCM_RATE 48000u
 #define SIA_PCM_FRAMES 960u
@@ -22,6 +23,8 @@ typedef struct _SIA_GPR_PACKET {
 } SIA_GPR_PACKET;
 
 typedef struct _SIA_LINK {
+    SIA_USB Usb;
+    BOOLEAN VersionReady;
     PUCHAR Smem;
     PUCHAR Mutex;
     PUCHAR Ipcc;

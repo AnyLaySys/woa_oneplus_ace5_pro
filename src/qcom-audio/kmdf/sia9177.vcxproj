@@ -82,6 +82,7 @@
 
     <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-10-31'">1</SiaRevision>
     <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-05'">17</SiaRevision>
+    <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-06'">17</SiaRevision>
     <SiaRevision Condition="'$(SiaRevision)' == ''">0</SiaRevision>
 
     <SiaDriverDate>$([System.DateTime]::Parse('$(SiaVersionDate)').ToString('MM/dd/yyyy'))</SiaDriverDate>
@@ -158,6 +159,8 @@
   <ItemGroup>
 
     <ClInclude Include="..\sia9177.h" />
+    <ClInclude Include="..\usb.h" />
+    <ClInclude Include="..\usb.inc" />
 
   </ItemGroup>
 

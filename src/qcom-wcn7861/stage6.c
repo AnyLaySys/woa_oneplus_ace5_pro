@@ -212,7 +212,7 @@ static NTSTATUS S6VdevSend (PWCN_DEVICE Dev)
 static NTSTATUS S6ScanSend (PWCN_DEVICE Dev)
 {
     PWCN_SCAN Scan = &Dev->Scan; ULONG *B = Scan->Tx, I, Offset, Count=Scan->RequestedCount?Scan->RequestedCount:Scan->ChannelCount;
-    if (!Scan->ChannelCount || Scan->ChannelCount > WCN_SCAN_MAX_CHANNELS||Scan->Target.SsidLength>32||Count>WCN_SCAN_MAX_CHANNELS) return STATUS_INVALID_PARAMETER;
+    if (!Scan->ChannelCount || Scan->ChannelCount > WCN_SCAN_MAX_CHANNELS||Scan->Target.SsidLength>32||Scan->Target.IeLength>sizeof(Scan->Target.Ies)||Count>WCN_SCAN_MAX_CHANNELS) return STATUS_INVALID_PARAMETER;
     /* Keep the full firmware-validated list for initial and runtime scans. */
     if(!Scan->ScanId)Scan->ScanId=S6_SCAN_ID;
     RtlZeroMemory (B, sizeof (Scan->Tx));
@@ -223,6 +223,7 @@ static NTSTATUS S6ScanSend (PWCN_DEVICE Dev)
     B[5] = 0x1ff; B[6] = 50; B[7] = 150; B[8] = 50; B[9] = 500;
     B[10]=Scan->Target.Active?20u:0u; /* second probe after 20ms, capped by n_probes */
     B[13] = 20000; B[14] = 5; B[15] = Scan->Target.Active?(0x10000u|4u|8u|(Scan->Target.SsidLength?0u:2u)):S6_PASSIVE_FLAGS;
+    if(Scan->Target.DwellTime)B[6]=B[7]=Scan->Target.DwellTime;B[15]|=Scan->Target.Flags;B[20]=Scan->Target.IeLength;
     B[17] = Count; B[18] = 1;B[19]=Scan->Target.Active&&Scan->Target.SsidLength?1u:0u;B[21]=Scan->Target.Active?2u:0u;
     B[36] = Scan->Target.Active?50u:0u;B[37] = 70; B[38] = 70; /* active/passive6g fields unused, no6g channels */
     Offset = 40;
@@ -232,7 +233,8 @@ static NTSTATUS S6ScanSend (PWCN_DEVICE Dev)
     if(B[19]){B[Offset++]=Scan->Target.SsidLength;RtlCopyMemory(B+Offset,Scan->Target.Ssid,Scan->Target.SsidLength);Offset+=8;}
     B[Offset++] = Jtlv (S6_WMI_TAG_ARRAY_FIXED_STRUCT, 8);
     RtlCopyMemory(B+Offset,Scan->Target.Bssid,6);if(!Jle32((const UCHAR*)B+Offset*4)&&!Jle16((const UCHAR*)B+Offset*4+4)){B[Offset]=MAXULONG;B[Offset+1]=0xffff;}Offset+=2;
-    B[Offset++] = Jtlv (S6_WMI_TAG_ARRAY_BYTE, 0); /* no probe-request IE */
+    B[Offset++]=Jtlv(S6_WMI_TAG_ARRAY_BYTE,(Scan->Target.IeLength+3)&~3u);
+    if(Scan->Target.IeLength){RtlCopyMemory(B+Offset,Scan->Target.Ies,Scan->Target.IeLength);Offset+=(Scan->Target.IeLength+3)/4;}
     NTSTATUS St=WcnWmiSend(Dev,S6_WMI_START_SCAN_CMDID,B,Offset*4);
     RtlSecureZeroMemory(B,sizeof(Scan->Tx));if(NT_SUCCESS(St))RtlSecureZeroMemory(&Scan->Target,sizeof(Scan->Target));return St;
 }
@@ -302,7 +304,7 @@ static VOID S6Management (PWCN_DEVICE Dev, const UCHAR *Data, ULONG Length)
     if (!Ssid) { return; }
     Rssi = (LONG)Jle32 (Header + 44);
     if (Rssi > 0 || Rssi < -127) Rssi = -127; /* unknown, never invent a noise floor */
-    WcnStage8Observe (Dev, Frame, FrameSize, Frequency, Rssi);
+    if(S->ScanVdev!=3||(Jle16(Frame+34)&1))WcnStage8Observe (Dev, Frame, FrameSize, Frequency, Rssi);
     for (I = 0; I < S->ApCount; I++) {
         Ap = &S->Ap[I];
         if (Ap->Frequency == Frequency && RtlCompareMemory (Ap->Bssid, Frame + 16, 6) == 6) return;
@@ -449,9 +451,11 @@ NTSTATUS WcnStage6Rescan(PWCN_DEVICE Dev,ULONG Vdev,const ULONG *Frequency,ULONG
     if(S->RuntimeScan||S->State!=7)return STATUS_DEVICE_BUSY;
     /* Do not take the radio off-channel in the middle of auth/association or
      * the Windows four-way handshake. Pending OS scans are bounded/deferred. */
-    if((Dev->Join.Started&&!Dev->Join.Authorized)||(Dev->Secondary.Started&&!Dev->Secondary.Authorized))return STATUS_DEVICE_BUSY;
-    if(Count>WCN_SCAN_MAX_CHANNELS||(Count&&!Frequency)||!Target||Target->SsidLength>32||(Vdev!=0&&Vdev!=2)||(Vdev==2&&!Count)||(Target->Active&&!Count))return STATUS_INVALID_PARAMETER;
+    if((Dev->Join.Started&&!Dev->Join.Authorized)||(Dev->Secondary.Started&&!Dev->Secondary.Authorized)||(Dev->P2pClient&&Dev->P2pJoin.Started&&!Dev->P2pJoin.Authorized))return STATUS_DEVICE_BUSY;
+    if(Count>WCN_SCAN_MAX_CHANNELS||(Count&&!Frequency)||!Target||Target->SsidLength>32||(Vdev!=0&&Vdev!=2&&Vdev!=3&&!(Vdev==1&&Dev->P2pClient))||(Vdev!=0&&!Count)||(Target->Active&&!Count))return STATUS_INVALID_PARAMETER;
+    if(Target->IeLength>sizeof(Target->Ies)||(Target->Flags&~0x2100u)||Target->DwellTime>500||(Vdev!=3&&(Target->Flags||Target->DwellTime)))return STATUS_INVALID_PARAMETER;
     for(ULONG I=0;I<Count;I++){ULONG K;for(K=0;K<S->ChannelCount;K++)if(S->Channel[K].Frequency==Frequency[I])break;if(K==S->ChannelCount||(Target->Active&&!WcnProbeAllowed(Frequency[I],S->Channel[K].Flags)))return STATUS_INVALID_PARAMETER;}
+    if(Vdev!=3){NTSTATUS St=WcnP2pPauseListen(Dev);if(!NT_SUCCESS(St))return St;}
     S->Target=*Target;S->ScanVdev=Vdev;S->RequestedCount=Count;if(Count)RtlCopyMemory(S->RequestedFrequency,Frequency,Count*sizeof(ULONG));
     S->ScanId=S6_SCAN_ID|((S->ScanId+1)&0xfff);
     S->RuntimeScan=TRUE;S->ScanSent=S->ScanStarted=S->ScanCompleted=S->AbortSent=FALSE;

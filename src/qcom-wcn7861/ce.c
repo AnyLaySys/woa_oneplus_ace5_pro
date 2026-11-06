@@ -613,6 +613,7 @@ WcnWmiReceive (
     WcnStage6Receive (Dev, EventId, Data + 4, Length - 4);
     WcnStage7Receive (Dev, EventId, Data + 4, Length - 4);
     WcnHotspotWmi(Dev,EventId,Data+4,Length-4);
+    WcnP2pWmi(Dev,EventId,Data+4,Length-4);
     if (EventId == 0x7001 || EventId == 0x7006) return;
 
     TlvLength = 0;

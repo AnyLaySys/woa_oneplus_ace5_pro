@@ -124,21 +124,22 @@ static NTSTATUS Jsubmit(PWCN_DEVICE Dev,PWCN_JOIN J,UCHAR *F,ULONG N)
 
 static NTSTATUS Jmanagement(PWCN_DEVICE Dev,PWCN_JOIN J,BOOLEAN Assoc)
 {
-    UCHAR *F=J->MgmtDma.Va;ULONG N=24;
+    UCHAR *F=J->MgmtDma.Va;ULONG N=24;BOOLEAN Provisioning=Assoc&&WcnStage8Provisioning(Dev,J);
     if(J->MgmtBusy)return STATUS_DEVICE_BUSY;
-    RtlZeroMemory(F,1024);F[0]=Assoc?(J->Reassociate?0x20:0):0xb0;RtlCopyMemory(F+4,J->Ap.Bssid,6);RtlCopyMemory(F+10,J->Mac,6);RtlCopyMemory(F+16,J->Ap.Bssid,6);
+    RtlZeroMemory(F,J->MgmtDma.Length);F[0]=Assoc?(J->Reassociate?0x20:0):0xb0;RtlCopyMemory(F+4,J->Ap.Bssid,6);RtlCopyMemory(F+10,J->Mac,6);RtlCopyMemory(F+16,J->Ap.Bssid,6);
     Jputle16(F+22,(J->Sequence++&4095)<<4);
     if(!Assoc){Jputle16(F+26,1);N=30;} /* open-system authentication */
     else{
-        Jputle16(F+24,J->Ap.Auth==WCN_AUTH_OPEN?0x0401:0x0411);Jputle16(F+26,10);N=28;if(J->Reassociate){RtlCopyMemory(F+N,J->PreviousBssid,6);N+=6;}
+        Jputle16(F+24,J->Ap.Auth==WCN_AUTH_OPEN||Provisioning?0x0401:0x0411);Jputle16(F+26,10);N=28;if(J->Reassociate){RtlCopyMemory(F+N,J->PreviousBssid,6);N+=6;}
         F[N++]=0;F[N++]=J->SsidLength;RtlCopyMemory(F+N,J->Ssid,J->SsidLength);N+=J->SsidLength;
         {ULONG First=J->Ap.RateCount>8?8:J->Ap.RateCount;
         F[N++]=1;F[N++]=(UCHAR)First;RtlCopyMemory(F+N,J->Ap.Rates,First);N+=First;
         if(J->Ap.RateCount>First){ULONG More=J->Ap.RateCount-First;F[N++]=50;F[N++]=(UCHAR)More;RtlCopyMemory(F+N,J->Ap.Rates+First,More);N+=More;}}
         if(J->Ap.FtMode){ULONG L=WcnStage8FtIes(Dev,J,F+N);if(!L)return STATUS_INVALID_DEVICE_STATE;N+=L;}
-        else N+=WcnRsnBuildCached(F+N,J->Ap.Auth,J->Ap.Pmf,J->H2e,J->Ap.HasPmkid?J->Ap.Pmkid:NULL);
+        else if(!Provisioning)N+=WcnRsnBuildCached(F+N,J->Ap.Auth,J->Ap.Pmf,J->H2e,J->Ap.HasPmkid?J->Ap.Pmkid:NULL);
         N+=WcnPhyBuildIes(Dev,&J->Ap,F+N,FALSE);
         N+=WcnTdlsCapabilities(Dev,J,F+N);
+        if(N>J->MgmtDma.Length)return STATUS_INVALID_BUFFER_SIZE;ULONG L=WcnStage8AssocIes(Dev,J,F+N,(ULONG)J->MgmtDma.Length-N);if(L==MAXULONG)return STATUS_INVALID_BUFFER_SIZE;N+=L;
     }
     return Jsubmit(Dev,J,F,N);
 }
@@ -255,6 +256,7 @@ NTSTATUS WcnStage7EnsureVdev(PWCN_DEVICE D,PWCN_JOIN J)
     // Stage6 alone creates vdev0. OS scan requests can arrive before it finishes.
     if((J->Vdev!=2&&!(J->Vdev==1&&D->P2pClient))||!D->Scan.Passed)return STATUS_DEVICE_BUSY;
     if(!D->Ce.WmiReady)return STATUS_DEVICE_NOT_READY;
+    if(J->Vdev==1){NTSTATUS T=WcnTdlsStop(D,&D->Join);if(!NT_SUCCESS(T))return T;T=WcnTdlsStop(D,&D->Secondary);if(!NT_SUCCESS(T))return T;T=WcnTwtStop(D,&D->Secondary);if(!NT_SUCCESS(T))return T;}
     NTSTATUS Awake=WcnTwtStop(D,&D->Join);if(!NT_SUCCESS(Awake))return Awake;
     ULONG B[21]={0};B[0]=Jtlv(86,44);B[1]=J->Vdev;B[2]=2;B[3]=J->Vdev==1?2u:0u;RtlCopyMemory(B+4,J->Mac,6);B[6]=2;B[7]=1;B[12]=Jtlv(18,32);
     for(ULONG I=0;I<2;I++){B[13+I*4]=Jtlv(411,12);B[14+I*4]=I;B[15+I*4]=B[16+I*4]=D->Ce.NumRfChains;}
@@ -271,11 +273,12 @@ static VOID Jservice(PWCN_DEVICE Dev,PWCN_JOIN J)
     if(!WcnStage8ConnectRequested(Dev,J))return;
     if(!J->Created){St=WcnStage7EnsureVdev(Dev,J);if(!NT_SUCCESS(St)&&St!=STATUS_DEVICE_BUSY)WcnStage7Fail(Dev,J,"vdev creation transport");return;}if(J->VdevAt&&Now-J->VdevAt<200)return;
     if(!J->Started){
+        if(J->Vdev==1&&!WcnStage8SecondaryIdle(Dev))return;
         if(J->Vdev==0&&Dev->Secondary.Started&&(WcnIs2g(J->Ap.Frequency)==WcnIs2g(Dev->Secondary.Ap.Frequency)||!WcnHotspotTriple(Dev,&J->Ap,&Dev->Secondary.Ap)))return;
         J->Started=TRUE;J->StartedAt=J->StateAt=Now;
         if(!J->Ap.Valid){WcnStage7Fail(Dev,J,"selected BSS absent or incompatible; no fallback to another SSID");return;}
         if(Dev->Scan.Alpha2[0]!='C'||Dev->Scan.Alpha2[1]!='N'){WcnStage7Fail(Dev,J,"CN country not confirmed");return;}
-        St=J->MgmtDma.Buffer?STATUS_SUCCESS:WcnDmaAllocAligned(Dev,1024,0xfff,&J->MgmtDma);if(!NT_SUCCESS(St)){WcnStage7Fail(Dev,J,"management DMA allocation");return;}
+        St=J->MgmtDma.Buffer?STATUS_SUCCESS:WcnDmaAllocAligned(Dev,1536,0xfff,&J->MgmtDma);if(!NT_SUCCESS(St)){WcnStage7Fail(Dev,J,"management DMA allocation");return;}
         St=WcnStage7DpInit(Dev,J);if(!NT_SUCCESS(St)){WcnStage7Fail(Dev,J,"runtime data-path preparation");return;}
 
     }

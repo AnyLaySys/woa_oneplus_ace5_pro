@@ -1,6 +1,6 @@
 # Windows for OnePlus Ace 5 Pro
 
-`woa_oneplus_ace5_pro` 是 OnePlus Ace 5 Pro / PKR110（设备代号 `hummer`，Qualcomm SM8750）的 **Windows on ARM 设备适配工程**，包含触控、音频、Wi-Fi、蓝牙、电量计驱动源码，运行所需固件/配置，以及统一构建和固件复制入口。
+`woa_oneplus_ace5_pro` 是 OnePlus Ace 5 Pro / PKR110（设备代号 `hummer`，Qualcomm SM8750）的 **Windows on ARM 设备适配工程**，包含触控、音频、Wi-Fi、蓝牙、电量计驱动源码及 USB Host 电源角色管理，运行所需固件/配置，以及统一构建和固件复制入口。
 
 本仓库不是 Windows 操作系统源码，也不构建完整 Windows 安装镜像。Linux 适配由 `linux_oneplus_ace5_pro` 维护，UEFI 由 `uefi_oneplus_ace5_pro` 维护；Windows 驱动仍依赖与本设备匹配的 UEFI/ACPI。
 
@@ -9,7 +9,7 @@
 | 路径 | 内容 |
 | --- | --- |
 | `src/syna-s3910` | Synaptics S3910 触控驱动及上游许可证 |
-| `src/qcom-audio` | Qualcomm ADSP 音频与 SIA9177 功放适配 |
+| `src/qcom-audio` | Qualcomm ADSP 音频、SIA9177 功放适配及共享 PMIC 通道上的 USB Host 电源管理 |
 | `src/qcom-wcn7861` | Qualcomm WCN7861 Wi-Fi 驱动 |
 | `src/qcom-bluetooth` | Qualcomm WCN7861 UART HCI 蓝牙传输适配；原生蓝牙、配对、键鼠与A2DP已验证 |
 | `src/qcom-battery` | Qualcomm 电量计（bq27xxx，hub I2C）剩余电量显示驱动 |
@@ -61,7 +61,6 @@ PowerShell 中对应使用 `.\build.cmd`，例如：
 | --- | --- | --- |
 | `syna-s3910` | `out/drv/syna-s3910` | syna_s3910.inf / syna_s3910.sys / syna_s3910.cat |
 | `qcom-audio` | `out/drv/qcom-audio` | sia9177.inf / sia9177.sys / sia9177.cat |
-| `qcom-bluetooth` | `out/drv/qcom-bluetooth` | qcom_bluetooth.inf / qcom_bluetooth.sys / qcom_bluetooth.cat |
 | `qcom-bluetooth` | `out/drv/qcom-bluetooth` | qcom_bluetooth.inf / qcom_bluetooth.sys / qcom_bluetooth.cat |
 | `qcom-wcn7861` | `out/drv/qcom-wcn7861` | wcn7861.inf / wcn7861.sys / wcn7861.cat |
 | `qcom-battery` | `out/drv/qcom-battery` | qcom_battery.inf / qcom_battery.sys / qcom_battery.cat |
@@ -149,7 +148,7 @@ pnputil /add-driver ".\out\drv\qcom-battery\qcom_battery.inf" /install
 
 蓝牙使用独立的 GENI UART（`0x898000`、GSI 493），不是 Wi-Fi 的 PCIe 通道。更新后的 UEFI 通过 `ACPI\HMRB7861` 交付 UART 寄存器与中断；旧 UEFI 没有此节点，不能直接绑定本驱动。需先编译 UEFI，再在 `linux_oneplus_ace5_pro` 运行 `python3 build.py -nr` 生成匹配的 boot。
 
-当前已验证 115200/8 Mbps 内部回环、8 Mbps 控制器通信、完整固件初始化，以及 Windows 原生 BTHX 中断收发。不含诊断内容的 26.11.6.2 正式包已在重启后确认运行，Bluetooth Radio、经典蓝牙/LE 枚举器及 RFCOMM 正常启动；OPPO K5 和一加 Ace 5 均已成功配对、枚举服务，并各自完成一次超过35秒的 RFCOMM/OBEX 连接保持测试。测试没有发送文件，实际大文件传输、HID、A2DP、LE GATT、休眠恢复等仍待验证，不能据此宣称所有蓝牙功能已完成。
+当前已验证 115200/8 Mbps 内部回环、8 Mbps 控制器通信、完整固件初始化，以及 Windows 原生 BTHX 中断收发。26.11.6.4 正式包已确认实际加载，Bluetooth Radio、经典蓝牙/LE 枚举器及 RFCOMM 正常启动；OPPO K5 和一加 Ace 5 均已成功配对、枚举服务，并各自完成一次超过35秒的 RFCOMM/OBEX 连接保持测试，未发送文件。用户已确认键鼠与耳机 A2DP 音乐实测通过；本轮验证 LE 被动扫描、本机 GATT 广播和蓝牙开关恢复。实际大文件传输、远端 GATT 数据交互、整机睡眠恢复等尚未完成验证，不能据此宣称所有蓝牙功能已完成。
 
 运行文件应位于目标 Windows 的 `System32\drivers\wcn7861-bt`。除仓库中的五个文件外，还需要本机原厂蓝牙地址。该地址属于每台设备的配置，不作为固件源文件上传；安装时可显式提供：
 
@@ -166,4 +165,12 @@ build.cmd install-fw -WindowsDirectory "W:\Windows" -BluetoothAddress "XX:XX:XX:
 
 用户已确认蓝牙键鼠和耳机A2DP音乐实测通过。额外验证了LE被动扫描、本地GATT服务广播及Windows蓝牙Off/On；远端GATT数据交互尚未通过本次测试。控制器上报5.4和CIS/BIS能力，但Windows当前仅开放31字节广播，尚未实现HFP旁路音频与LE Audio的ACX/VSAP数据通路，不能宣称与原厂全部规格一致。
 
-源码和构建包现为26.11.6.3，新增主机IBS空闲休眠/发送前唤醒、重试和超时清理。状态机和包边界的主机测试、构建与签名已通过；设备重启后已确认加载同一SYS，并通过8轮空闲后查询、LE扫描、原生蓝牙开关及开关后扫描，系统HCI跟踪确认8次查询均成功完成且无命令错误或硬件错误。该验证不直接捕获原始IBS控制字节，不代表完成实际电流、主机时钟门控或系统远程唤醒测量，也不宣称功耗/吞吐达到绝对上限。继续通话和LE Audio适配需要Android实际音频路由采集及兼容外设回归。
+源码和正式包现为 26.11.6.4，保留主机 IBS 空闲休眠/发送前唤醒、重试和超时清理，并完成等价精简，C/H 源码净减少 859 字节，无生产日志或测试接口。14,097 组接收解析等价测试、IBS 10 万轮状态测试、包长边界和五条固件指令逐字节对比通过。已加载新版实机通过 8 轮空闲后查询、LE 扫描、原生蓝牙开关、开关后扫描和本机 GATT 广播；244 条 HCI 记录无命令错误、硬件错误或丢失，测试跟踪已停止。本轮“空闲后收发恢复＋原生蓝牙开关恢复＋LE 本机基础能力”子目标完成。该验证不直接捕获原始 IBS 控制字节，不代表完成实际电流、主机时钟门控、整机睡眠/远程唤醒或实机故障注入验收，也不宣称功耗/吞吐达到绝对上限。HFP 通话和 LE Audio 通路尚未实现。
+
+## USB 适配状态
+
+接口按设备实际规格仅支持 **USB 2.0 Host/OTG 与充电器输入切换**，不实现 Device/MTP/ADB 或 USB 3.x。主控与集线器使用 Windows 原生 USBXHCI/USBHUB3；匹配的 UEFI 需提供 `ACPI\PNP0D10` 节点。
+
+自动插拔、OTG 5V 源端开关和供电方向切换复用音频驱动已有的 ADSP 边缘及 PMIC 通道，随 `build.cmd qcom-audio` 构建，不需要独立 USB 驱动包、常驻工具或手工角色切换命令。源端设为 500mA，并保留外部输入、端口状态、电池有效性、超时与关闭回读检查；不设置充电输入电流、充电电压或快充协议。电池净充电由充电适配另行处理。
+
+已完成鼠标 Host 枚举/操作实测及自动策略的软件回归；软件回归不等同于所有外设和持续插拔的实机认证。正式源码不包含 USB 实验控制接口、追踪缓冲或测试程序。

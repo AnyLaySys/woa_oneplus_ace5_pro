@@ -40,6 +40,7 @@
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
     <QcbVersionDate Condition="'$(QcbVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</QcbVersionDate>
     <QcbRevision Condition="'$(QcbRevision)' == '' and '$(QcbVersionDate)' == '2026-11-04'">19</QcbRevision>
+    <QcbRevision Condition="'$(QcbRevision)' == '' and '$(QcbVersionDate)' == '2026-11-06'">2</QcbRevision>
     <QcbRevision Condition="'$(QcbRevision)' == ''">0</QcbRevision>
     <QcbDriverDate>$([System.DateTime]::Parse('$(QcbVersionDate)').ToString('MM/dd/yyyy'))</QcbDriverDate>
     <QcbDriverVersion>$([System.DateTime]::Parse('$(QcbVersionDate)').ToString('yy.M.d')).$(QcbRevision)</QcbDriverVersion>
@@ -48,11 +49,11 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>QCB_DRIVER_VERSION=&quot;$(QcbDriverVersion)&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+
       <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>battc.lib;ntstrsafe.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>battc.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Inf>
       <SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate>
@@ -74,6 +75,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\battery.h" />
+    <ClInclude Include="..\power.h" />
   </ItemGroup>
   <ItemGroup>
     <Inf Include="qcom_battery.inx" />

@@ -38,10 +38,11 @@ SiaWorker (PVOID Context)
     PSIA_DEVICE Dev = Context;
     BOOLEAN LinkReady = FALSE;
     NTSTATUS Status;
+    LARGE_INTEGER Wait;
     for (;;) {
-        KeWaitForSingleObject (&Dev->WorkEvent, Executive, KernelMode, FALSE, NULL);
+        Wait.QuadPart = -200000LL;
+        KeWaitForSingleObject (&Dev->WorkEvent, Executive, KernelMode, FALSE, &Wait);
         if (Dev->Stopping) break;
-        if (!Dev->Running) continue;
         ExSetTimerResolution (10000, TRUE);
         Status = STATUS_SUCCESS;
         if (!LinkReady) {
@@ -49,7 +50,7 @@ SiaWorker (PVOID Context)
             LinkReady = NT_SUCCESS (Status);
             if (!LinkReady) SiaLinkStop (Dev);
         }
-        if (NT_SUCCESS (Status)) SiaAudioRun (Dev);
+        if (NT_SUCCESS (Status)) { SiaLinkPoll (Dev); if (Dev->Running) SiaAudioRun (Dev); }
         if (!NT_SUCCESS(Status)) {
             InterlockedExchange (&Dev->Running, 0);
             for (ULONG Index = 0; Index < 2; Index++) {

@@ -25,7 +25,7 @@ typedef struct _TDLS {
 static TDLS *Ts(PWCN_DEVICE D){return (TDLS*)D->Tdls;}
 static ULONG Ti(PWCN_JOIN J){return J->Vdev==2?1:0;}
 static BOOLEAN Teligible(PWCN_DEVICE D,PWCN_JOIN J)
-{return J&&J->Authorized&&(!(J->Vdev==0?D->Secondary.Started:D->Join.Started)||WcnService(D,363))&&!J->Failed&&!J->Resetting&&!J->CsaState&&!J->Ap.TdlsProhibited&&!WcnHotspotActive(D)&&WcnTdlsSupported(D);}
+{return J&&J->Vdev!=1&&J->Authorized&&(!(J->Vdev==0?D->Secondary.Started:D->Join.Started)||WcnService(D,363))&&!J->Failed&&!J->Resetting&&!J->CsaState&&!J->Ap.TdlsProhibited&&!WcnHotspotActive(D)&&WcnTdlsSupported(D);}
 BOOLEAN WcnTdlsSupported(PWCN_DEVICE D)
 {return D->Tdls&&WcnService(D,36)&&D->Join.PmfAlgorithm!=NULL;}
 static TPEER *Tfind(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *Mac)
@@ -50,7 +50,7 @@ static ULONG Toptions(PWCN_DEVICE D,PWCN_JOIN J)
 {return (WcnService(D,56)&&!J->Ap.TdlsSwitchProhibited?1u:0u)|(WcnService(D,57)?2u:0u)|(WcnService(D,58)?4u:0u);}
 ULONG WcnTdlsCapabilities(PWCN_DEVICE D,PWCN_JOIN J,UCHAR *P)
 {
-    if(!WcnTdlsSupported(D)||J->Ap.TdlsProhibited)return 0;
+    if(J->Vdev==1||!WcnTdlsSupported(D)||J->Ap.TdlsProhibited)return 0;
     P[0]=127;P[1]=8;RtlZeroMemory(P+2,8);P[5]=(UCHAR)(((Toptions(D,J)&2)?16:0)|((Toptions(D,J)&4)?32:0)|((Toptions(D,J)&1)?64:0));P[6]=32;
     if(WcnService(D,342))P[9]=32;return 10;
 }
@@ -79,6 +79,7 @@ static VOID Tlocal(PWCN_DEVICE D,PWCN_JOIN J,PWCN_JOIN_AP A,BOOLEAN Wide)
 }
 NTSTATUS WcnTdlsAwake(PWCN_DEVICE D,PWCN_JOIN J)
 {
+    if(J->Vdev==1)return STATUS_SUCCESS;
     TDLS *T=Ts(D);ULONG I=Ti(J);NTSTATUS St;if(!T||!T->Ps[I])return STATUS_SUCCESS;
     St=WcnStationPower(D,J,FALSE);if(NT_SUCCESS(St)){T->Ps[I]=FALSE;T->BusyAt[I]=WcnNowMs();}return St;
 }
@@ -112,6 +113,7 @@ static NTSTATUS Toff(PWCN_DEVICE D,PWCN_JOIN J,TPEER *P,BOOLEAN Enable)
 }
 NTSTATUS WcnTdlsPause(PWCN_DEVICE D,PWCN_JOIN J)
 {
+    if(J->Vdev==1)return STATUS_SUCCESS;
     TDLS *T=Ts(D);ULONG I;BOOLEAN Busy=FALSE;NTSTATUS St=WcnTdlsAwake(D,J);if(!NT_SUCCESS(St)||!T)return St;
     for(I=0;I<WCN_TDLS_PEERS;I++){TPEER *P=&T->Peer[I];if(P->L.Vdev!=J->Vdev||!P->OffFrequency||!P->State)continue;if(P->State==Tquarantine&&P->OffRequested)return STATUS_IO_TIMEOUT;if(P->State>=Tcool)continue;Tdrop(P,TRUE);Busy=TRUE;}
     return Busy?STATUS_DEVICE_BUSY:STATUS_SUCCESS;
@@ -324,6 +326,7 @@ PWCN_JOIN WcnTdlsPeer(PWCN_DEVICE D,ULONG Vdev,const UCHAR Peer[6])
 {TDLS *T=Ts(D);ULONG I;if(!T)return NULL;for(I=0;I<WCN_TDLS_PEERS;I++)if(T->Peer[I].State&&T->Peer[I].L.Vdev==Vdev&&Jeq(T->Peer[I].L.Ap.Bssid,Peer,6))return &T->Peer[I].L;return NULL;}
 NTSTATUS WcnTdlsStop(PWCN_DEVICE D,PWCN_JOIN J)
 {
+    if(J->Vdev==1)return STATUS_SUCCESS;
     TDLS *T=Ts(D);ULONG I;BOOLEAN Busy=FALSE;NTSTATUS St=WcnTdlsAwake(D,J);if(!NT_SUCCESS(St)||!T)return St;T->Enabled[Ti(J)]=FALSE;if(T->ReplyVdev==J->Vdev)T->ReplyLength=0;
     for(I=0;I<WCN_TDLS_PEERS;I++){TPEER *P=&T->Peer[I];if(P->L.Vdev!=J->Vdev)continue;
         P->RestartLength=0;if(P->State&&P->State<Tcool){Tdrop(P,TRUE);Busy=TRUE;}

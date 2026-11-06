@@ -413,6 +413,7 @@ typedef struct _WCN_SCAN_AP {
 } WCN_SCAN_AP, *PWCN_SCAN_AP;
 typedef struct _WCN_SCAN_TARGET {
     UCHAR Ssid[32],SsidLength,Bssid[6];BOOLEAN Active;
+    ULONG IeLength,DwellTime,Flags;UCHAR Ies[768];
 } WCN_SCAN_TARGET;
 typedef struct _WCN_SCAN {
 WCN_SCAN_RULE Rule[WCN_SCAN_MAX_RULES];
@@ -658,6 +659,7 @@ VOID WcnStage7TxFlush(PWCN_DEVICE Dev);
 VOID WcnStage7Htt(PWCN_DEVICE Dev,const UCHAR *Payload,ULONG Length);
 
 #include "stage8-bridge.h"
+#include "p2p.h"
 
 BOOLEAN WcnStage7DataIdle(PWCN_DEVICE Dev,PWCN_JOIN J);
 

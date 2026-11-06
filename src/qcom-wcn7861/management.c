@@ -88,5 +88,5 @@ NTSTATUS WcnPmfTxGroup(PVOID Algorithm,WCN_IGTK Keys[2],UCHAR Index,UCHAR *F,ULO
 ULONG WcnMgmtAllocate(PWCN_DEVICE D,ULONG Owner)
 {
     ULONG I,Id;if(Owner>=ARRAYSIZE(D->MgmtInUse)||D->MgmtInUse[Owner])return 0;
-    for(I=0;I<255;I++){Id=(++D->MgmtSequence)&255u;if(Id&&Id!=D->MgmtInUse[0]&&Id!=D->MgmtInUse[1]&&Id!=D->MgmtInUse[2]){D->MgmtInUse[Owner]=Id;return Id;}}return 0;
+    for(I=0;I<255;I++){Id=(++D->MgmtSequence)&255u;if(Id&&Id!=D->MgmtInUse[0]&&Id!=D->MgmtInUse[1]&&Id!=D->MgmtInUse[2]&&Id!=D->MgmtInUse[3]){D->MgmtInUse[Owner]=Id;return Id;}}return 0;
 }
