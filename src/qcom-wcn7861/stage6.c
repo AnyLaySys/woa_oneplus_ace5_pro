@@ -17,15 +17,8 @@
 #define S6_REQUESTOR 1u
 #define S6_PASSIVE_FLAGS 0x10001u /* Linux passive + strict-passive; no CCXv4 promiscuous flag */
 
-static VOID S6Fail (PWCN_DEVICE Dev, PCSTR Reason)
-{
-    if (!Dev->Scan.Failed) {
-        Dev->Scan.Failed = TRUE;
-        WcnLog (Dev, "stage6: FAIL state=%u reason=%s country-ready=%u channels=%u started=%u completed=%u APs=%u credits=%u",
-                Dev->Scan.State, Reason, Dev->Scan.CountryReady, Dev->Scan.ChannelCount,
-                Dev->Scan.ScanStarted, Dev->Scan.ScanCompleted, Dev->Scan.ApCount, Dev->Ce.WmiCredits);
-    }
-}
+static VOID S6Fail(PWCN_DEVICE Dev)
+{Dev->Scan.Failed=TRUE;}
 
 static VOID S6Regulatory (PWCN_DEVICE Dev, const UCHAR *Data, ULONG Length, BOOLEAN Extended)
 {
@@ -38,33 +31,33 @@ static VOID S6Regulatory (PWCN_DEVICE Dev, const UCHAR *Data, ULONG Length, BOOL
 
     if (!Scan->CountrySent || Phy != 0) return; /* pdev1 maps to firmware phy0 */
     if (Status) {
-        WcnLog (Dev, "stage6: requested country/domain rejected status=%u (0=PASS 1=CURRENT_ALPHA2_NOT_FOUND 2=INIT_ALPHA2_NOT_FOUND 3=CHANGE_NOT_ALLOWED 4=NO_MEMORY 5=FAIL)", Status);
-        S6Fail (Dev, "firmware rejected requested country/domain"); return;
+
+        S6Fail(Dev); return;
     }
     if ((Alpha & 0xffff) != 0x4e43u) {
-        if (Scan->CountryReady) S6Fail (Dev, "country changed away from requested country/domain");
+        if (Scan->CountryReady) S6Fail(Dev);
         return; /* Do not silently use a board's default US or assume user country. */
     }
 
     N2 = Jle32 (Fixed + 48); N5 = Jle32 (Fixed + 52);
     if (N2 > WCN_SCAN_MAX_RULES || N5 > WCN_SCAN_MAX_RULES - N2 || N2 + N5 == 0) {
-        S6Fail (Dev, "invalid/empty firmware regulatory rules"); return;
+        S6Fail(Dev); return;
     }
     Count = N2 + N5;
     Array = Jfind (Data, Length, S6_WMI_TAG_ARRAY_STRUCT, &ArraySize);
-    if (!Array || !Jtlvs (Array, ArraySize)) { S6Fail (Dev, "invalid regulatory rule array"); return; }
+    if (!Array || !Jtlvs (Array, ArraySize)) { S6Fail(Dev); return; }
     Tag = Extended ? S6_WMI_TAG_REGULATORY_RULE_EXT_STRUCT : S6_WMI_TAG_REGULATORY_RULE_STRUCT;
     MinSize = Extended ? 16 : 12;
     /* Validate all required rules before changing the cached domain. */
     Offset = 0;
     for (Index = 0; Index < Count; Index++) {
-        if (ArraySize - Offset < 4) { S6Fail (Dev, "truncated regulatory rules"); return; }
+        if (ArraySize - Offset < 4) { S6Fail(Dev); return; }
         Value = Jle32 (Array + Offset); Size = Value & 0xffff;
         if ((Value >> 16) != Tag || Size < MinSize || Size > ArraySize - Offset - 4) {
-            S6Fail (Dev, "wrong regulatory rule tag/length"); return;
+            S6Fail(Dev); return;
         }
         Rule = Array + Offset + 4; Value = Jle32 (Rule);
-        if ((Value & 0xffff) >= (Value >> 16)) { S6Fail (Dev, "reversed regulatory frequency interval"); return; }
+        if ((Value & 0xffff) >= (Value >> 16)) { S6Fail(Dev); return; }
         Offset += Size + 4;
     }
     if (Scan->ScanSent) {
@@ -80,7 +73,7 @@ static VOID S6Regulatory (PWCN_DEVICE Dev, const UCHAR *Data, ULONG Length, BOOL
                    Scan->Rule[Index].Gain == (Bw >> 24) && Scan->Rule[Index].Flags == Flag;
             Offset += Size + 4;
         }
-        if (!Same) S6Fail (Dev, "regulatory rules changed during scan");
+        if (!Same) S6Fail(Dev);
         return;
     }
     Offset = 0;
@@ -100,7 +93,6 @@ static VOID S6Regulatory (PWCN_DEVICE Dev, const UCHAR *Data, ULONG Length, BOOL
     Scan->MaxBw2g=Jle32(Fixed+36);Scan->MaxBw5g=Jle32(Fixed+44);Scan->PhyBitmap=Jle32(Fixed+28);
 
     Scan->CountryGeneration++; Scan->CountryReady = TRUE;
-
 }
 
 static BOOLEAN S6ChannelAdd (PWCN_DEVICE Dev, ULONG Frequency)
@@ -141,7 +133,6 @@ static VOID S6ChannelsBuild (PWCN_DEVICE Dev)
     for (Channel = 1; Channel <= 13u; Channel++) S6ChannelAdd (Dev, 2407 + 5 * Channel);
     for (Channel = 36; Channel <= 64; Channel += 4) S6ChannelAdd (Dev, 5000 + 5 * Channel);
     for (Channel = 149; Channel <= 165; Channel += 4) S6ChannelAdd (Dev, 5000 + 5 * Channel);
-
 }
 static BOOLEAN S6FrequencyAllowed (PWCN_DEVICE Dev, ULONG Frequency)
 {
@@ -224,7 +215,7 @@ static NTSTATUS S6ScanSend (PWCN_DEVICE Dev)
     B[10]=Scan->Target.Active?20u:0u; /* second probe after 20ms, capped by n_probes */
     B[13] = 20000; B[14] = 5; B[15] = Scan->Target.Active?(0x10000u|4u|8u|(Scan->Target.SsidLength?0u:2u)):S6_PASSIVE_FLAGS;
     if(Scan->Target.DwellTime)B[6]=B[7]=Scan->Target.DwellTime;B[15]|=Scan->Target.Flags;B[20]=Scan->Target.IeLength;
-    B[17] = Count; B[18] = 1;B[19]=Scan->Target.Active&&Scan->Target.SsidLength?1u:0u;B[21]=Scan->Target.Active?2u:0u;
+    B[17] = Count; B[18] = 1;B[19]=Scan->Target.Active?1u:0u;B[21]=Scan->Target.Active?2u:0u;
     B[36] = Scan->Target.Active?50u:0u;B[37] = 70; B[38] = 70; /* active/passive6g fields unused, no6g channels */
     Offset = 40;
     B[Offset++] = Jtlv (S6_WMI_TAG_ARRAY_UINT32, Count * 4);
@@ -257,12 +248,12 @@ static VOID S6ScanEvent (PWCN_DEVICE Dev, const UCHAR *Data, ULONG Length)
 
     if (Type & 1) { S->ScanStarted = TRUE;  }
     if (Type & 8) S->ForeignChannels++;
-    if (Type & 0x40) { S6Fail (Dev, "scan START_FAILED"); return; }
+    if (Type & 0x40) { S6Fail(Dev); return; }
     if (Type & 2) {
         S->ScanCompleted = TRUE; S->ScanReason = Reason; S->CompletedAt = WcnNowMs ();
         if(S->RuntimeScan&&S->AbortSent&&Reason==1){S->RuntimeScan=FALSE;S->State=7;
             return;}
-        if (!S->ScanStarted || Reason) { S6Fail (Dev, "scan completion without start or nonzero reason"); return; }
+        if (!S->ScanStarted || Reason) { S6Fail(Dev); return; }
         S->State = 6;
     }
 }
@@ -326,7 +317,6 @@ if (!Jtlvs (Payload, Length)) { return; }
         if (!Fixed || Size < 16 || !Dev->Ce.HwModeSent || Jle32 (Fixed) != 0) return;
         Dev->Ce.HwModeStatus = Jle32 (Fixed + 4); Dev->Ce.HwModeIndex = Jle32 (Fixed + 8);
         Dev->Ce.HwModeValidated = TRUE;
-
     } else if (Event == S6_WMI_REG_CHAN_LIST_CC_EVENTID || Event == S6_WMI_REG_CHAN_LIST_CC_EXT_EVENTID) {
         S6Regulatory (Dev, Payload, Length, Event == S6_WMI_REG_CHAN_LIST_CC_EXT_EVENTID);
     } else if (Event == S6_WMI_SCAN_EVENTID) S6ScanEvent (Dev, Payload, Length);
@@ -338,47 +328,46 @@ if (!Jtlvs (Payload, Length)) { return; }
 VOID WcnStage6Service (PWCN_DEVICE Dev)
 {
     PWCN_SCAN S = &Dev->Scan; LONGLONG Now = WcnNowMs (); NTSTATUS Status;
-    if (!Dev->Ce.WmiReady || Dev->Mhi.SysErr || Dev->Mhi.RddmSaved) return;
+    if (!Dev->Ce.WmiReady || Dev->Mhi.SysErr || Dev->Mhi.RddmFailed) return;
     if (S->Failed) {
         if (S->ScanSent && !S->ScanCompleted && !S->AbortSent && S->AbortAttempts++ < 20) {
-            Status = S6AbortSend (Dev); if (NT_SUCCESS (Status)) { S->AbortSent = TRUE; WcnLog (Dev, "stage6: scan abort sent after failure"); }
+            Status = S6AbortSend (Dev); if (NT_SUCCESS (Status)) { S->AbortSent = TRUE;  }
         }
         return;
     }
     if ((S->Passed && !S->RuntimeScan) || S->State == 7) return;
     if (!S->StartedAt) {
         S->StartedAt = Now; S->StateAt = Now;
-
     }
-    if (Now - S->StartedAt > 45000) { S6Fail (Dev, "overall 45s deadline"); return; }
+    if (Now - S->StartedAt > 45000) { S6Fail(Dev); return; }
     switch (S->State) {
     case 0:
         if (!Dev->Ce.HttVersionReceived || !Dev->Ce.HwModeValidated) {
-            if (Now - S->StateAt > 5000) S6Fail (Dev, "HTT/DBS response deadline");
+            if (Now - S->StateAt > 5000) S6Fail(Dev);
             return;
         }
         if (Dev->Ce.HttMajor != 3 || Dev->Ce.HwModeStatus || Dev->Ce.HwModeIndex != 1) {
-            S6Fail (Dev, "HTT or DBS prerequisite rejected"); return;
+            S6Fail(Dev); return;
         }
         Status = S6CountrySend (Dev);
         if (Status == STATUS_DEVICE_BUSY) return;
-        if (!NT_SUCCESS (Status)) { S6Fail (Dev, "country command transport error"); return; }
+        if (!NT_SUCCESS (Status)) { S6Fail(Dev); return; }
         S->CountrySent = TRUE; S->State = 1; S->StateAt = Now;
 
         break;
     case 1:
         if (!S->CountryReady) {
-            if (Now - S->StateAt > 8000) S6Fail (Dev, "country confirmation deadline; not using rejected/default US rules");
+            if (Now - S->StateAt > 8000) S6Fail(Dev);
             return;
         }
         S6ChannelsBuild (Dev);
-        if (!S->ChannelCount) { S6Fail (Dev, "no permitted world/firmware channels"); return; }
+        if (!S->ChannelCount) { S6Fail(Dev); return; }
         S->State = 2; S->StateAt = Now;
         break;
     case 2:
         Status = S6ChannelListSend (Dev);
         if (Status == STATUS_DEVICE_BUSY) return;
-        if (!NT_SUCCESS (Status)) { S6Fail (Dev, "channel-list transport error"); return; }
+        if (!NT_SUCCESS (Status)) { S6Fail(Dev); return; }
         S->ChannelListSent = TRUE; S->State = 3; S->StateAt = Now;
 
         break;
@@ -386,19 +375,19 @@ VOID WcnStage6Service (PWCN_DEVICE Dev)
         if (Now - S->StateAt < 200) return;
         Status = WcnDpHttRxPrepare (Dev);
         if (Status == STATUS_DEVICE_BUSY || Status == STATUS_PENDING) return;
-        if (!NT_SUCCESS (Status)) { S6Fail (Dev, "HTT RX resource setup transport error"); return; }
+        if (!NT_SUCCESS (Status)) { S6Fail(Dev); return; }
         if (!S->TxMaskSent || !S->RxMaskSent) {
             BOOLEAN Rx = S->TxMaskSent;
             Status = S6PdevMaskSend (Dev, Rx);
             if (Status == STATUS_DEVICE_BUSY) return;
-            if (!NT_SUCCESS (Status)) { S6Fail (Dev, "pdev antenna-chain transport error"); return; }
+            if (!NT_SUCCESS (Status)) { S6Fail(Dev); return; }
             if (Rx) S->RxMaskSent = TRUE; else S->TxMaskSent = TRUE;
 
             return;
         }
         Status = S6VdevSend (Dev);
         if (Status == STATUS_DEVICE_BUSY) return;
-        if (!NT_SUCCESS (Status)) { S6Fail (Dev, "STA vdev-create transport error"); return; }
+        if (!NT_SUCCESS (Status)) { S6Fail(Dev); return; }
         Dev->Join.Created=TRUE;S->VdevSubmitted = TRUE; S->State = 4; S->StateAt = Now;
 
         break;
@@ -407,25 +396,25 @@ VOID WcnStage6Service (PWCN_DEVICE Dev)
         if (!S->NssSent) {
             Status = S6NssSend (Dev);
             if (Status == STATUS_DEVICE_BUSY) return;
-            if (!NT_SUCCESS (Status)) { S6Fail (Dev, "STA NSS transport error"); return; }
+            if (!NT_SUCCESS (Status)) { S6Fail(Dev); return; }
             S->NssSent = TRUE;
 
             return;
         }
         Status = S6ScanSend (Dev);
         if (Status == STATUS_DEVICE_BUSY) return;
-        if (!NT_SUCCESS (Status)) { S6Fail (Dev, "scan-start transport error"); return; }
+        if (!NT_SUCCESS (Status)) { S6Fail(Dev); return; }
         S->ScanSent = TRUE; S->ScanAt = Now; S->State = 5; S->StateAt = Now;
 
         break;
     case 5:
-        if (!S->ScanStarted && Now - S->ScanAt > 5000) S6Fail (Dev, "scan STARTED event deadline");
-        else if (Now - S->ScanAt > 25000) S6Fail (Dev, "scan completion deadline");
+        if (!S->ScanStarted && Now - S->ScanAt > 5000) S6Fail(Dev);
+        else if (Now - S->ScanAt > 25000) S6Fail(Dev);
         break;
     case 6:
         if (Now - S->CompletedAt < 300) return; /* drain final CE management events */
         if(S->RuntimeScan){
-            if(!S->CountryReady||!S->VdevSubmitted||!S->ScanStarted||!S->ScanCompleted||S->ScanReason||!S->ForeignChannels){S6Fail(Dev,"runtime scan evidence inconsistent");return;}
+            if(!S->CountryReady||!S->VdevSubmitted||!S->ScanStarted||!S->ScanCompleted||S->ScanReason||!S->ForeignChannels){S6Fail(Dev);return;}
             S->RuntimeScan=FALSE;S->State=7;return;
         }
         if (S->CountryReady && S->ChannelListSent && Dev->Dp.HttRxReady && S->TxMaskSent && S->RxMaskSent &&
@@ -436,7 +425,7 @@ VOID WcnStage6Service (PWCN_DEVICE Dev)
         S->State = 7;
         break;
     default:
-        S6Fail (Dev, "invalid state");
+        S6Fail(Dev);
         break;
     }
 }
@@ -446,15 +435,15 @@ VOID WcnStage6Service (PWCN_DEVICE Dev)
 NTSTATUS WcnStage6Rescan(PWCN_DEVICE Dev,ULONG Vdev,const ULONG *Frequency,ULONG Count,const WCN_SCAN_TARGET *Target)
 {
     PWCN_SCAN S=&Dev->Scan;
-    if(!Dev->Ce.WmiReady||Dev->Mhi.SysErr||Dev->Mhi.RddmSaved||S->Failed||
+    if(!Dev->Ce.WmiReady||Dev->Mhi.SysErr||Dev->Mhi.RddmFailed||S->Failed||
        !S->Passed||!S->CountryReady||!S->ChannelListSent||!S->VdevSubmitted||!S->NssSent)return STATUS_DEVICE_NOT_READY;
     if(S->RuntimeScan||S->State!=7)return STATUS_DEVICE_BUSY;
     /* Do not take the radio off-channel in the middle of auth/association or
      * the Windows four-way handshake. Pending OS scans are bounded/deferred. */
     if((Dev->Join.Started&&!Dev->Join.Authorized)||(Dev->Secondary.Started&&!Dev->Secondary.Authorized)||(Dev->P2pClient&&Dev->P2pJoin.Started&&!Dev->P2pJoin.Authorized))return STATUS_DEVICE_BUSY;
-    if(Count>WCN_SCAN_MAX_CHANNELS||(Count&&!Frequency)||!Target||Target->SsidLength>32||(Vdev!=0&&Vdev!=2&&Vdev!=3&&!(Vdev==1&&Dev->P2pClient))||(Vdev!=0&&!Count)||(Target->Active&&!Count))return STATUS_INVALID_PARAMETER;
+    if(Count>WCN_SCAN_MAX_CHANNELS||(Count&&!Frequency)||!Target||Target->Active>2||Target->SsidLength>32||(Vdev!=0&&Vdev!=2&&Vdev!=3&&!(Vdev==1&&Dev->P2pClient))||(Vdev!=0&&!Count)||(Target->Active&&!Count))return STATUS_INVALID_PARAMETER;
     if(Target->IeLength>sizeof(Target->Ies)||(Target->Flags&~0x2100u)||Target->DwellTime>500||(Vdev!=3&&(Target->Flags||Target->DwellTime)))return STATUS_INVALID_PARAMETER;
-    for(ULONG I=0;I<Count;I++){ULONG K;for(K=0;K<S->ChannelCount;K++)if(S->Channel[K].Frequency==Frequency[I])break;if(K==S->ChannelCount||(Target->Active&&!WcnProbeAllowed(Frequency[I],S->Channel[K].Flags)))return STATUS_INVALID_PARAMETER;}
+    for(ULONG I=0;I<Count;I++){ULONG K;for(K=0;K<S->ChannelCount;K++)if(S->Channel[K].Frequency==Frequency[I])break;if(K==S->ChannelCount||(Target->Active==1&&!WcnProbeAllowed(Frequency[I],S->Channel[K].Flags)))return STATUS_INVALID_PARAMETER;}
     if(Vdev!=3){NTSTATUS St=WcnP2pPauseListen(Dev);if(!NT_SUCCESS(St))return St;}
     S->Target=*Target;S->ScanVdev=Vdev;S->RequestedCount=Count;if(Count)RtlCopyMemory(S->RequestedFrequency,Frequency,Count*sizeof(ULONG));
     S->ScanId=S6_SCAN_ID|((S->ScanId+1)&0xfff);

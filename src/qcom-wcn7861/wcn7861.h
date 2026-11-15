@@ -262,7 +262,7 @@ typedef struct _WCN_MHI {
     WCN_BHIE_TABLE  Amss;
     WCN_BHIE_TABLE  Rddm;
     BOOLEAN         Ready;
-    BOOLEAN         RddmSaved;
+    BOOLEAN         RddmFailed;
     BOOLEAN         WakeAsserted;
     BOOLEAN         MissionMode;
     BOOLEAN         SysErr;
@@ -412,7 +412,7 @@ typedef struct _WCN_SCAN_AP {
     ULONG Frequency;
 } WCN_SCAN_AP, *PWCN_SCAN_AP;
 typedef struct _WCN_SCAN_TARGET {
-    UCHAR Ssid[32],SsidLength,Bssid[6];BOOLEAN Active;
+    UCHAR Ssid[32],SsidLength,Bssid[6],Active; /* 0 passive, 1 active-only, 2 auto: firmware enforces per-channel strict-passive. */
     ULONG IeLength,DwellTime,Flags;UCHAR Ies[768];
 } WCN_SCAN_TARGET;
 typedef struct _WCN_SCAN {
@@ -457,7 +457,7 @@ typedef struct _WCN_CIPHER_KEY {UCHAR Key[16],Previous[16];ULONG64 Floor;BOOLEAN
 typedef struct _WCN_KEY_UPDATE {UCHAR Slot,Key[16],Rsc[6],Tid;BOOLEAN Delete,Sent,Ack,ReoSent,ResetPn;LONGLONG At;} WCN_KEY_UPDATE;
 typedef struct _WCN_RUNTIME {
     BOOLEAN Ready,ReoPending,ReoDone;USHORT ReoCmd,ReoTid,ReoTag;
-    ULONG TxCompleted,TxAcked,RuntimeErrors,RxDropped,ReoStatus,ReoOwner;ULONG64 ReoBase;
+    ULONG RuntimeErrors,ReoStatus,ReoOwner;ULONG64 ReoBase;
     ULONG RxPending[4096],RxPendingHead,RxPendingTail;UCHAR RxPosted[4096],TxUsed[WCN_TX_SLOTS];WCN_DMA TxDma;
 } WCN_RUNTIME,*PWCN_RUNTIME;
 typedef struct _WCN_JOIN {
@@ -471,7 +471,7 @@ typedef struct _WCN_JOIN {
     ULONG State, Attempts, Aid, Sequence, MgmtId, MgmtStatus, MacId,NssLimit;
     ULONG RxFrames,TxFrames;
     ULONG TxMcs,RxMcs;LONGLONG PeerSeenAt;
-    ULONG BadEvents,PeerId,AstIndex,AstHash,ReoSetupTid;
+    ULONG PeerId,AstIndex,AstHash,ReoSetupTid;
     BOOLEAN PeerMapped, RoutingSet;
     WCN_BA Ba[16];
     BOOLEAN WmmSet,BeamformSet,AggregationSet,KeyHold;
@@ -550,7 +550,7 @@ VOID WcnTdlsWmi(PWCN_DEVICE D,ULONG Event,const UCHAR *P,ULONG N);
 VOID WcnTdlsHtt(PWCN_DEVICE D,const UCHAR *P,ULONG N);
 NTSTATUS WcnCmac(PVOID Algorithm,const UCHAR Key[16],const UCHAR *Data,ULONG Length,UCHAR Mac[16]);
 VOID WcnStage7PeerReceive(PWCN_DEVICE D,PWCN_JOIN J,ULONG Event,const UCHAR *P,ULONG N);
-VOID WcnStage7PeerHtt(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *P,ULONG N);
+VOID WcnStage7PeerHtt(PWCN_JOIN J,const UCHAR *P,ULONG N);
 NTSTATUS WcnStage7PeerQueues(PWCN_DEVICE D,PWCN_JOIN J);
 NTSTATUS WcnStage7PublicAction(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR Peer[6],const UCHAR *Body,ULONG N);
 ULONG WcnStage7RxReplay(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *Buffer,const ULONG *Desc,BOOLEAN Error,ULONG Fc,const UCHAR *F);
@@ -562,7 +562,7 @@ NTSTATUS WcnPeerParam(PWCN_DEVICE D,ULONG Vdev,const UCHAR Peer[6],ULONG Param,U
 NTSTATUS WcnStationPower(PWCN_DEVICE D,PWCN_JOIN J,BOOLEAN Enable);
 NTSTATUS WcnStage8DeleteKey(PWCN_DEVICE D,PWCN_JOIN J,BOOLEAN Group,UCHAR Index);
 NTSTATUS WcnStationKeysService(PWCN_DEVICE D,PWCN_JOIN J);
-VOID WcnStationKeyComplete(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *P,ULONG N);
+VOID WcnStationKeyComplete(PWCN_JOIN J,const UCHAR *P,ULONG N);
 VOID WcnStationKeysClear(PWCN_JOIN J);
 NTSTATUS WcnReoKeyUpdate(PWCN_DEVICE D,PWCN_JOIN J,ULONG Tid,BOOLEAN Enable);
 BOOLEAN WcnStage7RxIdle(PWCN_DEVICE D);
@@ -581,7 +581,6 @@ VOID WcnStage8RoamEvent(PWCN_DEVICE D,ULONG Event,const UCHAR *P,ULONG N);
 VOID WcnStage8ActionReceive(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *Body,ULONG Length);
 
 /* driver.c */
-VOID WcnLog (_In_ PWCN_DEVICE Dev, _In_z_ _Printf_format_string_ PCSTR Format, ...);
 VOID WcnSleep (_In_ ULONG Milliseconds);
 BOOLEAN WcnWait (_In_ PWCN_DEVICE Dev, _In_ ULONG Milliseconds);
 NTSTATUS WcnReadFile (_In_ PCWSTR Path, _Outptr_ PUCHAR *Data, _Out_ SIZE_T *Size);
@@ -646,7 +645,7 @@ NTSTATUS WcnStage6CancelRescan(PWCN_DEVICE Dev);
 VOID WcnStage7Cleanup(PWCN_DEVICE Dev);
 VOID WcnStage7Service(PWCN_DEVICE Dev);
 VOID WcnStage7Receive(PWCN_DEVICE Dev, ULONG Event, const UCHAR *Payload, ULONG Length);
-VOID WcnStage7Fail(PWCN_DEVICE Dev,PWCN_JOIN J, PCSTR Reason);
+VOID WcnStage7Fail(PWCN_JOIN J);
 NTSTATUS WcnStage7TeardownCommand(PWCN_DEVICE Dev,PWCN_JOIN J,ULONG Step);
 NTSTATUS WcnStage7DpInit(PWCN_DEVICE Dev,PWCN_JOIN J);
 VOID WcnStage7DpPoll(PWCN_DEVICE Dev);
@@ -703,5 +702,5 @@ NTSTATUS WcnPmfTxUnicast(UCHAR *Frame,ULONG *Length,ULONG Capacity,ULONG64 *Pn);
 NTSTATUS WcnPmfTxGroup(PVOID Algorithm,WCN_IGTK Keys[2],UCHAR Index,UCHAR *Frame,ULONG *Length,ULONG Capacity);
 NTSTATUS WcnStage7AuthSend(PWCN_DEVICE Dev,PWCN_JOIN J,const UCHAR *Body,ULONG Length);
 
-VOID WcnStage7FailAll(PWCN_DEVICE Dev,PCSTR Reason);
+VOID WcnStage7FailAll(PWCN_DEVICE Dev);
 NTSTATUS WcnStage7EnsureVdev(PWCN_DEVICE D,PWCN_JOIN J);

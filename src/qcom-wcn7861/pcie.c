@@ -179,7 +179,6 @@ WcnPcieSetup (
     Express = WcnCfgFindCapability (Dev, 0x10);
     if (Express != 0) {
         WcnCfgWrite (Dev, Express + 0x10, WcnCfgRead (Dev, Express + 0x10) & ~0x3UL);
-
     }
 
     Msi = WcnCfgFindCapability (Dev, 0x05);
@@ -357,7 +356,6 @@ WcnPcieConfigSid (
         }
         Value = (Map[Index][0] << 16) | ((Map[Index][1] - WCN_SID_BASE) << 8);
         WRITE_REGISTER_ULONG ((volatile ULONG *)(Dev->Parf + PARF_BDF_TO_SID_TABLE + 4 * Hash), Value);
-
     }
 
     Value = READ_REGISTER_ULONG ((volatile ULONG *)(Dev->Parf + PARF_BDF_TO_SID_CFG));
@@ -419,7 +417,6 @@ WcnSmmuSetup (VOID)
         Smr = READ_REGISTER_ULONG (&Smmu[SMMU_SMR (Slot) / 4]);
         if (WcnSmrOverlaps (Smr, SMMU_UFS_SID, 0) && UfsS2cr == MAXULONG) {
             UfsS2cr = READ_REGISTER_ULONG (&Smmu[SMMU_S2CR (Slot) / 4]);
-
         }
         if (WcnSmrOverlaps (Smr, Id, Mask)) {
 

@@ -44,8 +44,8 @@ static void PfinishTx(P2P *P,NTSTATUS St)
  if(Ns!=NDIS_STATUS_SUCCESS)St=STATUS_INSUFFICIENT_RESOURCES;
  S8Indicate(Primary(P),&P->TxHeader,P->TxResponse?WDI_INDICATION_P2P_SEND_RESPONSE_ACTION_FRAME_COMPLETE:WDI_INDICATION_P2P_SEND_REQUEST_ACTION_FRAME_COMPLETE,St,Out,N);if(Out)FreeGenerated(Out);P->TxTask=P->TxPending=FALSE;
 }
-static void Pfail(P2P *P,PCSTR Why)
-{if(P->Failed)return;if(P->ModePending){P->ModeQuarantined=TRUE;WcnHotspotFail(P->D,"P2P role ownership unconfirmed");}P->Failed=TRUE;P->Listen=FALSE;WcnLog(P->D,"p2p: %s; DMA/scan ownership retained until completion or physical quiesce",Why);PfinishTx(P,STATUS_DEVICE_HARDWARE_ERROR);PfinishDiscover(P,STATUS_DEVICE_HARDWARE_ERROR);if(P->ModePending){S8Indicate(Primary(P),&P->ModeHeader,WDI_INDICATION_CHANGE_OPERATION_MODE_COMPLETE,STATUS_DEVICE_HARDWARE_ERROR);P->ModePending=FALSE;}if(P->ResetPending){S8Indicate(Primary(P),&P->ResetHeader,WDI_INDICATION_DOT11_RESET_COMPLETE,STATUS_DEVICE_HARDWARE_ERROR);P->ResetPending=FALSE;}}
+static void Pfail(P2P *P)
+{if(P->Failed)return;if(P->ModePending){P->ModeQuarantined=TRUE;WcnHotspotFail(P->D);}P->Failed=TRUE;P->Listen=FALSE;PfinishTx(P,STATUS_DEVICE_HARDWARE_ERROR);PfinishDiscover(P,STATUS_DEVICE_HARDWARE_ERROR);if(P->ModePending){S8Indicate(Primary(P),&P->ModeHeader,WDI_INDICATION_CHANGE_OPERATION_MODE_COMPLETE,STATUS_DEVICE_HARDWARE_ERROR);P->ModePending=FALSE;}if(P->ResetPending){S8Indicate(Primary(P),&P->ResetHeader,WDI_INDICATION_DOT11_RESET_COMPLETE,STATUS_DEVICE_HARDWARE_ERROR);P->ResetPending=FALSE;}}
 extern "C" NTSTATUS WcnP2pCreate(PWCN_DEVICE D)
 {auto P=(P2P*)ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(P2P),WCN_TAG);if(!P)return STATUS_INSUFFICIENT_RESOURCES;P->D=D;P->DeviceCap=4;P->ListenPeriod=150;P->ListenInterval=500;D->P2p=P;return STATUS_SUCCESS;}
 extern "C" VOID WcnP2pDmaCleanup(PWCN_DEVICE D)
@@ -248,7 +248,7 @@ bool P2pCommand(S8 *S,WIFIREQUEST R,const WDI_MESSAGE_HEADER &H,UINT16 Id,const 
  case WDI_TASK_P2P_SEND_REQUEST_ACTION_FRAME:St=Device?Paction(P,H,B,N,false):STATUS_NOT_SUPPORTED;break;
  case WDI_TASK_P2P_SEND_RESPONSE_ACTION_FRAME:St=Device?Paction(P,H,B,N,true):STATUS_NOT_SUPPORTED;break;
  case WDI_TASK_DOT11_RESET:if(!Device)return false;if(P->ModePending){St=STATUS_DEVICE_BUSY;break;}
-  if(P->Failed&&!P->TxBusy&&!P->OwnScan&&!P->LoActive&&!P->ModeQuarantined&&!D->Mhi.SysErr&&!D->Mhi.RddmSaved&&!D->Ce.SourceFailed&&!D->Dp.Failed){P->Failed=FALSE;P->PeerCount=0;}if(P->Failed){St=STATUS_DEVICE_HARDWARE_ERROR;break;}
+  if(P->Failed&&!P->TxBusy&&!P->OwnScan&&!P->LoActive&&!P->ModeQuarantined&&!D->Mhi.SysErr&&!D->Mhi.RddmFailed&&!D->Ce.SourceFailed&&!D->Dp.Failed){P->Failed=FALSE;P->PeerCount=0;}if(P->Failed){St=STATUS_DEVICE_HARDWARE_ERROR;break;}
   P->Listen=FALSE;P->Cancel=P->OwnScan;P->CancelAt=WcnNowMs();PfinishTx(P,STATUS_CANCELLED);PfinishDiscover(P,STATUS_CANCELLED);P->ResetPending=TRUE;P->ResetHeader=H;P->ResetAt=WcnNowMs();St=STATUS_SUCCESS;break;
  default:return false;
  }
@@ -257,26 +257,26 @@ bool P2pCommand(S8 *S,WIFIREQUEST R,const WDI_MESSAGE_HEADER &H,UINT16 Id,const 
 extern "C" VOID WcnP2pService(PWCN_DEVICE D)
 {
  auto P=Ps(D);if(!P||P->Failed)return;LONGLONG Now=WcnNowMs();NTSTATUS St;
- if(D->Mhi.SysErr||D->Mhi.RddmSaved||D->Ce.SourceFailed||D->Dp.Failed){Pfail(P,"physical device failed");return;}
+ if(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Ce.SourceFailed||D->Dp.Failed){Pfail(P);return;}
  if(!Primary(P)->Radio){P->Listen=FALSE;PfinishDiscover(P,STATUS_DEVICE_NOT_READY);PfinishTx(P,STATUS_DEVICE_NOT_READY);if(P->OwnScan&&!P->Cancel){P->Cancel=TRUE;P->CancelAt=Now;}}
- if(P->ResetPending&&Now-P->ResetAt>5000){Pfail(P,"device reset ownership timeout");return;}
- if(P->LoActive){if((P->LoStopping||P->LoStopAt)&&Now-P->LoStopAt>5000){Pfail(P,"listen-stop confirmation timeout");return;}if(!P->Listen||P->Discover||P->TxPending||P->ModePending||P->LoRefresh||P->ResetPending){St=PstopLo(P);if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St)){Pfail(P,"listen-stop transport");}return;}}
- if(P->ModePending){auto S=(S8*)D->RoleStage8;if(!S){Pfail(P,"role adapter unavailable");return;}St=HotspotReleaseRole(D);
+ if(P->ResetPending&&Now-P->ResetAt>5000){Pfail(P);return;}
+ if(P->LoActive){if((P->LoStopping||P->LoStopAt)&&Now-P->LoStopAt>5000){Pfail(P);return;}if(!P->Listen||P->Discover||P->TxPending||P->ModePending||P->LoRefresh||P->ResetPending){St=PstopLo(P);if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St)){Pfail(P);}return;}}
+ if(P->ModePending){auto S=(S8*)D->RoleStage8;if(!S){Pfail(P);return;}St=HotspotReleaseRole(D);
   if(St==STATUS_SUCCESS){if(!P->ModeCancel){bool Client=P->Mode==WDI_OPERATION_MODE_P2P_CLIENT;BOOLEAN Pmf=S->PmfAvailable;
     if(Client){D->P2pJoin.Vdev=1;RtlCopyMemory(D->P2pJoin.Mac,S->Mac,6);Pmf=NT_SUCCESS(WcnPmfInit(D,&D->P2pJoin));}S8ClearStaging(S);KIRQL Irql;KeAcquireSpinLock(&S->Lock,&Irql);D->P2pClient=Client;S->HotspotRole=!Client;S->J=Client?&D->P2pJoin:&D->Join;S->Stopped=S->Fatal=S->FailureReported=FALSE;S->Radio=Primary(P)->Radio;S->PmfAvailable=Pmf;KeReleaseSpinLock(&S->Lock,Irql);
     P->RoleFrequency=P->NegotiatedFrequency;P->NegotiatedFrequency=0;}
    S8Indicate(S,&P->ModeHeader,WDI_INDICATION_CHANGE_OPERATION_MODE_COMPLETE,P->ModeCancel?STATUS_CANCELLED:STATUS_SUCCESS);P->ModePending=FALSE;
   }else if(St!=STATUS_PENDING&&St!=STATUS_DEVICE_BUSY){S8Indicate(S,&P->ModeHeader,WDI_INDICATION_CHANGE_OPERATION_MODE_COMPLETE,St);P->ModePending=FALSE;}
-  else if(Now-P->ModeAt>15000){Pfail(P,"role delete/unmap confirmation timeout");return;}
+  else if(Now-P->ModeAt>15000){Pfail(P);return;}
  }
- if(P->TxBusy&&Now-P->TxAt>5000){Pfail(P,"management DMA completion timeout");return;}
+ if(P->TxBusy&&Now-P->TxAt>5000){Pfail(P);return;}
  if(P->TxTask&&Now>P->TxDeadline)PfinishTx(P,STATUS_IO_TIMEOUT);
  if(!P->TxTask&&P->TxPending&&Now>P->TxDeadline)P->TxPending=FALSE;
  if(P->OwnScan){
-  if(P->Cancel&&Now-P->CancelAt>5000){Pfail(P,"scan cancel confirmation timeout");return;}
-  if(D->Scan.ScanId!=P->ScanId||D->Scan.ScanVdev!=3){Pfail(P,"scan ownership changed");return;}
-  if(D->Scan.Failed||Now-P->ScanAt>28000){Pfail(P,"scan completion timeout");return;}
-  if(P->Cancel||(P->TxTask&&!P->ScanForTx)){St=WcnStage6CancelRescan(D);if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St)){Pfail(P,"scan cancellation transport");return;}}
+  if(P->Cancel&&Now-P->CancelAt>5000){Pfail(P);return;}
+  if(D->Scan.ScanId!=P->ScanId||D->Scan.ScanVdev!=3){Pfail(P);return;}
+  if(D->Scan.Failed||Now-P->ScanAt>28000){Pfail(P);return;}
+  if(P->Cancel||(P->TxTask&&!P->ScanForTx)){St=WcnStage6CancelRescan(D);if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St)){Pfail(P);return;}}
   if(D->Scan.ScanCompleted&&!D->Scan.RuntimeScan&&D->Scan.State==7){P->OwnScan=P->OnChannel=FALSE;
    if(P->Cancel){P->Cancel=FALSE;PfinishDiscover(P,STATUS_CANCELLED);}
    else if(P->Discover){if(D->Scan.ScanReason)PfinishDiscover(P,STATUS_DEVICE_NOT_READY);else if(P->Find&&!P->FindListen)P->FindListen=TRUE;else{P->FindListen=FALSE;if(P->Repeat&&--P->Repeat==0)PfinishDiscover(P,STATUS_SUCCESS);}}
@@ -289,11 +289,11 @@ extern "C" VOID WcnP2pService(PWCN_DEVICE D)
   St=Psubmit(P);if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St))PfinishTx(P,St);return;
  }
  if(P->OwnScan||P->TxBusy||P->ModePending||Now<P->NextAt||(!P->Discover&&!P->Listen))return;
- St=Pensure(P);if(St==STATUS_DEVICE_BUSY)return;if(!NT_SUCCESS(St)){Pfail(P,"P2P device creation failed");return;}
- if(P->Listen&&!P->Discover&&WcnService(D,106)&&!P->LoDisabled){auto A=(S8*)D->Stage8;auto B=(S8*)D->SecondaryStage8;auto C=D->P2pClient?(S8*)D->RoleStage8:nullptr;if(D->Scan.RuntimeScan||(A&&A->ScanPending)||(B&&B->ScanPending)||(C&&C->ScanPending))return;if(P->LoActive)return;St=PstartLo(P);if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St))Pfail(P,"listen offload transport");return;}
+ St=Pensure(P);if(St==STATUS_DEVICE_BUSY)return;if(!NT_SUCCESS(St)){Pfail(P);return;}
+ if(P->Listen&&!P->Discover&&WcnService(D,106)&&!P->LoDisabled){auto A=(S8*)D->Stage8;auto B=(S8*)D->SecondaryStage8;auto C=D->P2pClient?(S8*)D->RoleStage8:nullptr;if(D->Scan.RuntimeScan||(A&&A->ScanPending)||(B&&B->ScanPending)||(C&&C->ScanPending))return;if(P->LoActive)return;St=PstartLo(P);if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St))Pfail(P);return;}
  if(P->Discover&&!P->FindListen)St=Pscan(P,P->DiscoveryFrequency,P->DiscoveryCount,!P->Passive,50);
  else if(Plegal(P,P->ListenFrequency))St=Pscan(P,&P->ListenFrequency,1,false,P->ListenPeriod);else{P->Listen=FALSE;return;}
- if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St)){if(P->Discover)PfinishDiscover(P,St);else Pfail(P,"listen window setup failed");}
+ if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St)){if(P->Discover)PfinishDiscover(P,St);else Pfail(P);}
 }
 
 static ULONG Presponse(P2P *P,const UCHAR Peer[6],ULONG Frequency,UCHAR *Out,ULONG Capacity)

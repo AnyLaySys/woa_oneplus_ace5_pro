@@ -3,12 +3,13 @@
 #define WCN_AUTH_EAP 6u
 #define WCN_AUTH_PSK 7u
 #define WCN_AUTH_SAE 9u
+#define WCN_AUTH_OWE 10u
 #define WCN_AUTH_EAP_SHA256 11u
 static __inline BOOLEAN WcnAuthSupported(ULONG A)
-{return A==WCN_AUTH_OPEN||A==WCN_AUTH_EAP||A==WCN_AUTH_PSK||A==WCN_AUTH_SAE||A==WCN_AUTH_EAP_SHA256;}
+{return A==WCN_AUTH_OPEN||A==WCN_AUTH_EAP||A==WCN_AUTH_PSK||A==WCN_AUTH_SAE||A==WCN_AUTH_OWE||A==WCN_AUTH_EAP_SHA256;}
 static __inline UCHAR WcnAkm(ULONG A)
-{return (UCHAR)(A==WCN_AUTH_SAE?8:A==WCN_AUTH_EAP_SHA256?5:A==WCN_AUTH_EAP?1:A==WCN_AUTH_PSK?2:0);}
-static __inline BOOLEAN WcnAuthNeedsPmf(ULONG A){return A==WCN_AUTH_SAE||A==WCN_AUTH_EAP_SHA256;}
+{return (UCHAR)(A==WCN_AUTH_OWE?18:A==WCN_AUTH_SAE?8:A==WCN_AUTH_EAP_SHA256?5:A==WCN_AUTH_EAP?1:A==WCN_AUTH_PSK?2:0);}
+static __inline BOOLEAN WcnAuthNeedsPmf(ULONG A){return A==WCN_AUTH_SAE||A==WCN_AUTH_OWE||A==WCN_AUTH_EAP_SHA256;}
 /* No WPA/TKIP/WEP fallback. The exact OS auth choice must appear in RSN.
  * Windows owns PSK/EAP/SAE derivation, certificate checks and four-way state. */
 static __inline BOOLEAN WcnRsnAcceptAkm(const UCHAR *P,ULONG N,ULONG Auth,UCHAR Wanted,BOOLEAN *Pmf)

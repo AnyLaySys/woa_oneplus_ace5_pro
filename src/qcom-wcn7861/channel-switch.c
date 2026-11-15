@@ -113,14 +113,14 @@ BOOLEAN WcnChannelEvent(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *P,ULONG N)
     if(Jle32(F+4)||Jle32(F+8)!=1)return TRUE;
     Nss=Jle32(F+28)<Jle32(F+32)?Jle32(F+28):Jle32(F+32);
     if(Jle32(F+12)||Nss<J->Ap.Nss||Jle32(F+24)>1||
-       ((J->Vdev==0?D->Secondary.Started:D->Join.Started)&&Jle32(F+24)!=J->MacId)){WcnStage7Fail(D,J,"CSA VDEV_RESTART rejected geometry or NSS");return TRUE;}
+       ((J->Vdev==0?D->Secondary.Started:D->Join.Started)&&Jle32(F+24)!=J->MacId)){WcnStage7Fail(J);return TRUE;}
     J->MacId=Jle32(F+24);J->CsaAck=TRUE;return TRUE;
 }
 BOOLEAN WcnChannelService(PWCN_DEVICE D,PWCN_JOIN J)
 {
     ULONG I;NTSTATUS St;LONGLONG Now=WcnNowMs();
     if(!J->CsaState)return FALSE;
-    if(Now>J->CsaDeadline){WcnStage7Fail(D,J,"CSA completion deadline");return TRUE;}
+    if(Now>J->CsaDeadline){WcnStage7Fail(J);return TRUE;}
     if(J->CsaState==1){
         if(Now<J->CsaAt)return FALSE;
         if(D->Scan.RuntimeScan)return TRUE;
@@ -141,5 +141,5 @@ BOOLEAN WcnChannelService(PWCN_DEVICE D,PWCN_JOIN J)
     }else{St=STATUS_INVALID_DEVICE_STATE;goto Fail;}
     if(St==STATUS_DEVICE_BUSY)return TRUE;
     if(!NT_SUCCESS(St))goto Fail;return TRUE;
-Fail:WcnStage7Fail(D,J,"CSA command transport or TWT teardown");return TRUE;
+Fail:WcnStage7Fail(J);return TRUE;
 }

@@ -7,12 +7,16 @@ DRIVER_ADD_DEVICE BatAddDevice;
 static NTSTATUS BatCreateClose (PDEVICE_OBJECT DeviceObject, PIRP Irp);
 static NTSTATUS BatDeviceControl (PDEVICE_OBJECT DeviceObject, PIRP Irp);
 static NTSTATUS BatPowerExchange (PDEVICE_OBJECT DeviceObject, PIRP Irp);
-static NTSTATUS BatSystemControl (PDEVICE_OBJECT DeviceObject, PIRP Irp);
 static NTSTATUS BatPnp (PDEVICE_OBJECT DeviceObject, PIRP Irp);
 static NTSTATUS BatPower (PDEVICE_OBJECT DeviceObject, PIRP Irp);
 static NTSTATUS BatUnsupported (PDEVICE_OBJECT DeviceObject, PIRP Irp);
+static NTSTATUS BatComplete (PIRP Irp, NTSTATUS Status);
 static IO_COMPLETION_ROUTINE BatStartComplete;
 static DRIVER_UNLOAD BatUnload;
+static DRIVER_DISPATCH BatSystemControl;
+static WMI_QUERY_REGINFO_CALLBACK BatWmiInfo;
+static WMI_QUERY_DATABLOCK_CALLBACK BatWmiData;
+static UNICODE_STRING DriverPath;
 
 VOID
 BatSnapshotGet (
@@ -41,7 +45,10 @@ DriverEntry (
 {
     ULONG Index;
 
-    UNREFERENCED_PARAMETER (RegistryPath);
+    DriverPath.MaximumLength=RegistryPath->Length+sizeof(WCHAR);
+    DriverPath.Buffer=ExAllocatePool2(POOL_FLAG_NON_PAGED,DriverPath.MaximumLength,'rtPB');
+    if(!DriverPath.Buffer)return STATUS_INSUFFICIENT_RESOURCES;
+    RtlCopyUnicodeString(&DriverPath,RegistryPath);
 
     for (Index = 0; Index <= IRP_MJ_MAXIMUM_FUNCTION; Index++) {
         DriverObject->MajorFunction[Index] = BatUnsupported;
@@ -63,6 +70,7 @@ static VOID
 BatUnload (PDRIVER_OBJECT DriverObject)
 {
     UNREFERENCED_PARAMETER (DriverObject);
+    ExFreePoolWithTag(DriverPath.Buffer,'rtPB');
 }
 
 NTSTATUS
@@ -86,13 +94,12 @@ BatAddDevice (
     Dev->Self = DeviceObject;
     Dev->Pdo = PhysicalDeviceObject;
     KeInitializeSpinLock (&Dev->Lock);
-    KeInitializeSpinLock (&Dev->PendingLock);
     KeInitializeEvent (&Dev->StopEvent, NotificationEvent, FALSE);
 
     Dev->Lower = IoAttachDeviceToDeviceStack (DeviceObject, PhysicalDeviceObject);
     if (Dev->Lower == NULL) {
 
-IoDeleteDevice (DeviceObject);
+        IoDeleteDevice (DeviceObject);
         return STATUS_DEVICE_REMOVED;
     }
 
@@ -104,9 +111,13 @@ IoDeleteDevice (DeviceObject);
         KeStallExecutionProcessor (20000);
         Status = BatHardwareInit (Dev);
     }
-    if (Dev->Now.Valid) {
-        Status = BatMiniportInit (Dev);
+    Status=BatMiniportInit(Dev);
+    if(!NT_SUCCESS(Status)){
+        BatHardwareStop(Dev);IoDetachDevice(Dev->Lower);IoDeleteDevice(DeviceObject);return Status;
     }
+    Dev->Wmi.QueryWmiRegInfo=BatWmiInfo;
+    Dev->Wmi.QueryWmiDataBlock=BatWmiData;
+    Dev->WmiRegistered=NT_SUCCESS(IoWMIRegistrationControl(DeviceObject,WMIREG_ACTION_REGISTER));
 
     return STATUS_SUCCESS;
 }
@@ -153,13 +164,13 @@ BatHardwareStart (
     InitializeObjectAttributes (&Attributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
     Status = PsCreateSystemThread (&Thread, THREAD_ALL_ACCESS, &Attributes, NULL, NULL, BatPollThread, Dev);
     if (!NT_SUCCESS (Status)) {
-        
+
         BatHardwareStop (Dev);
         return Status;
     }
 
     Dev->Thread = Thread;
-    
+
     return STATUS_SUCCESS;
 }
 
@@ -199,7 +210,7 @@ BatStartComplete (
 
     if (NT_SUCCESS (Irp->IoStatus.Status)) {
         (VOID)BatHardwareStart (Dev);
-        
+
     }
     if (Irp->PendingReturned) {
         IoMarkIrpPending (Irp);
@@ -215,10 +226,34 @@ BatCreateClose (
 {
     UNREFERENCED_PARAMETER (DeviceObject);
 
-    Irp->IoStatus.Status = STATUS_SUCCESS;
-    Irp->IoStatus.Information = 0;
-    IoCompleteRequest (Irp, IO_NO_INCREMENT);
-    return STATUS_SUCCESS;
+    return BatComplete (Irp, STATUS_SUCCESS);
+}
+
+static NTSTATUS
+BatWmiInfo(PDEVICE_OBJECT object,PULONG flags,PUNICODE_STRING instance,PUNICODE_STRING *path,
+    PUNICODE_STRING mof,PDEVICE_OBJECT *pdo)
+{
+    UNREFERENCED_PARAMETER(instance);UNREFERENCED_PARAMETER(mof);
+    PBAT_DEVICE dev=object->DeviceExtension;
+    *flags=WMIREG_FLAG_INSTANCE_PDO;*path=&DriverPath;*pdo=dev->Pdo;return STATUS_SUCCESS;
+}
+static NTSTATUS
+BatWmiData(PDEVICE_OBJECT object,PIRP irp,ULONG guid,ULONG index,ULONG count,PULONG lengths,ULONG size,PUCHAR buffer)
+{
+    PBAT_DEVICE dev=object->DeviceExtension;
+    if(index || count!=1)return WmiCompleteRequest(object,irp,STATUS_WMI_INSTANCE_NOT_FOUND,0,IO_NO_INCREMENT);
+    NTSTATUS status=BatteryClassQueryWmiDataBlock(dev->ClassData,object,irp,guid,lengths,size,buffer);
+    return status==STATUS_WMI_GUID_NOT_FOUND?WmiCompleteRequest(object,irp,status,0,IO_NO_INCREMENT):status;
+}
+static NTSTATUS
+BatSystemControl(PDEVICE_OBJECT object,PIRP irp)
+{
+    PBAT_DEVICE dev=object->DeviceExtension;
+    SYSCTL_IRP_DISPOSITION disposition=IrpForward;NTSTATUS status=STATUS_NOT_SUPPORTED;
+    if(dev->ClassData)status=BatteryClassSystemControl(dev->ClassData,&dev->Wmi,object,irp,&disposition);
+    if(disposition==IrpProcessed)return status;
+    if(disposition==IrpNotCompleted){IoCompleteRequest(irp,IO_NO_INCREMENT);return status;}
+    IoSkipCurrentIrpStackLocation(irp);return IoCallDriver(dev->Lower,irp);
 }
 
 static NTSTATUS
@@ -232,23 +267,15 @@ BatDeviceControl (
     ULONG Code = Stack->Parameters.DeviceIoControl.IoControlCode;
     NTSTATUS Status = STATUS_NOT_SUPPORTED;
 
-    if ((Code >> 16) == FILE_DEVICE_BATTERY) {
+    if (Stack->MajorFunction == IRP_MJ_DEVICE_CONTROL && (Code >> 16) == FILE_DEVICE_BATTERY) {
         if (Dev->ClassData != NULL) {
             Status = BatteryClassIoctl (Dev->ClassData, Irp);
         }
         if (Status != STATUS_NOT_SUPPORTED) {
-            
+
             return Status;
         }
-        if (BatPendingAdd (Dev, Irp)) {
-            
-            return STATUS_PENDING;
-        }
-        
-        Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
-        Irp->IoStatus.Information = 0;
-        IoCompleteRequest (Irp, IO_NO_INCREMENT);
-        return STATUS_INVALID_DEVICE_REQUEST;
+        return BatComplete (Irp, STATUS_INVALID_DEVICE_REQUEST);
     }
 
     IoSkipCurrentIrpStackLocation (Irp);
@@ -266,7 +293,7 @@ BatPowerExchange (PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (Stack->Parameters.DeviceIoControl.IoControlCode == QCB_POWER_EXCHANGE &&
         Irp->RequestorMode == KernelMode && Dev->Stopping == 0 &&
         Stack->Parameters.DeviceIoControl.InputBufferLength == sizeof (QCB_SOURCE) &&
-        Stack->Parameters.DeviceIoControl.OutputBufferLength >= sizeof (QCB_POWER)) {
+        Stack->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(QCB_POWER)) {
         QCB_SOURCE Source = *(QCB_SOURCE *)Irp->AssociatedIrp.SystemBuffer;
         QCB_POWER *Power = (QCB_POWER *)Irp->AssociatedIrp.SystemBuffer;
         ULONGLONG Now = KeQueryInterruptTime () / 10000;
@@ -290,30 +317,17 @@ BatPowerExchange (PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Power->VoltageMv = S.VoltageMv;
         Power->CurrentMa = S.CurrentMa;
         Power->RemainingMah = S.RemainingMah;
-        Power->FullMah = S.FullMah;
-        Power->DesignMah = S.DesignMah;
-        Power->CycleCount = S.CycleCount;
-        Power->Online = S.Online;
         if (Changed && Dev->ClassData != NULL) (VOID)BatteryClassStatusNotify (Dev->ClassData);
         Status = STATUS_SUCCESS;
         Bytes = sizeof (*Power);
+        Power->CellValid=S.CellValid;Power->Cell1Mv=S.Cell1Mv;Power->Cell2Mv=S.Cell2Mv;
+        Power->BatteryStatus=S.BatteryStatus;Power->ChargingVoltageMv=S.ChargingVoltageMv;
+        Power->ChargingCurrentMa=S.ChargingCurrentMa;
     }
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = Bytes;
     IoCompleteRequest (Irp, IO_NO_INCREMENT);
     return Status;
-}
-
-static NTSTATUS
-BatSystemControl (
-    _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ PIRP Irp
-    )
-{
-    PBAT_DEVICE Dev = (PBAT_DEVICE)DeviceObject->DeviceExtension;
-
-    IoSkipCurrentIrpStackLocation (Irp);
-    return IoCallDriver (Dev->Lower, Irp);
 }
 
 static NTSTATUS
@@ -324,60 +338,16 @@ BatUnsupported (
 {
     UNREFERENCED_PARAMETER (DeviceObject);
 
-    Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
+    return BatComplete (Irp, STATUS_INVALID_DEVICE_REQUEST);
+}
+
+static NTSTATUS
+BatComplete (PIRP Irp, NTSTATUS Status)
+{
+    Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = 0;
     IoCompleteRequest (Irp, IO_NO_INCREMENT);
-    return STATUS_INVALID_DEVICE_REQUEST;
-}
-
-BOOLEAN
-BatPendingAdd (
-    _In_ PBAT_DEVICE Dev,
-    _In_ PIRP Irp
-    )
-{
-    KIRQL OldIrql;
-    ULONG Index;
-    BOOLEAN Added = FALSE;
-
-    KeAcquireSpinLock (&Dev->PendingLock, &OldIrql);
-    for (Index = 0; Index < BAT_PENDING_MAX; Index++) {
-        if (Dev->Pending[Index] == NULL) {
-            Dev->Pending[Index] = Irp;
-            IoMarkIrpPending (Irp);
-            Added = TRUE;
-            break;
-        }
-    }
-    KeReleaseSpinLock (&Dev->PendingLock, OldIrql);
-    return Added;
-}
-
-VOID
-BatPendingDrain (
-    _In_ PBAT_DEVICE Dev,
-    _In_ NTSTATUS Status
-    )
-{
-    PIRP Taken[BAT_PENDING_MAX];
-    KIRQL OldIrql;
-    ULONG Index;
-    ULONG Count = 0;
-
-    KeAcquireSpinLock (&Dev->PendingLock, &OldIrql);
-    for (Index = 0; Index < BAT_PENDING_MAX; Index++) {
-        if (Dev->Pending[Index] != NULL) {
-            Taken[Count++] = Dev->Pending[Index];
-            Dev->Pending[Index] = NULL;
-        }
-    }
-    KeReleaseSpinLock (&Dev->PendingLock, OldIrql);
-
-    for (Index = 0; Index < Count; Index++) {
-        Taken[Index]->IoStatus.Status = Status;
-        Taken[Index]->IoStatus.Information = 0;
-        IoCompleteRequest (Taken[Index], IO_NO_INCREMENT);
-    }
+    return Status;
 }
 
 static NTSTATUS
@@ -407,7 +377,7 @@ BatPnp (
         Status = IoCallDriver (Dev->Lower, Irp);
         IoDetachDevice (Dev->Lower);
 
-IoDeleteDevice (DeviceObject);
+        IoDeleteDevice (DeviceObject);
         return Status;
 
     case IRP_MN_SURPRISE_REMOVAL:

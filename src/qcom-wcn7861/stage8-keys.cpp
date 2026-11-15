@@ -9,7 +9,7 @@ extern "C" {
 }
 template<bool Delete,class T>static NTSTATUS Kparse(S8 *S,const T &List)
 {
-    if(!List.ElementCount||List.ElementCount>ARRAYSIZE(S->Keys)||(!Delete&&S->J->Ap.Auth==WCN_AUTH_OPEN))return STATUS_NOT_SUPPORTED;
+    if(!List.ElementCount||List.ElementCount>ARRAYSIZE(S->Keys)||(!Delete&&(S->Provisioning||S->J->Ap.Auth==WCN_AUTH_OPEN)))return STATUS_NOT_SUPPORTED;
     for(ULONG I=0;I<List.ElementCount;I++){
         auto K=&List.pElements[I];auto To=&S->Keys[I];auto Type=K->CipherKeyTypeInfo.KeyType;auto Dir=K->CipherKeyTypeInfo.Direction;
         bool Pair=Type==WDI_CIPHER_KEY_TYPE_PAIRWISE_KEY,Mgmt=Type==WDI_CIPHER_KEY_TYPE_IGTK;
@@ -62,6 +62,6 @@ void S8KeysService(S8 *S)
     }
     if(J->Failed)St=STATUS_DEVICE_HARDWARE_ERROR;
     if(St==STATUS_DEVICE_BUSY&&WcnNowMs()-S->KeyAt<=5000)return;
-    if(St==STATUS_DEVICE_BUSY){St=STATUS_IO_TIMEOUT;WcnStage7Fail(S->D,J,"key property credit deadline");}
+    if(St==STATUS_DEVICE_BUSY){St=STATUS_IO_TIMEOUT;WcnStage7Fail(J);}
     auto R=S->KeyRequest;S->KeyRequest=nullptr;S->KeyCount=S->KeyNext=0;S->KeyDelete=FALSE;RtlSecureZeroMemory(S->Keys,sizeof(S->Keys));S8Complete(R,St);
 }

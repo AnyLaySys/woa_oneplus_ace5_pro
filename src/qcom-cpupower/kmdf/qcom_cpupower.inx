@@ -1,0 +1,35 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider=%Provider%
+DriverVer=11/15/2026,26.11.15.3
+CatalogFile=qcom_cpupower.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir=13
+[SourceDisksNames]
+1=%Disk%,,,
+[SourceDisksFiles]
+qcom_cpupower.sys=1
+
+; A primitive boot driver: no fabricated ACPI node or processor replacement.
+[DefaultInstall.NT$ARCH$]
+CopyFiles=CopyDriver
+[CopyDriver]
+qcom_cpupower.sys
+[DefaultInstall.NT$ARCH$.Services]
+AddService=qcom_cpupower,0x00000002,CpuPowerService
+[CpuPowerService]
+DisplayName=%Service%
+ServiceType=1
+StartType=0
+ErrorControl=1
+LoadOrderGroup="Boot Bus Extender"
+ServiceBinary=%13%\qcom_cpupower.sys
+
+[Strings]
+Provider="AnyLaySys"
+Disk="Qualcomm SM8750 CPU Power Driver"
+Service="Qualcomm SM8750 CPU Power Management"

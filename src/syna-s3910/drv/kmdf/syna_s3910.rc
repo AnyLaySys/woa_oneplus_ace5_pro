@@ -1,17 +1,4 @@
-//---------------------------------------------------------------------------
-
-// vhidmini.rc
-
-//
-
-// Copyright (c) Microsoft Corporation, All Rights Reserved
-
-//---------------------------------------------------------------------------
-
-
-
-
-
+// Copyright (C) Microsoft Corporation. All rights reserved.
 #include <windows.h>
 
 #define ALS_STRINGIFY_INNER(x) #x

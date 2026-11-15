@@ -336,6 +336,8 @@ SiaQueuePush (
     Link->QueueHead = Next;
 }
 
+#include "ufcs-core.inc"
+#include "charge-usb.inc"
 #include "usb.inc"
 
 VOID
@@ -649,9 +651,16 @@ SiaLinkStop (
     )
 {
     PSIA_LINK Link = Dev->Link;
+    if(Link)QchScRelease(Link);
 
     if (Link == NULL) {
         return;
+    }
+    if (Link->Charge.Bridge==2 && (Link->Charge.Running || Link->Charge.UfcsStarted || Link->Charge.OffMask)) {
+        QchOff(Link);
+        for(ULONG Tick=0;Tick<12000 && Link->Charge.Phase!=91 && Link->Charge.Phase!=92;Tick++){
+            SiaUsbPoll(Link);SiaLinkPoll(Dev);SiaSleep(1);
+        }
     }
     if (Link->Usb.Acked && Link->Usb.Rcid) {
         OtgShutdown (&Link->Usb.Otg, KeQueryInterruptTime () / 10000);

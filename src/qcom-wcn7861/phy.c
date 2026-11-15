@@ -148,7 +148,9 @@ NTSTATUS WcnPhyPeer(PWCN_DEVICE Dev,PWCN_JOIN_AP A,const UCHAR Peer[6],ULONG Vde
     struct ath12k_wmi_vht_rate_set_params *V;ULONG Offset,I,N=(A->RateCount+3)&~3u;
     RtlZeroMemory(Wire,512*sizeof(ULONG));JHDR(C,S7_WMI_TAG_PEER_ASSOC_COMPLETE_CMD);
     C->vdev_id=Vdev;RtlCopyMemory(C->peer_macaddr.addr,Peer,6);C->peer_new_assoc=1;C->peer_associd=Aid;
-    C->peer_flags=(A->Auth==WCN_AUTH_OPEN||A->Tdls||A->FtMode==2?0:S7_WMI_PEER_NEED_PTK_4_WAY)|(A->Pmf?0x08000000u:0); /* GTK two-way flag is WPA1-only, not RSN. */
+    /* A private AP still needs firmware EAPOL handling during Open WPS enrollment.
+     * Match ath12k AP-RSN fallback; do not authorize the Windows controlled port. */
+    C->peer_flags=((A->Auth==WCN_AUTH_OPEN&&!(A->Capability&16))||A->Tdls||A->FtMode==2?0:S7_WMI_PEER_NEED_PTK_4_WAY)|(A->Pmf?0x08000000u:0); /* GTK two-way flag is WPA1-only, not RSN. */
     C->peer_caps=A->Capability;C->peer_listen_intval=Listen;C->peer_nss=A->Nss;C->peer_phymode=A->PhyMode;C->num_peer_legacy_rates=A->RateCount;
     if(A->Qos)C->peer_flags|=2;
     if(A->Ht){

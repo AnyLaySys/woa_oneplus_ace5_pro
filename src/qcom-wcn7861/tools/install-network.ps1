@@ -29,6 +29,5 @@ $baseAcl=[Security.AccessControl.DirectorySecurity]::new();$baseAcl.SetAccessRul
 $v=& (Join-Path $runtime 'mihomo.exe') -v;if($LASTEXITCODE -ne 0 -or ($v -join "`n") -notmatch 'v1\.19\.33'){throw 'Unexpected traffic engine version'}
 $a=New-ScheduledTaskAction -Execute powershell.exe -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$base+'\dual-sta.ps1" -Action Run');$p=New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest;$s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName $task -Action $a -Principal $p -Settings $s -Trigger (New-ScheduledTaskTrigger -AtStartup) -Force|Out-Null
-[IO.File]::WriteAllText((Join-Path $runtime 'cleanup.pending'),'1')
 if(!$NoStart){[IO.File]::WriteAllText((Join-Path $runtime 'enabled'),'1');Start-ScheduledTask -TaskName $task}
 'INSTALLED_GLOBAL_IPV4_IPV6_TCP_UDP_NO_SYSTEM_PROXY_NO_REBOOT'

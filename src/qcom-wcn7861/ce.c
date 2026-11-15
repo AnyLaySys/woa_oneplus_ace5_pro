@@ -172,7 +172,6 @@ WcnCeInitialize (
             }
         }
         Ring->Active = TRUE;
-
     }
 
     Dev->Ce.Initialized = TRUE;
@@ -195,7 +194,7 @@ WcnCeReapSource (PWCN_DEVICE Dev, ULONG Pipe)
     if(Ring->Entries>MAXULONG/Words||Ring->Buffers.Length<(SIZE_T)Ring->Entries*WCN_CE_RX_BUFFER_SIZE||Ring->Desc.Length<(SIZE_T)Ring->Entries*Ring->EntrySize)goto Bad;
     Raw=Ring->SourceMmio?WcnRead(Dev,WCN_CE_SRC_BASE+Pipe*WCN_CE_STRIDE+WCN_CE_RING_TP):((volatile ULONG*)Dev->Ce.Rdp.Va)[64+Pipe];
     KeMemoryBarrier();
-    if(Raw>=Ring->Entries*Words||Raw%Words)goto BadPointer;
+    if(Raw>=Ring->Entries*Words||Raw%Words)goto Bad;
     Used=(Ring->Tail+Ring->Entries-Ring->Head)%Ring->Entries;
     Next=(Ring->Tail+1)%Ring->Entries;
     if(!Ring->SourceMmio&&Raw/Words==Ring->Head&&Next==Ring->Head){
@@ -203,10 +202,10 @@ WcnCeReapSource (PWCN_DEVICE Dev, ULONG Pipe)
          * becomes authoritative, never mix in a stale shadow after wrap. */
         Other=WcnRead(Dev,WCN_CE_SRC_BASE+Pipe*WCN_CE_STRIDE+WCN_CE_RING_TP);
         if(Other!=Raw){Raw=Other;Switch=TRUE;}
-        if(Raw>=Ring->Entries*Words||Raw%Words)goto BadPointer;
+        if(Raw>=Ring->Entries*Words||Raw%Words)goto Bad;
     }
     Advance=(Raw/Words+Ring->Entries-Ring->Head)%Ring->Entries;
-    if(Advance>Used)goto BadPointer; /* Never release an uncompleted/unpublished slot. */
+    if(Advance>Used)goto Bad; /* Never release an uncompleted/unpublished slot. */
     if(Switch){Ring->SourceMmio=TRUE;}
     Slot=Ring->Head;
     for(I=0;I<Advance;I++){
@@ -216,8 +215,6 @@ WcnCeReapSource (PWCN_DEVICE Dev, ULONG Pipe)
     }
     Ring->Head=Raw/Words;
     return STATUS_SUCCESS;
-BadPointer:
-    WcnLog(Dev,"ce%u: invalid source consumer TP=%u reaped=%u producer=%u entries=%u entry-bytes=%u; no DMA reuse",Pipe,Raw,Ring->Head,Ring->Tail,Ring->Entries,Ring->EntrySize);
 Bad:
     Dev->Ce.SourceFailed=TRUE;
     return STATUS_DEVICE_HARDWARE_ERROR;
@@ -227,7 +224,7 @@ WcnCeSendSource (PWCN_DEVICE Dev, ULONG Pipe, const UCHAR *Data, ULONG Length)
 {
     PWCN_CE_RING Ring;ULONG Slot,Next,*Desc;ULONG64 Address;NTSTATUS Status;
     if(Pipe>=WCN_CE_RING_COUNT||!Data||!Length||Length>WCN_CE_RX_BUFFER_SIZE)return STATUS_INVALID_PARAMETER;
-    if(!Dev->Ce.Initialized||Dev->Mhi.SysErr||Dev->Mhi.RddmSaved)return STATUS_DEVICE_NOT_READY;
+    if(!Dev->Ce.Initialized||Dev->Mhi.SysErr||Dev->Mhi.RddmFailed)return STATUS_DEVICE_NOT_READY;
     Ring=&Dev->Ce.Ring[Pipe];
     Status=WcnCeReapSource(Dev,Pipe);if(!NT_SUCCESS(Status))return Status;
     Slot=Ring->Tail;Next=(Slot+1)%Ring->Entries;
@@ -267,7 +264,7 @@ WcnWmiSend (PWCN_DEVICE Dev, ULONG Command, const VOID *Body, ULONG Length)
     ULONG Credits;
     NTSTATUS Status;
     if (!Dev->Ce.Initialized || !Dev->Ce.EndpointWmi || !Dev->Ce.WmiCreditInitialized ||
-        Dev->Mhi.SysErr || Dev->Mhi.RddmSaved) return STATUS_DEVICE_NOT_READY;
+        Dev->Mhi.SysErr || Dev->Mhi.RddmFailed) return STATUS_DEVICE_NOT_READY;
     if (Length > sizeof (Packet) - 12 || (Length & 3) || !Dev->Ce.HtcCreditSize) return STATUS_INVALID_PARAMETER;
     if (Dev->Ce.SourceFailed) return STATUS_DEVICE_HARDWARE_ERROR;
     Credits = (Length + 12 + Dev->Ce.HtcCreditSize - 1) / Dev->Ce.HtcCreditSize;
@@ -292,7 +289,7 @@ WcnHttSend (PWCN_DEVICE Dev, const VOID *Body, ULONG Length)
 {
     ULONG Packet[64] = { 0 };
     NTSTATUS Status;
-    if (!Dev->Ce.Initialized || !Dev->Ce.EndpointHtt || Dev->Mhi.SysErr || Dev->Mhi.RddmSaved) return STATUS_DEVICE_NOT_READY;
+    if (!Dev->Ce.Initialized || !Dev->Ce.EndpointHtt || Dev->Mhi.SysErr || Dev->Mhi.RddmFailed) return STATUS_DEVICE_NOT_READY;
     if (!Length || Length > sizeof (Packet) - 8 || (Length & 3)) return STATUS_INVALID_PARAMETER;
     Packet[0] = (Length << 16) | Dev->Ce.EndpointHtt;
     Packet[1] = (Dev->Ce.HttSequence & 0xff) << 8;
@@ -363,16 +360,12 @@ WcnHtcAdvance (
     case 1:
         /* The pseudo control service is endpoint 0 and has no response. */
         Dev->Ce.HtcState = 2;
-        Status = WcnHtcSendConnect (Dev, HTC_SVC_WMI_CONTROL);
-        if (!NT_SUCCESS (Status)) {
-            WcnLog (Dev, "htc: WMI connect send failed 0x%08x", Status);
-        }
+        WcnHtcSendConnect (Dev, HTC_SVC_WMI_CONTROL);
+
         break;
     case 4:
-        Status = WcnHtcSendConnect (Dev, HTC_SVC_HTT_DATA);
-        if (!NT_SUCCESS (Status)) {
-            WcnLog (Dev, "htc: HTT connect send failed 0x%08x", Status);
-        }
+        WcnHtcSendConnect (Dev, HTC_SVC_HTT_DATA);
+
         break;
     case 6: {
         UCHAR Packet[HTC_HEADER_SIZE + 12] = { 0 };
@@ -381,13 +374,9 @@ WcnHtcAdvance (
         Status = WcnCeSendHtc (Dev, Packet, sizeof (Packet));
         if (NT_SUCCESS (Status)) {
             Dev->Ce.HtcState = 7;
-
-        } else {
-            WcnLog (Dev, "htc: setup-complete send failed 0x%08x", Status);
         }
         break;
     }
-
     }
 }
 
@@ -404,7 +393,7 @@ WcnWmiSendInitPeach (
 
     Status = WcnDpPrepareWmi (Dev);
     if (!NT_SUCCESS (Status)) {
-        WcnLog (Dev, "wmi: init blocked by DP setup failure 0x%08x", Status);
+
         return;
     }
 
@@ -423,9 +412,6 @@ WcnWmiSendInitPeach (
     Status = WcnWmiSend (Dev, WMI_CMD_HDR_INIT, Packet, sizeof (Packet));
     if (NT_SUCCESS (Status)) {
         Dev->Ce.WmiInitSent = TRUE;
-
-    } else {
-        WcnLog (Dev, "wmi: init send failed 0x%08x", Status);
     }
 }
 
@@ -434,14 +420,13 @@ static VOID
 WcnCeAdvanceReady (PWCN_DEVICE Dev)
 {
     NTSTATUS Status;
-    if (!Dev->Ce.WmiReady || Dev->Mhi.SysErr || Dev->Mhi.RddmSaved) return;
+    if (!Dev->Ce.WmiReady || Dev->Mhi.SysErr || Dev->Mhi.RddmFailed) return;
     if (!Dev->Ce.HwModeSent) {
         /* WMI_PDEV_SET_HW_MODE: SOC pdev0, WMI_HOST_HW_MODE_DBS, no mappings. */
         ULONG Packet[] = { (515u << 16) | 12, 0, 1, 0 };
         Status = WcnWmiSend (Dev, 0x401e, Packet, sizeof (Packet));
         if (!NT_SUCCESS (Status)) return;
         Dev->Ce.HwModeSent = TRUE;
-
     }
     if (!Dev->Ce.HttVersionSent) {
         /* HTT version request, TCL metadata v2; WcnHttSend owns the HTC header. */
@@ -449,7 +434,6 @@ WcnCeAdvanceReady (PWCN_DEVICE Dev)
         Status = WcnHttSend (Dev, Packet, sizeof (Packet));
         if (!NT_SUCCESS (Status)) return;
         Dev->Ce.HttVersionSent = TRUE;
-
     }
 }
 
@@ -478,11 +462,11 @@ WcnHtcReceive (
     if (((Info >> 8) & 2) != 0) {
         ULONG TrailerLength = *(const ULONG *)(Data + 4) & 0xff;
         if (TrailerLength < 4 || TrailerLength > PayloadLength) {
-            WcnLog (Dev, "htc: invalid trailer length %u", TrailerLength);
+
             return;
         }
         if (!WcnHtcCredits (Dev, Data + HTC_HEADER_SIZE + PayloadLength - TrailerLength, TrailerLength)) {
-            WcnLog (Dev, "htc: malformed credit trailer rejected");
+
             return;
         }
         PayloadLength -= TrailerLength;
@@ -498,7 +482,6 @@ WcnHtcReceive (
             if ((Version & 0xff) == 0 && Dev->Ce.HttVersionSent) {
                 Dev->Ce.HttMajor = (UCHAR)(Version >> 16);
                 Dev->Ce.HttVersionReceived = TRUE;
-
             }
         }
         return;
@@ -523,7 +506,7 @@ WcnHtcReceive (
         ULONG MaxMessage = Flags >> 16;
 
         if (Response != 0 || MaxMessage == 0) {
-            WcnLog (Dev, "htc: service 0x%04x rejected", Service);
+
             return;
         }
         if (Service == HTC_SVC_WMI_CONTROL) {
@@ -554,7 +537,7 @@ WcnCeService (
     ULONG Index;
     const UCHAR *Packet;
 
-    if (!Dev->Ce.Initialized || Dev->Mhi.SysErr || Dev->Mhi.RddmSaved) {
+    if (!Dev->Ce.Initialized || Dev->Mhi.SysErr || Dev->Mhi.RddmFailed) {
         return;
     }
     for (Pipe = 0; Pipe < WCN_CE_RING_COUNT; Pipe++) {
@@ -570,7 +553,7 @@ WcnCeService (
             Index = Ring->BufferIndex;
             Packet = Ring->Buffers.Va + Index * WCN_CE_RX_BUFFER_SIZE;
             if (Length == 0 || Length > WCN_CE_RX_BUFFER_SIZE) {
-                WcnLog (Dev, "ce%u: invalid rx length %u status 0x%08x", Pipe, Length, Status[0]);
+
                 Length = 0;
             }
             if (Length != 0) {
@@ -627,39 +610,34 @@ WcnWmiReceive (
             Dev->Ce.NumRfChains = TlvValue[36];
             if(TlvLength>=52){Dev->Ce.HtCap=*(const ULONG*)(TlvValue+40);Dev->Ce.VhtCap=*(const ULONG*)(TlvValue+44);
                 }
-
         }
         if (EventId == WMI_SERVICE_READY_EXT2_EVENT && (TlvHeader >> 16) == 820 && TlvLength >= 32) {
             Dev->Ce.PeerMetadataVersion = (UCHAR)(*(const ULONG *)(TlvValue + 28) & 0x3);
-
         }
     }
     if (EventId == WMI_SERVICE_READY_EXT2_EVENT) {
         Dev->Ce.WmiServiceReadyExt2 = TRUE;
-
     } else if (EventId == WMI_READY_EVENT) {
         if (!Dev->Ce.WmiInitSent || !Dev->Dp.ReadyForWmi || Dev->Ce.WmiReady) return;
         if (Length >= 4 + 4 + 52) {
             ULONG Tlv = *(const ULONG *)(Data + 4);
             if ((Tlv >> 16) != WMI_TAG_READY_EVENT || (Tlv & 0xFFFF) < 52 ||
                 (Tlv & 0xFFFF) > Length - 8) {
-                WcnLog (Dev, "wmi: ready event has unexpected TLV 0x%08x", Tlv);
+
                 return;
             }
             if (*(const ULONG *)(Data + 8 + 32) != 0) {
-                WcnLog (Dev, "wmi: firmware ready status failed 0x%08x",
-                        *(const ULONG *)(Data + 8 + 32));
+
                 return;
             }
             RtlCopyMemory (Dev->Ce.MacAddress, Data + 4 + 4 + 24, sizeof (Dev->Ce.MacAddress));
             if ((Dev->Ce.MacAddress[0] & 1) ||
                 (Dev->Ce.MacAddress[0] | Dev->Ce.MacAddress[1] | Dev->Ce.MacAddress[2] |
                  Dev->Ce.MacAddress[3] | Dev->Ce.MacAddress[4] | Dev->Ce.MacAddress[5]) == 0) {
-                WcnLog (Dev, "wmi: invalid ready MAC, stage 5 not complete");
+
                 return;
             }
             Dev->Ce.WmiReady = TRUE;
-
         }
     }
 }

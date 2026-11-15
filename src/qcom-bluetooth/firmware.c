@@ -88,7 +88,7 @@ static NTSTATUS BtDownload(BOOT*b,const BLOB*f,BOOLEAN ackEach){
  }
  return STATUS_SUCCESS;
 }
-NTSTATUS QbtFirmware(QBT*c){
+NTSTATUS QbtStart(QBT*c){
  static PCWSTR names[]={L"brhperifw20.mbn",L"brhperinv20.bin",L"tmel_peach_20.elf",L"brhbtfw20.mbn",L"brhbtnv20.bin",L"address.bin"};
  BLOB f[6]={0};BOOT*b=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*b),QBT_TAG);if(!b)return STATUS_INSUFFICIENT_RESOURCES;b->Hw=c;NTSTATUS status=STATUS_SUCCESS;
 #define TRY(call) do {status=(call);if(!NT_SUCCESS(status))goto done;}while(0)
@@ -96,7 +96,9 @@ NTSTATUS QbtFirmware(QBT*c){
  if(f[5].Size!=6){status=STATUS_DEVICE_CONFIGURATION_ERROR;goto done;}
  UCHAR any=0,all=0xff;for(ULONG i=0;i<6;i++){any|=f[5].Data[i];all&=f[5].Data[i];}if(!any||all==0xff){status=STATUS_DEVICE_CONFIGURATION_ERROR;goto done;}
  const ULONG patches[]={0,2,3};for(ULONG n=0;n<RTL_NUMBER_OF(patches);n++){ULONG i=patches[n];if(f[i].Size<52||RtlCompareMemory(f[i].Data,"\x7f""ELF\x01\x01",6)!=6||f[i].Data[18]!=0xf3||f[i].Data[19]!=0){status=STATUS_INVALID_IMAGE_FORMAT;goto done;}}
- TRY(PatchNvm(f+1,NULL));TRY(PatchNvm(f+4,f[5].Data));TRY(Wake(b));
+ // Validate every input before clocks, pinmux or controller reset are touched.
+ TRY(PatchNvm(f+1,NULL));TRY(PatchNvm(f+4,f[5].Data));
+ TRY(QbtHardwareStart(c));TRY(Wake(b));
  TRY(PeriCommand(b,5,0,2,0x15));
  if(b->Length!=25||Le32(b->Frame+12)!=0x21||b->Frame[18]!=0||b->Frame[19]!=2||Le32(b->Frame+20)!=0x40210200){status=STATUS_DEVICE_CONFIGURATION_ERROR;goto done;}
  const UCHAR baud[]={0x31,0,0xf1,0xff,2,2,0x15},baudReply[]={0x34,0,0xff,7,0xf0,1,1,0xf1,0xff,1,2};
@@ -114,7 +116,7 @@ NTSTATUS QbtFirmware(QBT*c){
  if(b->Length!=11||b->Frame[8]!=2||b->Frame[9]||b->Frame[10]){status=STATUS_DEVICE_CONFIGURATION_ERROR;goto done;}
  TRY(BtDownload(b,f+4,TRUE));UCHAR logging[]={0x14,0};TRY(Hci(b,0xfc17,logging,sizeof(logging),0));TRY(Hci(b,0x0c03,NULL,0,0));
  done:
- if(NT_SUCCESS(status)){while(b->At<b->Have){c->Ring[c->RingWrite++]=b->Pending[b->At++];}}
+ if(NT_SUCCESS(status)){QbtWrite(c->U,0x2ac,0);while(b->At<b->Have){c->Ring[c->RingWrite++]=b->Pending[b->At++];}}
  for(ULONG i=0;i<RTL_NUMBER_OF(f);i++)if(f[i].Data)ExFreePoolWithTag(f[i].Data,QBT_TAG);ExFreePoolWithTag(b,QBT_TAG);return status;
 #undef TRY
 }

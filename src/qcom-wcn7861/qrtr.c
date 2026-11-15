@@ -143,7 +143,6 @@ WcnQrtrStart (
     )
 {
     RtlZeroMemory (&Dev->Qrtr, sizeof (Dev->Qrtr));
-
 }
 
 /* af_qrtr.c qrtr_endpoint_post + the ns.c control handling the host needs */
@@ -236,6 +235,5 @@ WcnQrtrReceive (
             QrtrResumeTx (Dev, DstPort, SrcNode, SrcPort);
         }
         break;
-
     }
 }

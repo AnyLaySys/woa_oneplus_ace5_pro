@@ -1,7 +1,6 @@
 #include <ntifs.h>
 #include "battery.h"
 
-#define BAT_TLMM_FUNC_GPIO      0u
 #define BAT_TLMM_OE             (1u << 9)
 #define BAT_TLMM_IN             (1u << 0)
 #define BAT_I2C_DELAY_US        10u
@@ -58,8 +57,6 @@ BatI2cInit (
 {
     ULONG SdaIdle;
     ULONG SclIdle;
-    ULONG SdaLow;
-    ULONG SclLow;
 
     if (Dev->Tlmm == NULL) {
         return STATUS_DEVICE_CONFIGURATION_ERROR;
@@ -80,8 +77,6 @@ BatI2cInit (
     BatPinLow (Dev, BAT_GPIO_SDA);
     BatPinLow (Dev, BAT_GPIO_SCL);
     BatDelay ();
-    SdaLow = BatPinGet (Dev, BAT_GPIO_SDA) ? 1u : 0u;
-    SclLow = BatPinGet (Dev, BAT_GPIO_SCL) ? 1u : 0u;
 
     BatPinIdle (Dev, BAT_GPIO_SDA);
     BatPinIdle (Dev, BAT_GPIO_SCL);
@@ -91,7 +86,6 @@ BatI2cInit (
         return STATUS_IO_DEVICE_ERROR;
     }
 
-    Dev->I2cReady = TRUE;
     return STATUS_SUCCESS;
 }
 
@@ -138,7 +132,7 @@ BatBusRecovery (
     }
     if (Clocks != 0) {
         BatI2cStop (Dev);
-        
+
     }
 }
 
@@ -200,16 +194,7 @@ BatI2cRecvByte (
         BatPinLow (Dev, BAT_GPIO_SCL);
         BatDelay ();
     }
-    if (Ack) {
-        BatPinLow (Dev, BAT_GPIO_SDA);
-    } else {
-        BatPinIdle (Dev, BAT_GPIO_SDA);
-    }
-    BatDelay ();
-    BatSclRelease (Dev);
-    BatDelay ();
-    BatPinLow (Dev, BAT_GPIO_SCL);
-    BatDelay ();
+    BatI2cSendBit (Dev, !Ack);
     BatPinIdle (Dev, BAT_GPIO_SDA);
     return Value;
 }
@@ -264,13 +249,35 @@ BatGaugeRead (
     return NT_SUCCESS (Status);
 }
 
+// Read-only DAStatus1 query, exactly native0x3e/0x0071. No unseal/dataflash/FET command.
+static BOOLEAN BatGaugeCells(PBAT_DEVICE Dev,BAT_SNAPSHOT *S)
+{
+    UCHAR B[36];ULONG Sum=0;LARGE_INTEGER Wait;
+    BatBusRecovery(Dev);BatI2cStart(Dev);
+    BOOLEAN Ok=!BatI2cSendByte(Dev,BAT_GAUGE_ADDRESS<<1) && !BatI2cSendByte(Dev,0x3e) &&
+        !BatI2cSendByte(Dev,0x71) && !BatI2cSendByte(Dev,0);
+    BatI2cStop(Dev);if(!Ok)return FALSE;
+    Wait.QuadPart=-10000;KeDelayExecutionThread(KernelMode,FALSE,&Wait);
+    BatI2cStart(Dev);
+    Ok=!BatI2cSendByte(Dev,BAT_GAUGE_ADDRESS<<1) && !BatI2cSendByte(Dev,0x3e);
+    if(Ok){BatI2cStart(Dev);Ok=!BatI2cSendByte(Dev,(BAT_GAUGE_ADDRESS<<1)|1);}
+    if(Ok)for(ULONG I=0;I<sizeof(B);I++)B[I]=BatI2cRecvByte(Dev,I+1<sizeof(B));
+    BatI2cStop(Dev);if(!Ok || B[0]!=0x71 || B[1] || B[35]<8 || B[35]>36)return FALSE;
+    for(ULONG I=0;I<(ULONG)B[35]-2;I++)Sum+=B[I];
+    if(((Sum+B[34])&255)!=255)return FALSE;
+    S->Cell1Mv=B[2]|((ULONG)B[3]<<8);S->Cell2Mv=B[4]|((ULONG)B[5]<<8);
+    if(S->Cell1Mv<2500 || S->Cell1Mv>5000 || S->Cell2Mv<2500 || S->Cell2Mv>5000 ||
+       S->Cell1Mv+S->Cell2Mv+100<S->VoltageMv || S->Cell1Mv+S->Cell2Mv>S->VoltageMv+100)return FALSE;
+    return BatGaugeRead(Dev,0x0a,&S->BatteryStatus) && BatGaugeRead(Dev,0x30,&S->ChargingVoltageMv) &&
+        BatGaugeRead(Dev,0x32,&S->ChargingCurrentMa);
+}
+
 BOOLEAN
 BatGaugeSample (
     _In_ PBAT_DEVICE Dev
     )
 {
     BAT_SNAPSHOT S;
-    USHORT Volt = 0;
     NTSTATUS Status;
     KIRQL OldIrql;
     BOOLEAN Changed;
@@ -281,13 +288,11 @@ BatGaugeSample (
     }
 
     RtlZeroMemory (&S, sizeof (S));
-    Status = BatI2cReadWord (Dev, BAT_GAUGE_ADDRESS, BQ_REG_VOLT, &Volt);
-    if (!NT_SUCCESS (Status)) {
-        
+    if (!BatGaugeRead (Dev, BQ_REG_VOLT, &S.VoltageMv)) {
+
         goto Store;
     }
 
-    S.VoltageMv = Volt;
     Complete &= BatGaugeRead (Dev, BQ_REG_TEMP, &S.TempDeciK);
     Complete &= BatGaugeRead (Dev, BQ_REG_SOC, &S.Soc);
     Complete &= BatGaugeRead (Dev, BQ_REG_REMAIN, &S.RemainingMah);
@@ -299,6 +304,8 @@ BatGaugeSample (
         Status = BatI2cReadWord (Dev, BAT_GAUGE_ADDRESS, BQ_REG_CURRENT, &Current);
         S.CurrentMa = (LONG)(SHORT)Current;
     }
+
+    S.CellValid = BatGaugeCells(Dev,&S);
 
     S.Valid = Complete && NT_SUCCESS (Status) && S.TempDeciK >= 2332 && S.TempDeciK <= 3532 &&
               S.VoltageMv >= 5000 && S.VoltageMv <= 10000 && S.Soc <= 100 && S.FullMah != 0;
@@ -326,34 +333,15 @@ BatPollThread (
 {
     PBAT_DEVICE Dev = (PBAT_DEVICE)Context;
     LARGE_INTEGER Timeout;
-    NTSTATUS Status;
-    ULONG Slice;
 
-    for (;;) {
+    Timeout.QuadPart = -10000LL * BAT_POLL_MS;
+    do {
         if (BatGaugeSample (Dev)) {
-            if (Dev->ClassData == NULL && Dev->Now.Valid) {
-                Status = BatMiniportInit (Dev);
-                
-            }
             if (Dev->ClassData != NULL) {
                 (VOID)BatteryClassStatusNotify (Dev->ClassData);
             }
         }
-        
-        for (Slice = 0; Slice < BAT_POLL_MS / BAT_SLICE_MS; Slice++) {
-            BatPendingDrain (Dev, STATUS_INVALID_DEVICE_REQUEST);
-            Timeout.QuadPart = -10000LL * BAT_SLICE_MS;
-            KeWaitForSingleObject (&Dev->StopEvent, Executive, KernelMode, FALSE, &Timeout);
-            if (InterlockedCompareExchange (&Dev->Stopping, 0, 0) != 0) {
-                break;
-            }
-        }
-        if (InterlockedCompareExchange (&Dev->Stopping, 0, 0) != 0) {
-            break;
-        }
-    }
-    BatPendingDrain (Dev, STATUS_CANCELLED);
-    
+    } while (KeWaitForSingleObject (&Dev->StopEvent, Executive, KernelMode, FALSE, &Timeout) == STATUS_TIMEOUT);
     PsTerminateSystemThread (STATUS_SUCCESS);
 }
 
@@ -363,10 +351,10 @@ BatQueryTag (
     _Out_ PULONG BatteryTag
     )
 {
-    UNREFERENCED_PARAMETER (Context);
-
-    *BatteryTag = BAT_BATTERY_TAG;
-    return STATUS_SUCCESS;
+    BAT_SNAPSHOT snapshot;
+    BatSnapshotGet((PBAT_DEVICE)Context,&snapshot);
+    *BatteryTag=snapshot.Valid?BAT_BATTERY_TAG:0;
+    return snapshot.Valid?STATUS_SUCCESS:STATUS_NO_SUCH_DEVICE;
 }
 
 static NTSTATUS
@@ -396,10 +384,10 @@ BatQueryStatus (
         Status->PowerState |= BATTERY_CRITICAL;
     }
 
-    Status->Capacity = S.RemainingMah;
+    Status->Capacity = (ULONG)((ULONGLONG)S.RemainingMah * BAT_NOMINAL_MV / 1000);
     Status->Voltage = S.VoltageMv;
-    Status->Rate = S.CurrentMa;
-    
+    Status->Rate = (LONG)((LONGLONG)S.CurrentMa * S.VoltageMv / 1000);
+
     return STATUS_SUCCESS;
 }
 
@@ -415,6 +403,9 @@ BatQueryInformation (
     )
 {
     static const WCHAR DeviceName[] = BAT_DEVICE_NAME;
+    static const WCHAR Manufacturer[] = L"OnePlus";
+    static const WCHAR UniqueId[] = L"ACPI\\HMRB0001\\0";
+    static const WCHAR Empty[] = L"";
     PBAT_DEVICE Dev = (PBAT_DEVICE)Context;
     BAT_SNAPSHOT S;
     PBATTERY_INFORMATION Info;
@@ -425,6 +416,7 @@ BatQueryInformation (
 
     *ReturnedLength = 0;
     BatSnapshotGet (Dev, &S);
+    if(!S.Valid)return STATUS_NO_SUCH_DEVICE;
 
     switch (Level) {
     case BatteryInformation:
@@ -433,19 +425,19 @@ BatQueryInformation (
         }
         Info = (PBATTERY_INFORMATION)Buffer;
         RtlZeroMemory (Info, sizeof (*Info));
-        Info->Capabilities = BATTERY_SYSTEM_BATTERY | BATTERY_CAPACITY_RELATIVE;
+        Info->Capabilities = BATTERY_SYSTEM_BATTERY;
         Info->Technology = 1;
         Info->Chemistry[0] = 'L';
         Info->Chemistry[1] = 'I';
         Info->Chemistry[2] = 'O';
         Info->Chemistry[3] = 'N';
-        Info->DesignedCapacity = S.Valid ? S.DesignMah : BATTERY_UNKNOWN_CAPACITY;
-        Info->FullChargedCapacity = S.Valid ? S.FullMah : BATTERY_UNKNOWN_CAPACITY;
-        Info->DefaultAlert1 = S.DesignMah / 10;
-        Info->DefaultAlert2 = S.DesignMah / 20;
+        Info->DesignedCapacity = S.Valid ? (ULONG)((ULONGLONG)S.DesignMah * BAT_NOMINAL_MV / 1000) : BATTERY_UNKNOWN_CAPACITY;
+        Info->FullChargedCapacity = S.Valid ? (ULONG)((ULONGLONG)S.FullMah * BAT_NOMINAL_MV / 1000) : BATTERY_UNKNOWN_CAPACITY;
+        Info->DefaultAlert1 = Info->DesignedCapacity / 10;
+        Info->DefaultAlert2 = Info->DesignedCapacity / 20;
         Info->CycleCount = S.CycleCount;
         *ReturnedLength = sizeof (*Info);
-        
+
         return STATUS_SUCCESS;
 
     case BatteryGranularityInformation:
@@ -454,7 +446,7 @@ BatQueryInformation (
         }
         Scale = (PBATTERY_REPORTING_SCALE)Buffer;
         Scale->Granularity = 1;
-        Scale->Capacity = S.Valid ? S.FullMah : BATTERY_UNKNOWN_CAPACITY;
+        Scale->Capacity = S.Valid ? (ULONG)((ULONGLONG)S.FullMah * BAT_NOMINAL_MV / 1000) : BATTERY_UNKNOWN_CAPACITY;
         *ReturnedLength = sizeof (*Scale);
         return STATUS_SUCCESS;
 
@@ -475,12 +467,16 @@ BatQueryInformation (
         return STATUS_SUCCESS;
 
     case BatteryDeviceName:
-        if (BufferLength < sizeof (DeviceName)) {
-            return STATUS_BUFFER_TOO_SMALL;
-        }
-        RtlCopyMemory (Buffer, DeviceName, sizeof (DeviceName));
-        *ReturnedLength = sizeof (DeviceName);
+    case BatteryManufactureName:
+    case BatteryUniqueID:
+    case BatterySerialNumber: {
+        const WCHAR *value=Level==BatteryDeviceName?DeviceName:Level==BatteryManufactureName?Manufacturer:
+            Level==BatteryUniqueID?UniqueId:Empty;
+        ULONG bytes=(ULONG)((wcslen(value)+1)*sizeof(WCHAR));
+        if(BufferLength<bytes)return STATUS_BUFFER_TOO_SMALL;
+        RtlCopyMemory(Buffer,value,bytes);*ReturnedLength=bytes;
         return STATUS_SUCCESS;
+    }
 
     default:
         return STATUS_NOT_SUPPORTED;
@@ -513,7 +509,7 @@ BatSetStatusNotify (
     UNREFERENCED_PARAMETER (BatteryTag);
     UNREFERENCED_PARAMETER (Notify);
 
-    return STATUS_NOT_SUPPORTED;
+    return STATUS_SUCCESS;
 }
 
 static NTSTATUS
@@ -543,8 +539,6 @@ BatMiniportInit (
     Dev->Info.DisableStatusNotify = BatDisableStatusNotify;
     Dev->Info.Pdo = Dev->Pdo;
     Dev->Info.Fdo = Dev->Self;
-    RtlInitUnicodeString (&Dev->DeviceName, BAT_DEVICE_NAME);
-    Dev->Info.DeviceName = &Dev->DeviceName;
 
     return BatteryClassInitializeDevice ((PBATTERY_MINIPORT_INFO)&Dev->Info, &Dev->ClassData);
 }
@@ -555,6 +549,7 @@ BatMiniportStop (
     )
 {
     if (Dev->ClassData != NULL) {
+        if(Dev->WmiRegistered){IoWMIRegistrationControl(Dev->Self,WMIREG_ACTION_DEREGISTER);Dev->WmiRegistered=FALSE;}
         (VOID)BatteryClassUnload (Dev->ClassData);
         Dev->ClassData = NULL;
     }

@@ -62,7 +62,7 @@ NTSTATUS QbtFastClock(QBT*c){
  /* Changing the clocks must not cancel the live receive sequencer. */
  QbtWrite(c->U,0x48,0x11);QbtWrite(c->U,0x4c,0x11);QbtWrite(c->U,0x7c,0);QbtWrite(c->U,0x2ac,0x80000001);return STATUS_SUCCESS;
 }
-NTSTATUS QbtStart(QBT*c){
+NTSTATUS QbtHardwareStart(QBT*c){
  if(!(QbtRead(c->G,0x1e76c)&0x80000000))return STATUS_DEVICE_BUSY;
  c->BootDeadline=KeQueryInterruptTime()+200000000;
  c->AddedVotes=0x40f&~QbtRead(c->G,0x52010);QbtWrite(c->G,0x52010,QbtRead(c->G,0x52010)|0x40f);c->Voted=TRUE;
@@ -87,7 +87,7 @@ NTSTATUS QbtStart(QBT*c){
  value=0;status=Gpio(c,TRUE,0x44,&value);if(!NT_SUCCESS(status))return status;Delay(20);
  value=0x80;status=Gpio(c,TRUE,0x44,&value);if(!NT_SUCCESS(status))return status;c->ResetReleased=TRUE;Delay(100);
  UCHAR stale[256];QbtReceive(c,stale,sizeof(stale));Delay(2);QbtReceive(c,stale,sizeof(stale));
- status=QbtFirmware(c);if(NT_SUCCESS(status))QbtWrite(c->U,0x2ac,0);return status;
+ return STATUS_SUCCESS;
 }
 VOID QbtStop(QBT*c){
  c->BootDeadline=0;

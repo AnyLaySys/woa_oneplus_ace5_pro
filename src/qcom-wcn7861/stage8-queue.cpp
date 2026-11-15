@@ -69,31 +69,33 @@ static void S8Advance(NETPACKETQUEUE Handle)
             auto Frag=NetRingGetFragmentAtIndex(F,F->BeginIndex);auto Va=NetExtensionGetFragmentVirtualAddress(&Q->Va,F->BeginIndex)->VirtualAddress;
             auto Data=&S->Rx[S->RxTail];
             RtlZeroMemory(B,sizeof(*B));B->FragmentIndex=F->BeginIndex;B->FragmentCount=1;B->Layout.Layer2Type=NetPacketLayer2TypeIeee80211;B->Layout.Layer2HeaderLength=32;
-            if(!Va||Frag->Capacity<Data->Length){B->Ignore=1;Frag->ValidLength=0;S->RxDropped++;}
+            if(!Va||Frag->Capacity<Data->Length){B->Ignore=1;Frag->ValidLength=0;}
             else{RtlCopyMemory(Va,Data->Bytes,Data->Length);Frag->Offset=0;Frag->ValidLength=Data->Length;
                  }
+
             RtlSecureZeroMemory(Data,sizeof(*Data));S->RxTail=(S->RxTail+1)%S8_RX_FRAMES;
             F->BeginIndex=NetRingIncrementIndex(F,F->BeginIndex);
         }else{
-            ULONG Next=(S->TxHead+1)%S8_TX_FRAMES,Size=0,Index=B->FragmentIndex,Reason=0;
+            ULONG Next=(S->TxHead+1)%S8_TX_FRAMES,Size=0,Index=B->FragmentIndex;
             bool Native=B->Layout.Layer2Type!=NetPacketLayer2TypeEthernet;
             bool Bad=B->Ignore||!B->FragmentCount||B->FragmentCount>16;
             if(Next==S->TxTail)break;
-            if(Bad)Reason=B->Ignore?5:(B->FragmentCount?7:6);
+
             auto Data=&S->Tx[S->TxHead];
             for(ULONG I=0;!Bad&&I<B->FragmentCount;I++){
-                if(Index>=F->NumberOfElements){Bad=true;Reason=1;break;}
+                if(Index>=F->NumberOfElements){Bad=true;break;}
                 auto Frag=NetRingGetFragmentAtIndex(F,Index);auto Va=NetExtensionGetFragmentVirtualAddress(&Q->Va,Index)->VirtualAddress;
                 ULONG Len=(ULONG)Frag->ValidLength,Off=(ULONG)Frag->Offset;
-                if(!Va||Off>Frag->Capacity||Len>Frag->Capacity-Off||Len>1532-Size){Bad=true;Reason=!Va?2:(Off>Frag->Capacity?3:(Len>Frag->Capacity-Off?4:8));break;}
+                if(!Va||Off>Frag->Capacity||Len>Frag->Capacity-Off||Len>1532-Size){Bad=true;break;}
                 RtlCopyMemory(Data->Bytes+Size,(UCHAR*)Va+Off,Len);Size+=Len;Index=NetRingIncrementIndex(F,Index);
             }
-            if(!Bad&&Native){Size=S8NativeTx(Data->Bytes,Size,S->J->Ap.Bssid,S->Mac,S->HotspotRole);if(!Size){Bad=true;Reason=10;}}
-            if(!Bad&&Size>1514){Bad=true;Reason=8;}
-            if(!Bad&&Size<14){Bad=true;Reason=9;}
+            if(!Bad&&Native){Size=S8NativeTx(Data->Bytes,Size,S->J->Ap.Bssid,S->Mac,S->HotspotRole);if(!Size){Bad=true;}}
+            if(!Bad&&Size>1514){Bad=true;}
+            if(!Bad&&Size<14){Bad=true;}
+
             if(!Bad){Data->Length=Size;S->TxHead=Next;
                 }
-            else{B->Ignore=1;RtlSecureZeroMemory(Data,sizeof(*Data));S->TxFailed++;}
+            else{B->Ignore=1;RtlSecureZeroMemory(Data,sizeof(*Data));}
             // Fragments belong to this packet even if its payload was rejected.
             if(B->FragmentIndex<F->NumberOfElements&&B->FragmentCount<=F->NumberOfElements)F->BeginIndex=NetRingAdvanceIndex(F,B->FragmentIndex,B->FragmentCount);
         }
@@ -143,9 +145,10 @@ void S8ReceiveEthernet(S8 *S,const UCHAR *F,ULONG N,bool Direct)
         if(!Broadcast&&(F[0]&1)&&(S->PacketFilter&2))for(ULONG I=0;I<S->MulticastCount;I++)if(RtlCompareMemory(F,S->Multicast[I],6)==6)Accept=true;
         if(!Accept){KeReleaseSpinLock(&S->Lock,Irql);return;}}
     ULONG Next=(S->RxHead+1)%S8_RX_FRAMES;
-    if(Next==S->RxTail){S->RxDropped++;}else{
+    if(Next!=S->RxTail){
         auto P=&S->Rx[S->RxHead];P->Length=S8NativeRx(F,N,S->HotspotRole?S->Mac:S->J->Ap.Bssid,!Eapol&&(S->HotspotRole||S->J->Ap.Auth!=WCN_AUTH_OPEN),++S->RxSequence,P->Bytes,sizeof(P->Bytes),S->HotspotRole);
-        if(!P->Length){S->RxDropped++;KeReleaseSpinLock(&S->Lock,Irql);return;}S->RxHead=Next;
+
+        if(!P->Length){KeReleaseSpinLock(&S->Lock,Irql);return;}S->RxHead=Next;
         if(S->RxQueue){auto Q=S8GetQueue(S->RxQueue);
             if(Q->Running&&Q->Armed&&S->AssocIndicated){Q->Armed=FALSE;Notify=S->RxQueue;WdfObjectReference(Notify);}
             }
@@ -164,7 +167,6 @@ extern "C" VOID WcnStage8RxReady(PWCN_DEVICE D,PWCN_JOIN J)
     if(S->RxQueue&&Pending){auto Q=S8GetQueue(S->RxQueue);if(Q->Running&&Q->Armed){Q->Armed=FALSE;Notify=S->RxQueue;WdfObjectReference(Notify);}}
     KeReleaseSpinLock(&S->Lock,Irql);
     if(Notify){NetRxQueueNotifyMoreReceivedPacketsAvailable(Notify);WdfObjectDereference(Notify);}
-
 }
 void S8QueuesService(S8 *S)
 {
@@ -178,20 +180,20 @@ void S8QueuesService(S8 *S)
         if(!S->HotspotRole&&!Eapol&&!S->J->Authorized){
             // Never let an early IPv6/DHCP packet head-of-line block EAPOL.
             KeAcquireSpinLock(&S->Lock,&Irql);
-            if(S->TxGeneration==Generation&&S->TxTail==Slot&&S->TxTail!=S->TxHead){RtlSecureZeroMemory(&S->Tx[Slot],sizeof(S8_FRAME));S->TxTail=(Slot+1)%S8_TX_FRAMES;S->TxFailed++;Freed=true;
+            if(S->TxGeneration==Generation&&S->TxTail==Slot&&S->TxTail!=S->TxHead){RtlSecureZeroMemory(&S->Tx[Slot],sizeof(S8_FRAME));S->TxTail=(Slot+1)%S8_TX_FRAMES;Freed=true;
                 }
             KeReleaseSpinLock(&S->Lock,Irql);RtlSecureZeroMemory(&Copy,sizeof(Copy));continue;
         }
         NTSTATUS St=S->HotspotRole?WcnHotspotTx(S->D,Copy.Bytes,Copy.Length,Eapol):WcnStage7Tx(S->D,S->J,Copy.Bytes,Copy.Length,Eapol);
+
         RtlSecureZeroMemory(&Copy,sizeof(Copy));if(St==STATUS_DEVICE_BUSY)break;
         if(NT_SUCCESS(St))Submitted=true;
         KeAcquireSpinLock(&S->Lock,&Irql);
         // Cancel may have emptied the queue while the copied buffer was submitted.
         if(S->TxGeneration==Generation&&S->TxTail==Slot&&S->TxTail!=S->TxHead){RtlSecureZeroMemory(&S->Tx[Slot],sizeof(S8_FRAME));S->TxTail=(Slot+1)%S8_TX_FRAMES;Freed=true;}
-        if(!NT_SUCCESS(St)){S->TxFailed++;}
 
         KeReleaseSpinLock(&S->Lock,Irql);
-        if(!NT_SUCCESS(St)&&!S->HotspotRole&&S->J->Started){WcnStage7Fail(S->D,S->J,"OS TX transport rejected");break;}
+        if(!NT_SUCCESS(St)&&!S->HotspotRole&&S->J->Started){WcnStage7Fail(S->J);break;}
     }
     if(Submitted)WcnStage7TxFlush(S->D);
     if(Freed){
@@ -201,5 +203,3 @@ void S8QueuesService(S8 *S)
         for(auto Queue:Notify)if(Queue){NetTxQueueNotifyMoreCompletedPacketsAvailable(Queue);WdfObjectDereference(Queue);}
     }
 }
-extern "C" VOID WcnStage8TxFailed(PWCN_DEVICE D,ULONG Vdev)
-{auto S=S8Station(D,WcnStation(D,Vdev));if(S)S->TxFailed++;}

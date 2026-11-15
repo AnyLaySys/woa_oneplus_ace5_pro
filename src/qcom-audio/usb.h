@@ -2,7 +2,7 @@
 /* SET22: 0=DRP,1=sink,2=source. GET22: 0=not source,1=attached source. */
 static const unsigned OtgProperties[]={0,1,9,17,18,24};
 typedef struct {
- unsigned Phase,Step,Fault,Touched,Pending,Stop,Retries,Block;
+ unsigned Phase,Step,Fault,Touched,Pending,Stop,Retries,Block,Sink;
  unsigned Saved[2],Live[4];
  unsigned long long Until,Last,Due,SourceAt;
 } OTG_STATE;
@@ -37,11 +37,13 @@ static __inline void OtgReply(OTG_STATE*s,unsigned value,unsigned result,unsigne
   if(s->Step==6){s->Step=0;s->Phase=OtgConfigure;s->Until=now+5000;}
  }else if(s->Phase==OtgConfigure){
   if(s->Step==1&&value){OtgStop(s,OtgUnsafeState);return;}
-  if(++s->Step==5){s->Phase=OtgWatch;s->Step=0;s->Due=now;}
+  if(++s->Step==5){s->Sink=s->Live[1]!=0;s->Phase=OtgWatch;s->Step=0;s->Due=now;}
  }else if(s->Phase==OtgWatch){
   static const unsigned p[]={22,0,1,9};OtgLive(s,p[s->Step],value);
   if(!s->Step){if(value>1){OtgStop(s,OtgUnsafeState);return;}if(!value){s->Block=0;s->Fault=0;}}
   if(++s->Step==4){s->Step=0;s->Due=now+750;
+   // Keep charger attachments sink-only; restore DRP only after input disappears.
+   if((s->Live[1]?1u:0u)!=s->Sink){s->Phase=OtgConfigure;s->Step=4;s->Until=now+5000;s->Due=now;return;}
    if(s->Live[0]==1&&!s->Block&&!s->Live[1]&&s->Live[2]<1000000&&!s->Live[3]){s->Phase=OtgEnable;s->Fault=0;s->Until=now+3000;s->Due=now;}}
  }else if(s->Phase==OtgEnable){
   static const unsigned p[]={64,0,1,9,22,24,24};if(s->Step!=0&&s->Step!=5)OtgLive(s,p[s->Step],value);
@@ -84,7 +86,7 @@ static __inline int OtgNext(OTG_STATE*s,unsigned long long now,int batteryGood,O
  if(now<s->Due||(s->Phase==OtgSource&&now-s->Last<50))return 0;
  r->Value=0;r->Write=0;
  if(s->Phase==OtgRead)r->Property=OtgProperties[s->Step];
- else if(s->Phase==OtgConfigure){static const unsigned p[]={24,24,17,18,22},v[]={0,0,1,1,0};r->Property=p[s->Step];r->Value=v[s->Step];r->Write=s->Step!=1;}
+ else if(s->Phase==OtgConfigure){static const unsigned p[]={24,24,17,18,22},v[]={0,0,1,1,0};r->Property=p[s->Step];r->Value=s->Step==4?(s->Live[1]?1u:0u):v[s->Step];r->Write=s->Step!=1;}
  else if(s->Phase==OtgWatch){static const unsigned p[]={22,0,1,9};r->Property=p[s->Step];}
  else if(s->Phase==OtgEnable){static const unsigned p[]={64,0,1,9,22,24,24};r->Property=p[s->Step];r->Value=s->Step?1:500;r->Write=!s->Step||s->Step==5;if(!r->Write)r->Value=0;}
  else if(s->Phase==OtgSource){static const unsigned p[]={22,0,1,9,24};r->Property=p[s->Step];}
@@ -101,6 +103,6 @@ typedef struct {
  unsigned Rcid,Count,Property,Write;
  unsigned Iid[SIA_USB_INTENTS],Size[SIA_USB_INTENTS];
  unsigned char Free[SIA_USB_INTENTS],Opening,Acked,Granted;
- unsigned long long OnlineAt,BatteryAt,BatteryUntil;
+ unsigned long long OnlineAt,BatteryUntil;
  OTG_STATE Otg;
 } SIA_USB;

@@ -19,6 +19,7 @@ PnpLockdown=1
 [DestinationDirs]
 
 DefaultDestDir=13
+Sia.Adsp=13,ADSP
 
 
 
@@ -31,6 +32,66 @@ DefaultDestDir=13
 [SourceDisksFiles]
 
 sia9177.sys=1
+charge.exe=1
+credential.bin=1
+adsp.b00=1,ADSP
+adsp.b01=1,ADSP
+adsp.b02=1,ADSP
+adsp.b03=1,ADSP
+adsp.b04=1,ADSP
+adsp.b05=1,ADSP
+adsp.b06=1,ADSP
+adsp.b07=1,ADSP
+adsp.b08=1,ADSP
+adsp.b09=1,ADSP
+adsp.b10=1,ADSP
+adsp.b11=1,ADSP
+adsp.b12=1,ADSP
+adsp.b13=1,ADSP
+adsp.b14=1,ADSP
+adsp.b15=1,ADSP
+adsp.b16=1,ADSP
+adsp.b17=1,ADSP
+adsp.b18=1,ADSP
+adsp.b19=1,ADSP
+adsp.b20=1,ADSP
+adsp.b21=1,ADSP
+adsp.b22=1,ADSP
+adsp.b23=1,ADSP
+adsp.b24=1,ADSP
+adsp.b26=1,ADSP
+adsp.b27=1,ADSP
+adsp.b28=1,ADSP
+adsp.b29=1,ADSP
+adsp.b30=1,ADSP
+adsp.b31=1,ADSP
+adsp.b32=1,ADSP
+adsp.b33=1,ADSP
+adsp.b34=1,ADSP
+adsp.b35=1,ADSP
+adsp.b36=1,ADSP
+adsp.b37=1,ADSP
+adsp.b38=1,ADSP
+adsp.b39=1,ADSP
+adsp.b40=1,ADSP
+adsp.b41=1,ADSP
+adsp.b42=1,ADSP
+adsp.b43=1,ADSP
+adsp.b44=1,ADSP
+adsp.b45=1,ADSP
+adsp.b46=1,ADSP
+adsp.b47=1,ADSP
+adsp.b48=1,ADSP
+adsp.b49=1,ADSP
+adsp.b50=1,ADSP
+adsp.b51=1,ADSP
+adsp.b52=1,ADSP
+adsp.b54=1,ADSP
+adsp.mdt=1,ADSP
+adsp_dtb.b00=1,ADSP
+adsp_dtb.b01=1,ADSP
+adsp_dtb.b02=1,ADSP
+adsp_dtb.mdt=1,ADSP
 
 
 
@@ -52,7 +113,7 @@ Include=ks.inf,wdmaudio.inf
 
 Needs=KS.Registration,WDMAUDIO.Registration
 
-CopyFiles=Sia.Files
+CopyFiles=Sia.Files,Sia.Adsp
 
 AddReg=Sia.Registry
 
@@ -61,8 +122,70 @@ AddReg=Sia.Registry
 [Sia.Files]
 
 sia9177.sys
+charge.exe
+credential.bin
 
 
+
+[Sia.Adsp]
+adsp.b00
+adsp.b01
+adsp.b02
+adsp.b03
+adsp.b04
+adsp.b05
+adsp.b06
+adsp.b07
+adsp.b08
+adsp.b09
+adsp.b10
+adsp.b11
+adsp.b12
+adsp.b13
+adsp.b14
+adsp.b15
+adsp.b16
+adsp.b17
+adsp.b18
+adsp.b19
+adsp.b20
+adsp.b21
+adsp.b22
+adsp.b23
+adsp.b24
+adsp.b26
+adsp.b27
+adsp.b28
+adsp.b29
+adsp.b30
+adsp.b31
+adsp.b32
+adsp.b33
+adsp.b34
+adsp.b35
+adsp.b36
+adsp.b37
+adsp.b38
+adsp.b39
+adsp.b40
+adsp.b41
+adsp.b42
+adsp.b43
+adsp.b44
+adsp.b45
+adsp.b46
+adsp.b47
+adsp.b48
+adsp.b49
+adsp.b50
+adsp.b51
+adsp.b52
+adsp.b54
+adsp.mdt
+adsp_dtb.b00
+adsp_dtb.b01
+adsp_dtb.b02
+adsp_dtb.mdt
 
 [Sia.Registry]
 
@@ -81,6 +204,7 @@ HKR,Drivers\wave\wdmaud.drv,Description,,%DeviceName%
 [Sia.NT.Services]
 
 AddService=sia9177,0x00000002,Sia.Service
+AddService=ALSCharge,0x00000000,Charge.Service
 
 
 
@@ -97,6 +221,13 @@ ErrorControl=1
 ServiceBinary=%13%\sia9177.sys
 
 
+
+[Charge.Service]
+DisplayName="AnyLaySys Charging"
+ServiceType=0x10
+StartType=2
+ErrorControl=1
+ServiceBinary=%13%\charge.exe
 
 [Sia.NT.Interfaces]
 AddInterface=%KSCATEGORY_AUDIO%,WaveMic,Sia.MicWave

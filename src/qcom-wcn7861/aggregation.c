@@ -11,8 +11,8 @@
  * RX window remains owned by the checked REO/ADDBA path (disable RX override). */
 NTSTATUS WcnAggregationConfigure(PWCN_DEVICE D,ULONG Vdev)
 {ULONG B[]={Jtlv(526,16),Vdev,0,0,0x14};return WcnWmiSend(D,0x5019,B,sizeof(B));}
-static VOID Bfail(PWCN_DEVICE D,ULONG Vdev,const UCHAR Mac[6],PCSTR Reason)
-{if(Vdev==1)WcnHotspotFail(D,Reason);else{PWCN_JOIN J=WcnTdlsPeer(D,Vdev,Mac);WcnStage7Fail(D,J?J:WcnStation(D,Vdev),Reason);}}
+static VOID Bfail(PWCN_DEVICE D,ULONG Vdev,const UCHAR Mac[6])
+{if(Vdev==1)WcnHotspotFail(D);else{PWCN_JOIN J=WcnTdlsPeer(D,Vdev,Mac);WcnStage7Fail(J?J:WcnStation(D,Vdev));}}
 VOID WcnAggregationReceivePeer(PWCN_DEVICE D,PWCN_JOIN_AP Peer,WCN_BA *Ba,const UCHAR *B,ULONG N)
 {
     WCN_BA *A;UNREFERENCED_PARAMETER(D);ULONG Tid,Params,Window,Limit;USHORT Ssn;
@@ -24,11 +24,9 @@ VOID WcnAggregationReceivePeer(PWCN_DEVICE D,PWCN_JOIN_AP Peer,WCN_BA *Ba,const 
         Limit=Peer->He?S7_RX_BA_MAX:64u;
         A->Amsdu=(Params&1)!=0;A->Token=B[2];A->Ssn=Ssn;A->Window=(USHORT)(Window&&Window<Limit?Window:Limit);A->Attempts=0;A->Stop=FALSE;
         A->Status=(Params&2)?0:37;A->Phase=A->Status?4:1;
-
     }else if(B[1]==2){
         if(N!=6)return;Params=Jle16(B+2);if((Params&0x7ff)||!(Params&0x800))return;Tid=Params>>12;A=&Ba[Tid];A->Stop=TRUE;
         if(!A->Phase){A->Window=1;A->Ssn=65535;A->Phase=1;}
-
     }
 }
 static NTSTATUS Afw(PWCN_DEVICE D,ULONG Vdev,const UCHAR Peer[6],ULONG64 Reo,ULONG Tid,ULONG Window)
@@ -49,16 +47,16 @@ VOID WcnAggregationServicePeer(PWCN_DEVICE D,ULONG Vdev,PWCN_JOIN_AP Peer,WCN_BA
     switch(A->Phase){
     case 1:
         St=WcnReoBaUpdate(D,Vdev,Reo,Tid,A->Window,A->Ssn);if(St==STATUS_DEVICE_BUSY)return;
-        if(!NT_SUCCESS(St)){Bfail(D,Vdev,Mac,"REO BA command submission");return;}A->Phase=2;A->At=WcnNowMs();return;
+        if(!NT_SUCCESS(St)){Bfail(D,Vdev,Mac);return;}A->Phase=2;A->At=WcnNowMs();return;
     case 2:
-        if(!D->Runtime.ReoDone){if(WcnNowMs()-A->At>1500)Bfail(D,Vdev,Mac,"REO BA command completion timeout");return;}
-        if(D->Runtime.ReoTid!=Tid||D->Runtime.ReoStatus){Bfail(D,Vdev,Mac,"REO BA command rejected or mismatched");return;}
+        if(!D->Runtime.ReoDone){if(WcnNowMs()-A->At>1500)Bfail(D,Vdev,Mac);return;}
+        if(D->Runtime.ReoTid!=Tid||D->Runtime.ReoStatus){Bfail(D,Vdev,Mac);return;}
         D->Runtime.ReoPending=D->Runtime.ReoDone=FALSE;
         if(A->Stop&&A->Window>1){A->Window=1;A->Ssn=65535;A->Phase=1;return;}
         A->Phase=3;return;
     case 3:
         St=Afw(D,Vdev,Mac,Reo,Tid,A->Window);if(St==STATUS_DEVICE_BUSY)return;
-        if(!NT_SUCCESS(St)){Bfail(D,Vdev,Mac,"firmware BA queue update");return;}
+        if(!NT_SUCCESS(St)){Bfail(D,Vdev,Mac);return;}
         if(A->Stop){A->Active=FALSE;A->Phase=0;A->Stop=FALSE;return;}
         A->Phase=4;return;
     case 6:A->Phase=4;return;
@@ -68,10 +66,10 @@ VOID WcnAggregationServicePeer(PWCN_DEVICE D,ULONG Vdev,PWCN_JOIN_AP Peer,WCN_BA
         B[0]=3;B[1]=1;B[2]=A->Token;Jputle16(B+3,A->Status);
         Jputle16(B+5,2u|(A->Amsdu&&!A->Status?1u:0)|(Tid<<2)|((ULONG)A->Window<<6)); /* echo A-MSDU permission only for an accepted agreement */
         Jputle16(B+7,0);St=(Vdev==1?WcnHotspotActionSend(D,B,sizeof(B)):WcnStage7ActionSend(D,WcnTdlsPeer(D,Vdev,Mac)?WcnTdlsPeer(D,Vdev,Mac):WcnStation(D,Vdev),B,sizeof(B)));if(St==STATUS_DEVICE_BUSY)return;
-        if(!NT_SUCCESS(St)){Bfail(D,Vdev,Mac,"ADDBA response transport");return;}A->Phase=5;return;
+        if(!NT_SUCCESS(St)){Bfail(D,Vdev,Mac);return;}A->Phase=5;return;
     case 5:
         if(Busy)return;
-        if(Status){if(++A->Attempts<3){A->Phase=4;return;}Bfail(D,Vdev,Mac,"ADDBA response not acknowledged");return;}
+        if(Status){if(++A->Attempts<3){A->Phase=4;return;}Bfail(D,Vdev,Mac);return;}
         if(A->Stop){A->Window=1;A->Ssn=65535;A->Phase=1;return;}
         A->Active=A->Status==0;A->Phase=0;
         return;

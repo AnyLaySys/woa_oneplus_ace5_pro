@@ -305,7 +305,7 @@ static VOID Tfinish(PWCN_DEVICE D,PWCN_JOIN J,TPEER *P)
 static VOID Tcleanup(PWCN_DEVICE D,PWCN_JOIN J,TPEER *P)
 {
     NTSTATUS St=STATUS_SUCCESS;PWCN_JOIN L=&P->L;
-    if(WcnNowMs()-P->At>8000){P->State=Tquarantine;RtlSecureZeroMemory(P->Key,sizeof(P->Key));RtlSecureZeroMemory(P->Snonce,sizeof(P->Snonce));RtlSecureZeroMemory(P->Anonce,sizeof(P->Anonce));P->RestartLength=0;RtlSecureZeroMemory(P->Restart,sizeof(P->Restart));WcnLog(D,"TDLS: peer cleanup unconfirmed; retaining its DMA, AP path remains enabled");return;}
+    if(WcnNowMs()-P->At>8000){P->State=Tquarantine;RtlSecureZeroMemory(P->Key,sizeof(P->Key));RtlSecureZeroMemory(P->Snonce,sizeof(P->Snonce));RtlSecureZeroMemory(P->Anonce,sizeof(P->Anonce));P->RestartLength=0;RtlSecureZeroMemory(P->Restart,sizeof(P->Restart));return;}
     switch(P->Step){
     case 0:if(L->MgmtBusy)return;if(P->OffRequested){St=Toff(D,J,P,FALSE);if(!NT_SUCCESS(St))return;}if(P->Notify&&J&&J->Authorized&&!J->Failed&&(P->KeyReady||!P->Secure)){St=Tsend(D,J,P,3);if(St==STATUS_DEVICE_BUSY&&WcnNowMs()-P->At<500)return;}P->Notify=FALSE;St=STATUS_SUCCESS;break;
     case 1:if(L->PeerCreated)St=TpeerState(D,J,P,2);break;
@@ -361,7 +361,7 @@ BOOLEAN WcnTdlsRx(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *B,ULONG N,ULONG Pad,BOO
 }
 VOID WcnTdlsService(PWCN_DEVICE D)
 {
-    TDLS *T=Ts(D);ULONG I;NTSTATUS St;LONGLONG Now=WcnNowMs();if(!T||D->Mhi.SysErr||D->Mhi.RddmSaved||D->Dp.Failed||D->Ce.SourceFailed)return;
+    TDLS *T=Ts(D);ULONG I;NTSTATUS St;LONGLONG Now=WcnNowMs();if(!T||D->Mhi.SysErr||D->Mhi.RddmFailed||D->Dp.Failed||D->Ce.SourceFailed)return;
     for(I=0;I<2;I++){PWCN_JOIN J=I?&D->Secondary:&D->Join;if(Teligible(D,J)&&(!T->Enabled[I]||T->Options[I]!=Toptions(D,J))){ULONG B[17]={0};B[0]=Jtlv(200,64);B[1]=J->Vdev;B[2]=1;B[8]=Toptions(D,J);B[9]=2;B[10]=500;B[11]=15;B[12]=1000;B[13]=32;B[14]=5000;B[15]=32;B[16]=5000;St=WcnWmiSend(D,0x20001,B,sizeof(B));if(NT_SUCCESS(St)){T->Enabled[I]=TRUE;T->Options[I]=(UCHAR)B[8];}}}
     if(T->ReplyLength){PWCN_JOIN J=WcnStation(D,T->ReplyVdev);if(!Teligible(D,J)||Now-T->ReplyAt>2000)T->ReplyLength=0;
         else if(!D->Scan.RuntimeScan){St=WcnTwtStop(D,J);if(NT_SUCCESS(St))St=WcnStage7PublicAction(D,J,T->ReplyMac,T->Reply,T->ReplyLength);if(St!=STATUS_DEVICE_BUSY)T->ReplyLength=0;}}
@@ -404,13 +404,13 @@ VOID WcnTdlsWmi(PWCN_DEVICE D,ULONG Event,const UCHAR *P,ULONG N)
         else if(Status==3&&(Reason==7||Reason==8)){Peer->Buffering=Reason==7;Peer->At=WcnNowMs();}}}}
 }
 VOID WcnTdlsHtt(PWCN_DEVICE D,const UCHAR *P,ULONG N)
-{TDLS *T=Ts(D);ULONG I;if(T)for(I=0;I<WCN_TDLS_PEERS;I++)if(T->Peer[I].State)WcnStage7PeerHtt(D,&T->Peer[I].L,P,N);}
+{TDLS *T=Ts(D);ULONG I;if(T)for(I=0;I<WCN_TDLS_PEERS;I++)if(T->Peer[I].State)WcnStage7PeerHtt(&T->Peer[I].L,P,N);}
 NTSTATUS WcnTdlsCreate(PWCN_DEVICE D)
 {
     TDLS *T;NTSTATUS St;T=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*T),WCN_TAG);if(!T)return STATUS_INSUFFICIENT_RESOURCES;
     St=BCryptOpenAlgorithmProvider((BCRYPT_ALG_HANDLE*)&T->Sha,BCRYPT_SHA256_ALGORITHM,NULL,0);
     if(NT_SUCCESS(St))St=BCryptOpenAlgorithmProvider((BCRYPT_ALG_HANDLE*)&T->Hmac,BCRYPT_SHA256_ALGORITHM,NULL,BCRYPT_ALG_HANDLE_HMAC_FLAG);
-    if(!NT_SUCCESS(St)){if(T->Sha)BCryptCloseAlgorithmProvider((BCRYPT_ALG_HANDLE)T->Sha,0);RtlSecureZeroMemory(T,sizeof(*T));ExFreePoolWithTag(T,WCN_TAG);WcnLog(D,"TDLS: optional cryptographic providers unavailable");return STATUS_SUCCESS;}D->Tdls=T;return STATUS_SUCCESS;
+    if(!NT_SUCCESS(St)){if(T->Sha)BCryptCloseAlgorithmProvider((BCRYPT_ALG_HANDLE)T->Sha,0);RtlSecureZeroMemory(T,sizeof(*T));ExFreePoolWithTag(T,WCN_TAG);return STATUS_SUCCESS;}D->Tdls=T;return STATUS_SUCCESS;
 }
 VOID WcnTdlsPowerDown(PWCN_DEVICE D)
 {

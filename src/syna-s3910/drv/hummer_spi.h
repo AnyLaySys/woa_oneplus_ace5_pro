@@ -1,15 +1,3 @@
-/*
- * GENI SPI4 transport for the Synaptics S3910 on hummer (SM8750).
- *
- * There is no Qualcomm GENI SPI driver for Windows on this platform, so the
- * controller is driven from inside this driver: clocks through GCC, pin mux
- * through TLMM, data through the serial engine's GPI/GSI DMA path (this
- * engine reports GENI_IF_DISABLE_RO bit0 = 1, so its PIO FIFO does not exist
- * and the DMA interface block is not host-accessible).
- *
- * Register maps, the ring/TRE layout and the init sequence follow
- * drivers/dma/qcom/gpi.c and drivers/soc/qcom/qcom-geni-se.c in mainline.
- */
 #ifndef HUMMER_SPI_H
 #define HUMMER_SPI_H
 
@@ -23,7 +11,6 @@
 #define HSP_EV_BYTES    (HSP_EV_ELEMS * HSP_TRE_BYTES)
 #define HSP_TX_BYTES    (HSP_CH_ELEMS * HSP_TRE_BYTES)
 #define HSP_RX_BYTES    (HSP_CH_ELEMS * HSP_TRE_BYTES)
-#define HSP_RING_BYTES  (HSP_EV_BYTES + HSP_TX_BYTES + HSP_RX_BYTES)
 #define HSP_DATA_BYTES  256u
 #define HSP_SMMU_MAX_SMR 256u
 
@@ -46,7 +33,7 @@ typedef struct _HSP_CTX
     PUCHAR Smmu;
 
     ULONG  Gpii;
-    ULONG  Ee;
+
     BOOLEAN Ready;
 
     ULONG  TxWp;

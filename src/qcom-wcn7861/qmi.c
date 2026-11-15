@@ -248,7 +248,7 @@ QmiLoadDmaFile (
     RtlZeroMemory (Dma, sizeof (*Dma));
     Status = WcnReadFile (Path, &Data, &Size);
     if (!NT_SUCCESS (Status)) {
-        WcnLog (Dev, "qmi: firmware open failed 0x%08x", Status);
+
         return Status;
     }
     if (Size == 0 || Size > MAXULONG) {
@@ -259,7 +259,6 @@ QmiLoadDmaFile (
     if (NT_SUCCESS (Status)) {
         RtlCopyMemory (Dma->Va, Data, Size);
         KeMemoryBarrier ();
-
     }
     ExFreePoolWithTag (Data, WCN_TAG);
     return Status;
@@ -330,7 +329,6 @@ QmiStartBdfDownload (
     Qmi->DownloadSegment = 0;
     Qmi->DownloadType = Type;
     Qmi->DownloadNextStep = NextStep;
-
 }
 
 static
@@ -404,7 +402,7 @@ QmiStartInfoRequest (
     }
     Status = QmiLoadDmaFile (Dev, Path, Alignment, Dma);
     if (!NT_SUCCESS (Status)) {
-        WcnLog (Dev, "qmi: info firmware stage %u failed to load: 0x%08x", Step, Status);
+
         Qmi->Failed = TRUE;
         return;
     }
@@ -542,7 +540,7 @@ QmiRequestMem (
 
     for (Index = 0; Index < Count; Index++) {
         if (Offset + 9 > Length) {
-            WcnLog (Dev, "qmi: memory request truncated at segment %u", Index);
+
             break;
         }
         Qmi->Mem[Index].Size = QmiGet32 (Value + Offset);
@@ -576,11 +574,10 @@ QmiRequestMem (
                              ~((SIZE_T)QMI_MEM_ALIGNMENT - 1);
             Status = WcnDmaAllocAligned (Dev, AllocationSize, Alignment - 1, &Qmi->Mem[Index].Dma);
             if (!NT_SUCCESS (Status)) {
-                WcnLog (Dev, "qmi: mem seg %u (0x%x bytes) allocation failed 0x%08x", Index, Qmi->Mem[Index].Size, Status);
+
                 QmiFreeMem (Qmi);
                 if (Qmi->Mem[Index].Size > QMI_MAX_CHUNK_SIZE) {
                     Qmi->MemDelayed = TRUE;
-
                 } else {
                     Qmi->Failed = TRUE;
                 }
@@ -589,7 +586,6 @@ QmiRequestMem (
             }
 
             break;
-
         }
     }
     Qmi->MemRequestPending = TRUE;
@@ -761,7 +757,6 @@ QmiAdvance (
         QmiPutU8 (Qmi, 0x10, 0);
         QmiSend (Dev);
         break;
-
     }
 }
 
@@ -874,16 +869,14 @@ QmiResponse (
 
                 if (NT_SUCCESS (CeStatus)) {
                     CeStatus = WcnCeInitialize (Dev);
-
                 }
                 if (!NT_SUCCESS (CeStatus)) Qmi->Failed = TRUE;
             }
         }
         break;
-
     }
     if (Result != 0) {
-        WcnLog (Dev, "qmi: msg 0x%04x failed, result %u error %u", MsgId, Result, Error);
+
         Qmi->Failed = TRUE;
         if (Qmi->DownloadData != NULL) {
             ExFreePoolWithTag (Qmi->DownloadData, WCN_TAG);
@@ -950,7 +943,6 @@ WcnQmiReceive (
         if (Hdr->Type == QMI_RESPONSE && Type == 0x02 && Length >= 4) {
             Result = QmiGet16 (Value);
             Error = QmiGet16 (Value + 2);
-
         } else if (Hdr->Type == QMI_RESPONSE && Hdr->MsgId == QMI_WLFW_CAP) {
             QmiParseCap (Dev, Type, Value, Length);
         } else if (Hdr->Type == QMI_INDICATION && Hdr->MsgId == QMI_WLFW_REQUEST_MEM_IND && Type == 0x01) {
@@ -971,7 +963,6 @@ WcnQmiReceive (
             /* FW_READY completes QMI setup; firmware may still access M3/AUX-UC. */
             Dev->Qmi.Step = QmiStepWlanIni;
             break;
-
         }
     }
     QmiAdvance (Dev);

@@ -31,7 +31,7 @@ VOID WcnTwtService(PWCN_DEVICE D,PWCN_JOIN J)
 {
     PWCN_JOIN Other=J->Vdev==0?&D->Secondary:&D->Join;const WCN_RADIO_CAP *C=WcnRadioCaps(D);
     ULONG Traffic=J->TxFrames+J->RxFrames;LONGLONG Now=WcnNowMs();NTSTATUS St=STATUS_SUCCESS;BOOLEAN Allow,Busy;
-    if(D->Mhi.SysErr||D->Mhi.RddmSaved||D->Dp.Failed||D->Ce.SourceFailed)return;
+    if(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Dp.Failed||D->Ce.SourceFailed)return;
     if(J->Vdev==0)Tenable(D);
     if(!J->Started||J->Resetting||J->Failed||!J->Authorized||J->MacId>1)return;
     Busy=WcnTwtTrafficBusy(Traffic,&J->Traffic,Now,&J->TrafficAt,&J->TrafficBusyAt);
@@ -54,15 +54,15 @@ VOID WcnTwtService(PWCN_DEVICE D,PWCN_JOIN J)
     case Tdel:
         St=Tdialog(D,J,FALSE);if(NT_SUCCESS(St)){J->TwtState=Tdeleting;}break;
     case Tdeleting:
-        if(Now-J->TwtAt>3000)WcnStage7Fail(D,J,"TWT teardown completion timeout");return;
+        if(Now-J->TwtAt>3000)WcnStage7Fail(J);return;
     case Tawake:
         St=WcnStationPower(D,J,FALSE);if(NT_SUCCESS(St)){J->TwtState=Tcooldown;J->TwtAt=Now;}break;
     case Tcooldown:
         if(Now-J->TwtAt>60000)J->TwtState=Tidle;return;
-    default:WcnStage7Fail(D,J,"invalid TWT state");return;
+    default:WcnStage7Fail(J);return;
     }
-    if(St==STATUS_DEVICE_BUSY){if(Now-J->TwtAt>3000)WcnStage7Fail(D,J,"TWT command credit timeout");}
-    else if(!NT_SUCCESS(St))WcnStage7Fail(D,J,"TWT command transport");
+    if(St==STATUS_DEVICE_BUSY){if(Now-J->TwtAt>3000)WcnStage7Fail(J);}
+    else if(!NT_SUCCESS(St))WcnStage7Fail(J);
 }
 NTSTATUS WcnTwtStop(PWCN_DEVICE D,PWCN_JOIN J)
 {
@@ -87,5 +87,5 @@ VOID WcnTwtEvent(PWCN_DEVICE D,ULONG Event,const UCHAR *P,ULONG N)
     if(Event==0x3e003&&J->TwtState==Tadding){J->TwtState=(UCHAR)(Status==0?Tactive:Status==2?Tdel:Tawake);J->TwtAt=WcnNowMs();}
     if(Event==0x3e004&&(J->TwtState==Tactive||J->TwtState==Tadding||J->TwtState==Tdeleting)){
         if(Status==3){J->TwtState=Tdel;return;}
-        if((Status>1&&Status<7)||Status>14){WcnStage7Fail(D,J,"TWT teardown rejected");return;}J->TwtState=Tawake;J->TwtAt=WcnNowMs();}
+        if((Status>1&&Status<7)||Status>14){WcnStage7Fail(J);return;}J->TwtState=Tawake;J->TwtAt=WcnNowMs();}
 }

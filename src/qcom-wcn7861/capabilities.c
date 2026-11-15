@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause-Clear
- * Retain mode-specific firmware capabilities without diagnostic file copies.
+ * Retain mode-specific firmware capabilities.
  * Neither unknown tails nor generic chip features become advertised support. */
 #include "wcn7861.h"
 #include "stage7-util.h"
@@ -60,7 +60,7 @@ static VOID Cwalk(PWCN_DEVICE D,const UCHAR *P,ULONG N,ULONG Depth)
     ULONG H,L,T,I;const UCHAR *V;WCN_RADIO_CAP *C;
     if(Depth>3)return;
     while(N>=4){
-        H=Jle32(P);L=H&65535;T=H>>16;if(L>N-4){WcnLog(D,"caps: truncated TLV tag=%u length=%u available=%u",T,L,N-4);return;}V=P+4;
+        H=Jle32(P);L=H&65535;T=H>>16;if(L>N-4){return;}V=P+4;
         if(T==528&&L>=236){
             C=Cslot(D,V,TRUE);if(C){
                 C->Bands=Jle32(V+16);C->WidthCode[0]=Jle32(V+24);C->WidthCode[1]=Jle32(V+56);C->NssRatio=Jle32(V+232);
@@ -70,13 +70,11 @@ static VOID Cwalk(PWCN_DEVICE D,const UCHAR *P,ULONG N,ULONG Depth)
                     RtlCopyMemory(C->HePhy[I],V+88+I*12,11);RtlCopyMemory(C->HePpe[I],V+112+I*40,40);
                 }
             }
-
         }else if(T==879&&L>=180){
             C=Cslot(D,V,FALSE);if(C){
                 for(I=0;I<2;I++){RtlCopyMemory(C->EhtMac[I],V+16+I*8,2);RtlCopyMemory(C->EhtPhy[I],V+40+I*12,9);RtlCopyMemory(C->EhtPpe[I],V+64+I*40,40);}
                 RtlCopyMemory(C->EhtMcs[0],V+148,8);RtlCopyMemory(C->EhtMcs[1],V+156,16);C->EhtValid=TRUE;
             }
-
         }else
         if(T==18)Cwalk(D,V,L,Depth+1);
         P+=L+4;N-=L+4;

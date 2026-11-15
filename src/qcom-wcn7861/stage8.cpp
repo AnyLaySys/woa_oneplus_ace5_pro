@@ -9,9 +9,12 @@ extern "C" {
 #include "stage7-util.h"
 #include "network-policy.h"
 #include "security-policy.h"
+#include "owe-policy.h"
+#include "wps-policy.h"
 #include "hotspot.h"
 }
 #include "p2p-wire.h"
+
 NTSTATUS S8Configure(S8 *S,const UCHAR *P,ULONG N,const UCHAR ExpectedMac[6])
 {
     WDI_SET_FIRMWARE_CONFIGURATION_PARAMETERS C;auto Ns=ParseWdiSetAdapterConfigurationToIhv(N,P,&S->Tlv,&C);NTSTATUS St=Ns==NDIS_STATUS_SUCCESS?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;ULONG Mask=0;
@@ -24,6 +27,24 @@ NTSTATUS S8Configure(S8 *S,const UCHAR *P,ULONG N,const UCHAR ExpectedMac[6])
     if(NT_SUCCESS(St)){S->DisabledBands=Mask;if(C.Optional.UnreachableDetectionThreshold_IsPresent)S->UnreachableMs=C.UnreachableDetectionThreshold;}
 
     CleanupParsedWdiSetAdapterConfigurationToIhv(&C);return St;
+}
+static NTSTATUS S8OweCommand(S8 *S,const WDI_MESSAGE_HEADER &H,const UCHAR *P,ULONG N)
+{
+    WDI_SET_OWE_DH_IE_PARAMETERS K;auto Ns=ParseWdiSetOweDhIeToIhv(N,P,&S->Tlv,&K);auto &Ie=K.OWEDHIE;
+    NTSTATUS St=Ns==NDIS_STATUS_SUCCESS?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;
+    if(NT_SUCCESS(St)&&(S->P2pRole||!S->Adapter||H.PortId!=S->Port||!S->PmfAvailable))St=STATUS_NOT_SUPPORTED;
+    if(NT_SUCCESS(St)&&(S->ConnectPending||S->RoamPending||S->Resetting||S->J->MgmtBusy))St=STATUS_DEVICE_BUSY;
+    if(NT_SUCCESS(St)&&!WcnOweDhGroup(Ie.pElements,Ie.ElementCount))St=STATUS_INVALID_PARAMETER;
+    if(NT_SUCCESS(St)){RtlZeroMemory(S->OweDh,sizeof(S->OweDh));RtlCopyMemory(S->OweDh,Ie.pElements,Ie.ElementCount);S->OweDhLength=Ie.ElementCount;}
+    CleanupParsedWdiSetOweDhIeToIhv(&K);return St;
+}
+static NTSTATUS S8WpsCommand(S8 *S,const WDI_MESSAGE_HEADER &H,const UCHAR *P,ULONG N)
+{
+    WDI_SET_P2P_WPS_ENABLED_PARAMETERS K;auto Ns=ParseWdiSetP2pWpsEnabledToIhv(N,P,&S->Tlv,&K);
+    NTSTATUS St=Ns==NDIS_STATUS_SUCCESS&&K.WPSEnabled<=1?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;
+    if(NT_SUCCESS(St)&&(!S->Adapter||H.PortId!=S->Port||S->P2pRole))St=STATUS_NOT_SUPPORTED;
+    if(NT_SUCCESS(St))S->WpsEnabled=K.WPSEnabled?TRUE:FALSE; // Never change a pinned provisioning session.
+    CleanupParsedWdiSetP2pWpsEnabledToIhv(&K);return St;
 }
 static bool S8CipherAllowed(const WDI_CIPHER_ALGORITHM_LIST_CONTAINER &List,ULONG Cipher)
 {for(ULONG I=0;I<List.ElementCount;I++)if((ULONG)List.pElements[I]==Cipher)return true;return false;}
@@ -82,16 +103,18 @@ static NTSTATUS S8Caps(S8 *S)
     NTSTATUS St=WifiDeviceSetDeviceCapabilities(S->D->Device,&D);if(!NT_SUCCESS(St))return St;
     WIFI_STATION_CAPABILITIES C;WIFI_STATION_CAPABILITIES_INIT(&C);C.ScanSSIDListSize=1;C.DesiredSSIDListSize=1;C.PrivacyExemptionListSize=1;C.KeyMappingTableSize=1;C.DefaultKeyTableSize=4;C.MaxNumPerSTA=1;
     DOT11_AUTH_CIPHER_PAIR Pairs[]={
-        {DOT11_AUTH_ALGO_80211_OPEN,DOT11_CIPHER_ALGO_NONE},{DOT11_AUTH_ALGO_RSNA_PSK,DOT11_CIPHER_ALGO_CCMP},
+        {DOT11_AUTH_ALGO_80211_OPEN,DOT11_CIPHER_ALGO_NONE},{DOT11_AUTH_ALGO_80211_OPEN,DOT11_CIPHER_ALGO_WEP},
+        {DOT11_AUTH_ALGO_RSNA_PSK,DOT11_CIPHER_ALGO_CCMP},
         {DOT11_AUTH_ALGO_RSNA,DOT11_CIPHER_ALGO_CCMP},{DOT11_AUTH_ALGO_WPA3_SAE,DOT11_CIPHER_ALGO_CCMP},
-        {DOT11_AUTH_ALGO_WPA3_ENT,DOT11_CIPHER_ALGO_CCMP}};
+        {DOT11_AUTH_ALGO_WPA3_ENT,DOT11_CIPHER_ALGO_CCMP},{DOT11_AUTH_ALGO_OWE,DOT11_CIPHER_ALGO_CCMP}};
     DOT11_AUTH_CIPHER_PAIR Mgmt[]={
         {DOT11_AUTH_ALGO_RSNA_PSK,DOT11_CIPHER_ALGO_BIP},{DOT11_AUTH_ALGO_RSNA,DOT11_CIPHER_ALGO_BIP},
-        {DOT11_AUTH_ALGO_WPA3_SAE,DOT11_CIPHER_ALGO_BIP},{DOT11_AUTH_ALGO_WPA3_ENT,DOT11_CIPHER_ALGO_BIP}};
-    C.MFPCapable=S->PmfAvailable;C.NumSupportedUnicastAlgorithms=C.NumSupportedMulticastDataAlgorithms=S->PmfAvailable?ARRAYSIZE(Pairs):3;
+        {DOT11_AUTH_ALGO_WPA3_SAE,DOT11_CIPHER_ALGO_BIP},{DOT11_AUTH_ALGO_WPA3_ENT,DOT11_CIPHER_ALGO_BIP},{DOT11_AUTH_ALGO_OWE,DOT11_CIPHER_ALGO_BIP}};
+    C.MFPCapable=S->PmfAvailable;C.NumSupportedUnicastAlgorithms=C.NumSupportedMulticastDataAlgorithms=S->PmfAvailable?ARRAYSIZE(Pairs):4;
     C.UnicastAlgorithmsList=C.MulticastDataAlgorithmsList=Pairs;
     if(S->PmfAvailable){C.NumSupportedMulticastMgmtAlgorithms=ARRAYSIZE(Mgmt);C.MulticastMgmtAlgorithmsList=Mgmt;}
-    // Only AES-CCMP128/BIP-CMAC128 are advertised. No WEP/TKIP/192-bit suites.
+    // WCN uses Open/WEP as an EAP-WSC enrollment placeholder. Only explicit WPS
+    // IEs admit it; no WEP keys/data or TKIP are implemented or accepted.
     WIFI_STA_BANDS_COMBINATION Dual={};Dual.NumStaBands=2;Dual.BandIDs[0]=WDI_BAND_ID_2400;Dual.BandIDs[1]=WDI_BAND_ID_5000;C.NumSecondaryStaBandCombinations=1;C.SecondaryStaBandsCombinations=&Dual;
     St=WifiDeviceSetStationCapabilities(S->D->Device,&C);if(!NT_SUCCESS(St))return St;
     St=HotspotCapabilities(S->D);if(!NT_SUCCESS(St))return St;
@@ -233,7 +256,7 @@ extern "C" VOID WcnStage8Observe(PWCN_DEVICE D,const UCHAR *F,ULONG N,ULONG Freq
         else{I=0;for(ULONG K=1;K<S->BssCount;K++)if(S->Bss[K].At<S->Bss[I].At)I=K;}
     }
     auto B=&S->Bss[I];LONGLONG Now=WcnNowMs();
-    if(!Existing){B->Rssi=-127;B->SignalAt=0;B->PrimarySample=FALSE;}
+    if(!Existing){B->Rssi=-127;B->SignalAt=0;B->PrimarySample=FALSE;B->ProbeLength=0;}
     bool Direct=Frequency==Primary;
     // Prefer primary-channel measurements. A short peak window is only a fallback for passive scan misses.
     if(Rssi<0&&Rssi>-127&&(Direct||!B->PrimarySample||Now-B->SignalAt>=2000)){
@@ -246,6 +269,8 @@ extern "C" VOID WcnStage8Observe(PWCN_DEVICE D,const UCHAR *F,ULONG N,ULONG Freq
     // Keep a real, recently named probe response when a hidden beacon follows;
     // never synthesize an SSID or refresh the age of the old named frame.
     if(Existing&&Name&&WcnSsidHidden(Name,NameLength)&&Now-B->At<=30000){ULONG OldLength;auto Old=WcnBssSsid(B->Bytes,B->Length,&OldLength);if(Old&&!WcnSsidHidden(Old,OldLength))return;}
+    if(B->ProbeLength&&!WcnSsidHidden(Name,NameLength)&&!WcnBssSsidMatches(B->Probe,B->ProbeLength,Name,NameLength))B->ProbeLength=0;
+    if((F[0]&0xfc)==0x50){B->ProbeLength=N;B->ProbeScanId=B->ScanId;B->ProbeAt=Now;RtlCopyMemory(B->Probe,F,N);}
     B->Length=N;B->Frequency=Primary;B->At=Now;RtlCopyMemory(B->Bytes,F,N);
 }
 extern "C" VOID WcnStage8Mgmt(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *F,ULONG N,BOOLEAN Sent)
@@ -268,6 +293,11 @@ static NTSTATUS S8BssList(S8 *S,const WDI_MESSAGE_HEADER *H,bool EmptyAllowed=fa
         // WDI requires the management frame body (timestamp through IEs).
         if((B->Bytes[0]&0xfc)==0x80){E.Optional.BeaconFrame_IsPresent=TRUE;E.BeaconFrame.SimpleAssign(B->Bytes+24,B->Length-24);}
         else{E.Optional.ProbeResponseFrame_IsPresent=TRUE;E.ProbeResponseFrame.SimpleAssign(B->Bytes+24,B->Length-24);}
+        // A following beacon must not erase WPS/device information from a real probe response.
+        if(!E.Optional.ProbeResponseFrame_IsPresent&&B->ProbeLength>=36&&WcnNowMs()-B->ProbeAt<=30000&&
+           (!S->ScanPending||B->ProbeScanId==S->ExpectedScanId)){
+            E.Optional.ProbeResponseFrame_IsPresent=TRUE;E.ProbeResponseFrame.SimpleAssign(B->Probe+24,B->ProbeLength-24);
+        }
         E.SignalInfo.RSSI=B->Rssi;E.SignalInfo.LinkQuality=S8Quality(B->Rssi);
         E.ChannelInfo.BandId=WcnIs2g(B->Frequency)?WDI_BAND_ID_2400:WDI_BAND_ID_5000;E.ChannelInfo.ChannelNumber=WcnFrequencyChannel(B->Frequency);
         WDI_INDICATION_BSS_ENTRY_LIST_PARAMETERS P;P.Optional.DeviceDescriptor_IsPresent=TRUE;P.DeviceDescriptor.SimpleAssign(&E,1);
@@ -286,7 +316,7 @@ static NTSTATUS S8Association(S8 *S)
     if(J->Ap.Auth==WCN_AUTH_OPEN&&!J->Authorized&&!S->Provisioning){NTSTATUS St=S8Authorize(S);if(!NT_SUCCESS(St))return St;}
     WDI_ASSOCIATION_RESULT_CONTAINER A;RtlCopyMemory(A.BSSID.Address,J->Ap.Bssid,6);
     auto P=&A.AssociationResultParameters;P->AssociationStatus=WDI_ASSOC_STATUS_SUCCESS;P->ReAssociation=J->Reassociate;P->AuthAlgorithm=(WDI_AUTH_ALGORITHM)J->Ap.Auth;
-    P->UnicastCipherAlgorithm=P->MulticastDataCipherAlgorithm=J->Ap.Auth==WCN_AUTH_OPEN?WDI_CIPHER_ALGO_NONE:WDI_CIPHER_ALGO_CCMP;P->MulticastMgmtCipherAlgorithm=J->Ap.Pmf?WDI_CIPHER_ALGO_BIP:WDI_CIPHER_ALGO_NONE;P->BandID=WcnIs2g(J->Ap.Frequency)?WDI_BAND_ID_2400:WDI_BAND_ID_5000;P->PortAuthorized=J->Authorized;P->WMMQoSEnabled=J->Ap.Qos;
+    P->UnicastCipherAlgorithm=P->MulticastDataCipherAlgorithm=(WDI_CIPHER_ALGORITHM)(S->Provisioning?S->ProvisioningCipher:J->Ap.Auth==WCN_AUTH_OPEN?WDI_CIPHER_ALGO_NONE:WDI_CIPHER_ALGO_CCMP);P->MulticastMgmtCipherAlgorithm=J->Ap.Pmf?WDI_CIPHER_ALGO_BIP:WDI_CIPHER_ALGO_NONE;P->BandID=WcnIs2g(J->Ap.Frequency)?WDI_BAND_ID_2400:WDI_BAND_ID_5000;P->PortAuthorized=J->Authorized;P->WMMQoSEnabled=J->Ap.Qos;
     A.Optional.AssociationRequestFrame_IsPresent=A.Optional.AssociationResponseFrame_IsPresent=TRUE;
     A.AssociationRequestFrame.SimpleAssign(S->AssocRequest+24,S->AssocRequestSize-24);A.AssociationResponseFrame.SimpleAssign(S->AssocResponse+24,S->AssocResponseSize-24);
     if(S->AuthResponseSize>=30){A.Optional.AuthenticationResponseFrame_IsPresent=TRUE;A.AuthenticationResponseFrame.SimpleAssign(S->AuthResponse+24,S->AuthResponseSize-24);}
@@ -318,7 +348,7 @@ void S8ClearStaging(S8 *S)
     RtlSecureZeroMemory(S->Tx,sizeof(S->Tx));RtlSecureZeroMemory(S->Rx,sizeof(S->Rx));
     S->TxHead=S->TxTail=S->RxHead=S->RxTail=0;S->TxGeneration++;
     S->AssocRequestSize=S->AssocResponseSize=S->AuthResponseSize=0;if(!S->RoamPending){S->ConnectBssSize=0;RtlSecureZeroMemory(&S->Ft,sizeof(S->Ft));}
-    if(!S->RoamPending){RtlSecureZeroMemory(S->AssocVendor,sizeof(S->AssocVendor));S->AssocVendorLength=0;S->Provisioning=FALSE;}
+    if(!S->RoamPending){RtlSecureZeroMemory(S->AssocVendor,sizeof(S->AssocVendor));S->AssocVendorLength=0;S->Provisioning=FALSE;S->ProvisioningCipher=0;}
     S->SignalAt=S->SignalAttemptAt=S->ReachabilityAt=0;S->AssocIndicated=FALSE;S->SaeRequested=S->SaeAwaitOs=S->SaeConfirmSent=S->SaePeerConfirm=FALSE;S->SaeTxLength=0;RtlSecureZeroMemory(S->SaeTx,sizeof(S->SaeTx));KeReleaseSpinLock(&S->Lock,Irql);
 }
 static void S8ScanFinish(S8 *S,NTSTATUS Status);
@@ -346,7 +376,6 @@ static void S8FinishReset(S8 *S,NTSTATUS Status)
         RtlZeroMemory(&S->RoamAp,sizeof(S->RoamAp));
     }
     if(S->ResetPending){S->ResetPending=FALSE;S8Indicate(S,&S->ResetHeader,S->ResetMessage==WDI_TASK_DISCONNECT?WDI_INDICATION_DISCONNECT_COMPLETE:WDI_INDICATION_DOT11_RESET_COMPLETE,Status);}
-    if(!NT_SUCCESS(Status))WcnLog(D,"stage8: teardown failed status=0x%x; ownership retained, reconnect blocked",Status);
 }
 static void S8CancelPendingRoam(S8 *S,NTSTATUS Status)
 {if(S->RoamPending){S->RoamPending=FALSE;S->ConnectBssSize=0;RtlSecureZeroMemory(&S->Ft,sizeof(S->Ft));RtlZeroMemory(&S->RoamAp,sizeof(S->RoamAp));S8Indicate(S,&S->RoamHeader,WDI_INDICATION_ROAM_COMPLETE,Status);S8SetLink(S,false);}}
@@ -354,6 +383,9 @@ static void S8ConnectFailure(S8 *S,const WDI_MESSAGE_HEADER &H,const UCHAR Mac[6
 {
     WDI_ASSOCIATION_RESULT_CONTAINER A;RtlCopyMemory(A.BSSID.Address,Mac,6);
     A.AssociationResultParameters.AssociationStatus=Reason;A.AssociationResultParameters.BandID=Band;
+    if(S->J->Ap.Auth==WCN_AUTH_OWE&&S->AssocResponseSize>=30){A.AssociationResultParameters.AuthAlgorithm=WDI_AUTH_ALGO_OWE;A.AssociationResultParameters.StatusCode=Jle16(S->AssocResponse+26);
+        A.Optional.AssociationResponseFrame_IsPresent=TRUE;A.AssociationResponseFrame.SimpleAssign(S->AssocResponse+24,S->AssocResponseSize-24);
+        if(S->AssocRequestSize>=28){A.Optional.AssociationRequestFrame_IsPresent=TRUE;A.AssociationRequestFrame.SimpleAssign(S->AssocRequest+24,S->AssocRequestSize-24);}}
     WDI_INDICATION_ASSOCIATION_RESULT_LIST List;List.AssociationResults.SimpleAssign(&A,1);UCHAR *Out=nullptr;ULONG N=0;
     if(GenerateWdiIndicationAssociationResultFromIhv(&List,0,&S->Tlv,&N,&Out)==NDIS_STATUS_SUCCESS){
         S8Indicate(S,&H,WDI_INDICATION_ASSOCIATION_RESULT,STATUS_SUCCESS,Out,N,true);FreeGenerated(Out);}
@@ -371,23 +403,22 @@ static void S8ResetSession(S8 *S,bool Aborted=false)
         P.Optional.NeedPeerStateCleanup_IsPresent=TRUE;P.NeedPeerStateCleanup=FALSE;UCHAR *Out=nullptr;ULONG N=0;
         if(GenerateWdiIndicationDisassociationFromIhv(&P,0,&S->Tlv,&N,&Out)==NDIS_STATUS_SUCCESS){S8Indicate(S,&S->ConnectHeader,WDI_INDICATION_DISASSOCIATION,STATUS_SUCCESS,Out,N,true);FreeGenerated(Out);}
     }
-    if(!S->RoamPending)S8SetLink(S,false);S8ClearStaging(S);
+    if(!S->RoamPending)S8SetLink(S,false);
     if(S->KeyRequest){S8Complete(S->KeyRequest,STATUS_CANCELLED,0);S->KeyRequest=nullptr;}
     RtlSecureZeroMemory(S->Keys,sizeof(S->Keys));S->KeyCount=S->KeyNext=0;S->KeyDelete=FALSE;
     if(S->ConnectPending){S->ConnectPending=FALSE;bool Cancel=Aborted||S->Limited||S->ResetPending;
         S8ConnectFailure(S,S->ConnectHeader,J->Ap.Bssid,WcnIs2g(J->Ap.Frequency)?WDI_BAND_ID_2400:WDI_BAND_ID_5000,Cancel?WDI_ASSOC_STATUS_ABORTED:WDI_ASSOC_STATUS_FAILURE);
         S8Indicate(S,&S->ConnectHeader,S->Roaming?WDI_INDICATION_ROAM_COMPLETE:WDI_INDICATION_CONNECT_COMPLETE,Cancel?(NTSTATUS)NDIS_STATUS_REQUEST_ABORTED:STATUS_CONNECTION_DISCONNECTED);}
-    S->Connect=S->Roaming=FALSE;
-    if(D->Mhi.SysErr||D->Mhi.RddmSaved||D->Dp.Failed||D->Ce.SourceFailed||D->Runtime.RuntimeErrors){S8FinishReset(S,STATUS_DEVICE_HARDWARE_ERROR);return;}
+    S8ClearStaging(S);S->Connect=S->Roaming=FALSE;
+    if(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Dp.Failed||D->Ce.SourceFailed||D->Runtime.RuntimeErrors){S8FinishReset(S,STATUS_DEVICE_HARDWARE_ERROR);return;}
     if(!J->Started&&!J->PeerCreated&&!J->VdevStarted){S8FinishReset(S,STATUS_SUCCESS);return;}
     S->Resetting=J->Resetting=TRUE;S->ResetStep=J->ReoReleaseStep=0;J->ReoReleaseAt=0;S->ResetAt=WcnNowMs();
     J->VdevStopConfirmed=J->PeerDeleteConfirmed=J->PeerUnmapped=FALSE;
-
 }
 static void S8ResetService(S8 *S)
 {
     auto D=S->D;auto J=S->J;if(!S->Resetting)return;
-    if(D->Mhi.SysErr||D->Mhi.RddmSaved||D->Dp.Failed||D->Ce.SourceFailed||D->Runtime.RuntimeErrors){S8FinishReset(S,STATUS_DEVICE_HARDWARE_ERROR);return;}
+    if(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Dp.Failed||D->Ce.SourceFailed||D->Runtime.RuntimeErrors){S8FinishReset(S,STATUS_DEVICE_HARDWARE_ERROR);return;}
     if(WcnNowMs()-S->ResetAt>15000){S8FinishReset(S,STATUS_IO_TIMEOUT);return;}
     NTSTATUS St=STATUS_SUCCESS;
     switch(S->ResetStep){
@@ -421,12 +452,14 @@ static NTSTATUS S8Connect(S8 *S,const WDI_MESSAGE_HEADER &H,const UCHAR *P,ULONG
         return (NTSTATUS)NDIS_STATUS_REQUEST_ABORTED;
     }
     if(S->D->Scan.Passed&&Qp.SSIDList.ElementCount==1){
-        auto Q=&Qp;auto Name=&Q->SSIDList.pElements[0];WCN_JOIN_AP Selected={};WDI_CONNECT_BSS_ENTRY_CONTAINER *SelectedEntry=nullptr;UCHAR Frame[2048];
+        auto Q=&Qp;auto Name=&Q->SSIDList.pElements[0];WCN_JOIN_AP Selected={};WDI_CONNECT_BSS_ENTRY_CONTAINER *SelectedEntry=nullptr;UCHAR Frame[2048],Extra[768],SelectedExtra[768];ULONG SelectedExtraLength=0;bool SelectedWps=false;
         ULONG Auth=Q->AuthenticationAlgorithms.ElementCount==1?(ULONG)Q->AuthenticationAlgorithms.pElements[0]:0;
         BOOLEAN Pmf=Q->ConnectionSettings.MFPEnabled;ULONG Cipher=Auth==WCN_AUTH_OPEN?WDI_CIPHER_ALGO_NONE:WDI_CIPHER_ALGO_CCMP;
+        if(!S->P2pRole&&Auth==WCN_AUTH_OPEN&&S8CipherAllowed(Q->UnicastCipherAlgorithms,WDI_CIPHER_ALGO_WEP)&&S8CipherAllowed(Q->MulticastCipherAlgorithms,WDI_CIPHER_ALGO_WEP))Cipher=WDI_CIPHER_ALGO_WEP;
         bool Good=Name->ElementCount>=1&&Name->ElementCount<=32&&WcnAuthSupported(Auth)&&(!Pmf||S->PmfAvailable)&&(!WcnAuthNeedsPmf(Auth)||Pmf)&&
             S8CipherAllowed(Q->UnicastCipherAlgorithms,Cipher)&&S8CipherAllowed(Q->MulticastCipherAlgorithms,Cipher);
         if(Roam&&(Name->ElementCount!=S->J->SsidLength||!Jeq(Name->pElements,S->J->Ssid,Name->ElementCount)||Auth!=S->J->Ap.Auth||Pmf!=S->J->Ap.Pmf))Good=false;
+        if(Auth==WCN_AUTH_OWE&&!WcnOweDhGroup(S->OweDh,S->OweDhLength))Good=false;
         S->ConnectBssSize=0;
         bool Wps=S->P2pRole&&S->WpsEnabled&&(Auth==WCN_AUTH_OPEN||Auth==WCN_AUTH_PSK);
         if(S->P2pRole&&Auth!=WCN_AUTH_PSK&&Auth!=WCN_AUTH_SAE&&!Wps)Good=false;
@@ -444,20 +477,30 @@ static NTSTATUS S8Connect(S8 *S,const WDI_MESSAGE_HEADER &H,const UCHAR *P,ULONG
             }else for(ULONG K=0;K<S8Cache(S)->BssCount;K++){
                 auto E=&S8Cache(S)->Bss[K];if(Jeq(B->BSSID.Address,E->Bytes+16,6)&&WcnNowMs()-E->At<=30000){F=E->Bytes;Length=E->Length;Frequency=E->Frequency;Rssi=E->Rssi;break;}}
             if(!F||Rssi>=0||Rssi<=-127||(S->Secondary&&(WcnIs2g(Frequency)==WcnIs2g(S->D->Join.Ap.Frequency)||!WcnTripleChannel(S->D->Join.Ap.Frequency,Frequency,WcnHotspotFrequency(S->D)))))continue;
+            ULONG ExtraLength=0;bool CandidateWps=Wps;
+            if(!S->P2pRole){auto &Common=Q->AssociationRequestVendorIE;auto &Specific=B->AssociationRequestVendorIE;
+                ExtraLength=WcnExtraIesMerge(Common.pElements,Common.ElementCount,B->Optional.AssociationRequestVendorIE_IsPresent?Specific.pElements:nullptr,B->Optional.AssociationRequestVendorIE_IsPresent?Specific.ElementCount:0,Extra,sizeof(Extra));
+                if(ExtraLength==MAXULONG)continue;UCHAR Type;LONG Info=WcnWpsInfo(Extra,ExtraLength,&Type);if(Info<0)continue;
+                CandidateWps=Info==1&&(Type==1||Type==2)&&(Auth==WCN_AUTH_OPEN||Auth==WCN_AUTH_PSK);
+                // MFPEnabled permits PMF advertisement; WCN Open/WEP enrollment has no RSN/PMF.
+                if((Cipher==WDI_CIPHER_ALGO_WEP&&!CandidateWps)||(Info==1&&(!CandidateWps||Roam||(Pmf&&Cipher!=WDI_CIPHER_ALGO_WEP))))continue;}
             WCN_JOIN_AP Candidate;UCHAR Akm,Mode;if(!S8FtCandidate(S,*B,F,Length,Auth,&Akm,&Mode))continue;
-            if(!(S->DisabledBands&(WcnIs2g(Frequency)?1u:2u))&&WcnJoinCandidate(S->D,F,Length,Frequency,Rssi,Name->pElements,Name->ElementCount,Wps?WCN_AUTH_PSK:Auth,Pmf,Wps?2:Akm,Q->ConnectionSettings.HiddenNetwork,&Candidate)){
+            bool Match=!(S->DisabledBands&(WcnIs2g(Frequency)?1u:2u))&&WcnJoinCandidate(S->D,F,Length,Frequency,Rssi,Name->pElements,Name->ElementCount,CandidateWps?WCN_AUTH_PSK:Auth,CandidateWps?FALSE:Pmf,CandidateWps?2:Akm,Q->ConnectionSettings.HiddenNetwork,&Candidate);
+            if(!Match&&CandidateWps&&!S->P2pRole&&!(S->DisabledBands&(WcnIs2g(Frequency)?1u:2u)))Match=WcnJoinCandidate(S->D,F,Length,Frequency,Rssi,Name->pElements,Name->ElementCount,WCN_AUTH_OPEN,FALSE,0,Q->ConnectionSettings.HiddenNetwork,&Candidate);
+            if(Match){
                 if(S->P2pRole){UCHAR Capability[2];ULONG L;if(!P2pAttributesValid(F+36,Length-36)||!P2pAttr(F+36,Length-36,2,Capability,sizeof(Capability),&L)||L!=2||!(Capability[1]&1))continue;}
-                if(Wps){static const UCHAR WpsOui[]={0,0x50,0xf2,4};if(Length<36||!P2pVendor(F+36,Length-36,WpsOui))continue;Candidate.Auth=Auth;Candidate.Pmf=FALSE;Candidate.Akm=Auth==WCN_AUTH_OPEN?0:2;}
+                if(CandidateWps){static const UCHAR WpsOui[]={0,0x50,0xf2,4};if(Length<36||!P2pVendor(F+36,Length-36,WpsOui))continue;UCHAR Type;if(!S->P2pRole&&WcnWpsInfo(F+36,Length-36,&Type)!=1)continue;Candidate.Auth=Auth;Candidate.Pmf=FALSE;Candidate.Akm=Auth==WCN_AUTH_OPEN?0:2;}
                 if(S->Secondary&&!WcnHotspotTriple(S->D,&S->D->Join.Ap,&Candidate))continue;
-                Candidate.FtMode=Mode;Candidate.HasPmkid=B->Optional.PMKID_IsPresent&&Auth!=WCN_AUTH_OPEN&&Auth!=WCN_AUTH_SAE;if(Candidate.HasPmkid)RtlCopyMemory(Candidate.Pmkid,B->PMKID.pElements,16);
-                if(!Selected.Valid||WcnPhyScore(&Candidate)>WcnPhyScore(&Selected)){Selected=Candidate;SelectedEntry=B;S->ConnectBssSize=Length-24;RtlCopyMemory(S->ConnectBss,F+24,S->ConnectBssSize);}}
+                Candidate.FtMode=Mode;Candidate.HasPmkid=!CandidateWps&&B->Optional.PMKID_IsPresent&&Auth!=WCN_AUTH_OPEN&&Auth!=WCN_AUTH_SAE;if(Candidate.HasPmkid)RtlCopyMemory(Candidate.Pmkid,B->PMKID.pElements,16);
+                if(!Selected.Valid||WcnPhyScore(&Candidate)>WcnPhyScore(&Selected)){Selected=Candidate;SelectedEntry=B;SelectedWps=CandidateWps;SelectedExtraLength=ExtraLength;if(ExtraLength)RtlCopyMemory(SelectedExtra,Extra,ExtraLength);S->ConnectBssSize=Length-24;RtlCopyMemory(S->ConnectBss,F+24,S->ConnectBssSize);}}
         }
 
         if(Selected.Valid){
             if(S->P2pRole){if(Roam){Cleanup();return STATUS_NOT_SUPPORTED;}St=P2pConnectIes(S,Q->AssociationRequestVendorIE,SelectedEntry->Optional.AssociationRequestVendorIE_IsPresent?&SelectedEntry->AssociationRequestVendorIE:nullptr,Wps);if(!NT_SUCCESS(St)){Cleanup();return St;}}
             St=S8FtPrepare(S,*SelectedEntry,Selected);if(!NT_SUCCESS(St)){Cleanup();return St;}
+            if(!S->P2pRole){RtlZeroMemory(S->AssocVendor,sizeof(S->AssocVendor));S->AssocVendorLength=SelectedExtraLength;if(SelectedExtraLength)RtlCopyMemory(S->AssocVendor,SelectedExtra,SelectedExtraLength);}
             if(Roam){S->RoamAp=Selected;S->RoamHeader=H;S->RoamPending=TRUE;S8ResetSession(S);St=STATUS_SUCCESS;Cleanup();return St;}
-            S->J->PeerSeenAt=0;S->J->TxMcs=S->J->RxMcs=MAXULONG;S->J->Ap=Selected;S->Provisioning=Wps;S->J->SsidLength=(UCHAR)Name->ElementCount;
+            S->J->PeerSeenAt=0;S->J->TxMcs=S->J->RxMcs=MAXULONG;S->J->Ap=Selected;S->Provisioning=SelectedWps;S->ProvisioningCipher=SelectedWps?Cipher:0;S->J->SsidLength=(UCHAR)Name->ElementCount;
             RtlZeroMemory(S->J->Ssid,32);RtlCopyMemory(S->J->Ssid,Name->pElements,Name->ElementCount);
             S->Connect=TRUE;S->ConnectPending=TRUE;S->ConnectAt=WcnNowMs();S->ConnectHeader=H;St=STATUS_SUCCESS;
         }
@@ -482,13 +525,16 @@ static NTSTATUS S8Scan(S8 *S,const WDI_MESSAGE_HEADER &H,const UCHAR *P,ULONG N)
         if(Params.SSIDList.ElementCount>1)St=STATUS_NOT_SUPPORTED; // Matches advertised ScanSSIDListSize.
         else if(Params.SSIDList.ElementCount){auto Name=&Params.SSIDList.pElements[0];if(Name->ElementCount>32||(Name->ElementCount&&!Name->pElements))St=STATUS_INVALID_PARAMETER;
             else{Target.SsidLength=(UCHAR)Name->ElementCount;if(Name->ElementCount)RtlCopyMemory(Target.Ssid,Name->pElements,Name->ElementCount);}}
-        Target.Active=Type==WDI_SCAN_TYPE_ACTIVE_ONLY||(Type==WDI_SCAN_TYPE_AUTO&&Target.SsidLength);
+        Target.Active=Type==WDI_SCAN_TYPE_PASSIVE_ONLY?0:Type==WDI_SCAN_TYPE_ACTIVE_ONLY?1:2;
+        if(Params.Optional.VendorIEs_IsPresent){auto &Ie=Params.VendorIEs;UCHAR Request;LONG Info=WcnWpsInfo(Ie.pElements,Ie.ElementCount,&Request);
+            if(!WcnExtraIesValid(Ie.pElements,Ie.ElementCount)||Info<0)St=STATUS_INVALID_PARAMETER;
+            else{Target.IeLength=Ie.ElementCount;if(Ie.ElementCount)RtlCopyMemory(Target.Ies,Ie.pElements,Ie.ElementCount);}}
         RtlCopyMemory(Target.Bssid,Params.BSSID.Address,6);UCHAR Any=0;bool Broadcast=true;
         for(ULONG I=0;I<6;I++){Any|=Target.Bssid[I];if(Target.Bssid[I]!=255)Broadcast=false;}
         if(!Any)RtlFillMemory(Target.Bssid,6,255);else if(!Broadcast&&(Target.Bssid[0]&1))St=STATUS_INVALID_PARAMETER;
         if(NT_SUCCESS(St))for(ULONG I=0;I<S->D->Scan.ChannelCount;I++){
             auto C=&S->D->Scan.Channel[I];ULONG F=C->Frequency;
-            if((S->DisabledBands&(WcnIs2g(F)?1u:2u))||(S->Secondary&&(WcnIs2g(F)==WcnIs2g(S->D->Join.Ap.Frequency)||!WcnTripleChannel(S->D->Join.Ap.Frequency,F,WcnHotspotFrequency(S->D))))||(Target.Active&&!WcnProbeAllowed(F,C->Flags)))continue;
+            if((S->DisabledBands&(WcnIs2g(F)?1u:2u))||(S->Secondary&&(WcnIs2g(F)==WcnIs2g(S->D->Join.Ap.Frequency)||!WcnTripleChannel(S->D->Join.Ap.Frequency,F,WcnHotspotFrequency(S->D))))||(Target.Active==1&&!WcnProbeAllowed(F,C->Flags)))continue;
             bool Allowed=!Params.Optional.BandChannelList_IsPresent||!Params.BandChannelList.ElementCount;
             for(ULONG K=0;K<Params.BandChannelList.ElementCount;K++){auto B=&Params.BandChannelList.pElements[K];if(B->BandID!=(WcnIs2g(F)?WDI_BAND_ID_2400:WDI_BAND_ID_5000))continue;
                 if(!B->ChannelList.ElementCount)Allowed=true;for(ULONG Cn=0;Cn<B->ChannelList.ElementCount;Cn++)if(B->ChannelList.pElements[Cn]==WcnFrequencyChannel(F))Allowed=true;}
@@ -546,6 +592,8 @@ static void S8Handle(S8 *S,WIFIREQUEST R)
     case WDI_TASK_ROAM:
         S8Complete(R,STATUS_SUCCESS);St=S8Connect(S,H,P,N,Id==WDI_TASK_ROAM);
         if(!NT_SUCCESS(St))S8Indicate(S,&H,Id==WDI_TASK_ROAM?WDI_INDICATION_ROAM_COMPLETE:WDI_INDICATION_CONNECT_COMPLETE,St);return;
+    case WDI_SET_P2P_WPS_ENABLED:St=S8WpsCommand(S,H,P,N);break;
+    case WDI_SET_OWE_DH_IE:St=S8OweCommand(S,H,P,N);break;
     case WDI_SET_FAST_BSS_TRANSITION_PARAMETERS:St=S8FtCommand(S,H,P,N);break;
     case WDI_SET_SAE_AUTH_PARAMS:St=S8SaeCommand(S,&H,P,N);break;
     case WDI_SET_ADD_CIPHER_KEYS:
@@ -577,7 +625,6 @@ static void S8Handle(S8 *S,WIFIREQUEST R)
          * vdev and re-arm scans/reconnect; never claim a full MAC re-init. */
         if(S->ResetPending){S8Complete(R,STATUS_DEVICE_BUSY);return;}
         S8CancelPendingRoam(S,(NTSTATUS)NDIS_STATUS_REQUEST_ABORTED);S8Complete(R,STATUS_SUCCESS);S->ResetPending=TRUE;S->ResetHeader=H;S->ResetMessage=Id;S8ResetSession(S);return;
-
     }
     S8Complete(R,St);
 }
@@ -622,8 +669,7 @@ static void S8ScanService(S8 *S)
     if(S->ScanPending&&!S->ScanAborting){
         NTSTATUS St=STATUS_SUCCESS;bool Finish=false;
         if(!S->Radio||D->Scan.Failed){St=STATUS_DEVICE_NOT_READY;Finish=true;}
-        else if(!S->ScanIssued&&(S->J->CsaState||S->ActionPending||S->RoamPending||S->ConnectPending||S->KeyRequest||(S->Connect&&!S->J->Authorized))){}
-        else if(!S->ScanIssued&&(OtherScan||WcnP2pScanOwned(D))){}
+        else if(!(!S->ScanIssued&&(S->J->CsaState||S->ActionPending||S->RoamPending||S->ConnectPending||S->KeyRequest||(S->Connect&&!S->J->Authorized)))) if(!S->ScanIssued&&(OtherScan||WcnP2pScanOwned(D))){}
         else if(!S->ScanIssued&&S->P2pRole&&!WcnStage8SecondaryIdle(D)){}
         else if(!S->ScanIssued&&!S->J->Created){St=WcnStage7EnsureVdev(D,S->J);if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St))Finish=true;}
         else if(!S->ScanIssued&&S->J->VdevAt&&WcnNowMs()-S->J->VdevAt<200){}
@@ -656,8 +702,8 @@ static void S8Service(S8 *S)
 {
     if(!S)return;auto D=S->D;if(S->Stopped&&!S->Secondary&&!S->P2pRole)return;S8SecondaryPolicy(S);
     if(S->P2pRole&&!S->HotspotRole&&S->AdapterGone&&(S->Connect||S->J->Started)&&!S->Resetting&&!S->Fatal){S->AssocIndicated=FALSE;S8ResetSession(S);}
-    if(!S->Fatal&&(D->Mhi.SysErr||D->Mhi.RddmSaved||D->Dp.Failed||D->Ce.SourceFailed)){
-        WcnLog(D,"stage8: fatal hardware state latched; no further firmware commands or automatic reset loop");S8ResetSession(S);
+    if(!S->Fatal&&(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Dp.Failed||D->Ce.SourceFailed)){
+        S8ResetSession(S);
     }
     if(D->Ce.WmiReady)KeSetEvent(&S->ReadyEvent,IO_NO_INCREMENT,FALSE);
     for(ULONG I=0;I<8;I++){KIRQL Irql;KeAcquireSpinLock(&S->Lock,&Irql);if(S->ReqHead==S->ReqTail){KeReleaseSpinLock(&S->Lock,Irql);break;}
@@ -666,19 +712,18 @@ static void S8Service(S8 *S)
     if(S->Fatal){return;}
     if(S->Resetting){return;}
     S8ScanService(S);
-    if(S->ConnectPending&&S->J->State>=9&&!S->J->Failed){NTSTATUS St=S8Association(S);if(!NT_SUCCESS(St)&&St!=STATUS_DEVICE_BUSY)WcnStage7Fail(D,S->J,"WiFiCx association-result generation");}
+    if(S->ConnectPending&&S->J->State>=9&&!S->J->Failed){NTSTATUS St=S8Association(S);if(!NT_SUCCESS(St)&&St!=STATUS_DEVICE_BUSY)WcnStage7Fail(S->J);}
     S8KeysService(S);
     if(S->AssocIndicated&&S->J->PairwiseInstalled&&S->J->GroupInstalled&&!S->J->Authorized&&!S->J->Failed&&
        (!S->J->Ap.Pmf||S->J->Igtk[0].Valid||S->J->Igtk[1].Valid)){
-        NTSTATUS St=S8Authorize(S);if(!NT_SUCCESS(St)&&St!=STATUS_DEVICE_BUSY)WcnStage7Fail(D,S->J,"OS controlled-port authorization transport");
+        NTSTATUS St=S8Authorize(S);if(!NT_SUCCESS(St)&&St!=STATUS_DEVICE_BUSY)WcnStage7Fail(S->J);
     }
     if(S->LinkUp&&S->UnreachableMs){LONGLONG Last=S->J->PeerSeenAt>S->SignalAt?S->J->PeerSeenAt:S->SignalAt;
         if(WcnPeerExpired(WcnNowMs(),Last,S->UnreachableMs,S->J->CsaState||(D->Scan.ScanSent&&!D->Scan.ScanCompleted&&!D->Scan.Failed),&S->ReachabilityAt))
-            WcnStage7Fail(D,S->J,"OS-configured peer reachability deadline while on channel; no recent beacon, RX or TX ACK");}
-    if(S->ConnectPending&&WcnNowMs()-S->ConnectAt>24000)WcnStage7Fail(D,S->J,"OS connect deadline");
-    if(S->J->Failed&&!S->FailureReported&&!S->Resetting&&!S->Fatal){S->FailureReported=TRUE;WcnLog(D,"stage8: FAIL actual hardware/MLME failure; system link down");S8ResetSession(S);}
+            WcnStage7Fail(S->J);}
+    if(S->ConnectPending&&WcnNowMs()-S->ConnectAt>24000)WcnStage7Fail(S->J);
+    if(S->J->Failed&&!S->FailureReported&&!S->Resetting&&!S->Fatal){S->FailureReported=TRUE;S8ResetSession(S);}
     S8ActionService(S);S8QueuesService(S);S8Signal(S);
-
 }
 extern "C" VOID WcnStage8ChannelChanged(PWCN_DEVICE D,PWCN_JOIN J)
 {auto S=S8Station(D,J);if(S&&S->LinkUp)S8SetLink(S,true);}
@@ -690,14 +735,20 @@ static void S8StopState(S8 *S)
     while(S->ReqTail!=S->ReqHead){auto R=S->Requests[S->ReqTail];S->ReqTail=(S->ReqTail+1)%32;S8Complete(R,STATUS_CANCELLED,0);}
     if(S->KeyRequest){S8Complete(S->KeyRequest,STATUS_CANCELLED,0);S->KeyRequest=nullptr;}
     RtlSecureZeroMemory(S->Keys,sizeof(S->Keys));S8SetLink(S,false);
-
 }
 
 extern "C" VOID WcnStage8Stop(PWCN_DEVICE D)
 {WcnP2pStop(D);if(D->P2pClient)S8StopState((S8*)D->RoleStage8);HotspotStop(D);S8StopState((S8*)D->SecondaryStage8);S8StopState((S8*)D->Stage8);}
 
 extern "C" ULONG WcnStage8AssocIes(PWCN_DEVICE D,PWCN_JOIN J,UCHAR *Out,ULONG Capacity)
-{auto S=S8Station(D,J);if(!S||!S->P2pRole)return 0;if(S->AssocVendorLength>Capacity)return MAXULONG;RtlCopyMemory(Out,S->AssocVendor,S->AssocVendorLength);return S->AssocVendorLength;}
+{auto S=S8Station(D,J);if(!S)return 0;ULONG N=S->AssocVendorLength;
+ if(N>Capacity)return MAXULONG;
+ if(J->Ap.Auth==WCN_AUTH_OWE&&(!WcnOweDhGroup(S->OweDh,S->OweDhLength)||S->OweDhLength>Capacity-N))return MAXULONG;
+ if(N)RtlCopyMemory(Out,S->AssocVendor,N);
+ if(J->Ap.Auth==WCN_AUTH_OWE){RtlCopyMemory(Out+N,S->OweDh,S->OweDhLength);N+=S->OweDhLength;}return N;}
 
 extern "C" BOOLEAN WcnStage8Provisioning(PWCN_DEVICE D,PWCN_JOIN J)
 {auto S=S8Station(D,J);return S&&S->Provisioning;}
+
+extern "C" BOOLEAN WcnStage8OweResponse(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *Ies,ULONG Length)
+{auto S=S8Station(D,J);return S&&WcnOweResponse(Ies,Length,WcnOweDhGroup(S->OweDh,S->OweDhLength),J->Ap.HasPmkid?J->Ap.Pmkid:nullptr);}

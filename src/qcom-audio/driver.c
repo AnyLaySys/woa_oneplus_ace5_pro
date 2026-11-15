@@ -36,14 +36,17 @@ static VOID
 SiaWorker (PVOID Context)
 {
     PSIA_DEVICE Dev = Context;
-    BOOLEAN LinkReady = FALSE;
+    BOOLEAN LinkReady = FALSE, TimerHeld = FALSE;
     NTSTATUS Status;
     LARGE_INTEGER Wait;
     for (;;) {
-        Wait.QuadPart = -200000LL;
+        BOOLEAN Fast=Dev->Link && QCH_FAST_POLL(&Dev->Link->Charge);
+        if(Fast && !TimerHeld){ExSetTimerResolution(10000,TRUE);TimerHeld=TRUE;}
+        if(!Fast && TimerHeld){ExSetTimerResolution(0,FALSE);TimerHeld=FALSE;}
+        Wait.QuadPart = Fast?-10000LL:-200000LL;
         KeWaitForSingleObject (&Dev->WorkEvent, Executive, KernelMode, FALSE, &Wait);
         if (Dev->Stopping) break;
-        ExSetTimerResolution (10000, TRUE);
+        if(!TimerHeld)ExSetTimerResolution (10000, TRUE);
         Status = STATUS_SUCCESS;
         if (!LinkReady) {
             Status = SiaLinkStart (Dev);
@@ -59,8 +62,9 @@ SiaWorker (PVOID Context)
         KeSetEvent (&Dev->Stream[Index].IdleEvent, IO_NO_INCREMENT, FALSE);
             }
         }
-        ExSetTimerResolution (0, FALSE);
+        if(!TimerHeld)ExSetTimerResolution (0, FALSE);
     }
+    if(TimerHeld)ExSetTimerResolution(0,FALSE);
     SiaLinkStop (Dev);
     for (ULONG Index = 0; Index < 2; Index++) {
         KeSetEvent (&Dev->Stream[Index].ReadyEvent, IO_NO_INCREMENT, FALSE);

@@ -1,7 +1,5 @@
-/*
- * apps RSC ("RPMh") DRV-2 vote for the touch panel rails on hummer (SM8750).
- */
 #include "hummer_rpmh.h"
+#include "../../qcom-gpu/rpmh-lock.h"
 
 #define HR_TCS_OFF        0xD00u
 #define HR_TCS_STRIDE     0x2A0u
@@ -55,11 +53,6 @@ HrWr (
     KeMemoryBarrier ();
 }
 
-/*
- * All waits are hard bounded: this code runs during device start, so a wedged
- * RSC must fail the vote, never the boot. KeStallExecutionProcessor is used
- * instead of a thread sleep so it is safe regardless of IRQL.
- */
 static
 VOID
 HrWaitUs (
@@ -218,7 +211,7 @@ HrpmhInit (
     Id = HrRd (Ctx->Rsc, 0);
     Config = HrRd (Ctx->Rsc, 0x0C);
     Ctx->Major = (Id >> 16) & 0xFFu;
-    Ctx->Minor = (Id >> 8) & 0xFFu;
+
     DbMagic = HrRd (Ctx->Db, 4);
 
     NTcs = (Config >> (6u * HR_DRV)) & 0x3Fu;
@@ -408,63 +401,43 @@ cleanup:
     return NT_SUCCESS(NtStatus) ? STATUS_IO_DEVICE_ERROR : NtStatus;
 }
 
-NTSTATUS
-HrpmhVoteLdo (
+static NTSTATUS
+VoteLdoLocked (
     _In_ PHRPMH Ctx,
     _In_ ULONG  Id,
     _In_ ULONG  MilliVolts
     )
 {
-    static const CHAR *const Suffix[3] = { "_E0", "_E1", "" };
-    CHAR Name[12];
-    NTSTATUS Last;
-    ULONG S;
-    ULONG ExpectedAddress;
-
-    if (Ctx == NULL || !Ctx->Initialized || Ctx->Faulted) {
-        return STATUS_INVALID_DEVICE_STATE;
+    static const CHAR *const Names[2][4] = {
+        { "L4B_E0", "L4B_E1", "L4B", "ldob4" },
+        { "L16B_E0", "L16B_E1", "L16B", "ldob16" }
+    };
+    ULONG index = Id == 4 ? 0 : 1;
+    ULONG address = Id == 4 ? 0x40800u : 0x41900u;
+    for (ULONG i = 0; i < RTL_NUMBER_OF(Names[0]); i++) {
+        NTSTATUS status = HrVote(Ctx, Names[index][i], MilliVolts, address);
+        if (status != STATUS_NOT_FOUND) return status;
     }
-    if ((Id != 4 || MilliVolts != 1800) && (Id != 16 || MilliVolts != 3104)) {
-        return STATUS_INVALID_PARAMETER;
+    return STATUS_NOT_FOUND;
+}
+
+NTSTATUS
+HrpmhVoteLdo (
+    _In_ PHRPMH Ctx,
+    _In_ ULONG Id,
+    _In_ ULONG MilliVolts
+    )
+{
+    if (Ctx == NULL || !Ctx->Initialized || Ctx->Faulted) return STATUS_INVALID_DEVICE_STATE;
+    if ((Id != 4 || MilliVolts != 1800) && (Id != 16 || MilliVolts != 3104)) return STATUS_INVALID_PARAMETER;
+    RPMH_LOCK_GUARD Guard = {0};
+    NTSTATUS Status = RpmhLockAcquire(&Guard);
+    if (Status != STATUS_SUCCESS) return Status;
+    __try {
+        Status = VoteLdoLocked(Ctx, Id, MilliVolts);
+    } __finally {
+        NTSTATUS Released = RpmhLockRelease(&Guard);
+        if (NT_SUCCESS(Status) && !NT_SUCCESS(Released)) Status = Released;
     }
-    ExpectedAddress = Id == 4 ? 0x40800u : 0x41900u;
-    Last = STATUS_NOT_FOUND;
-
-    for (S = 0; S < 4; S++) {
-        ULONG P = 0;
-        const CHAR *Q;
-
-        if (S < 3) {
-            Name[P++] = 'L';
-            if (Id >= 10) {
-                Name[P++] = (CHAR)('0' + Id / 10u);
-            }
-            Name[P++] = (CHAR)('0' + Id % 10u);
-            Name[P++] = 'B';
-            Q = Suffix[S];
-            while (*Q != 0) {
-                Name[P++] = *Q++;
-            }
-        } else {
-            Name[P++] = 'l';
-            Name[P++] = 'd';
-            Name[P++] = 'o';
-            Name[P++] = 'b';
-            if (Id >= 10) {
-                Name[P++] = (CHAR)('0' + Id / 10u);
-            }
-            Name[P++] = (CHAR)('0' + Id % 10u);
-        }
-        Name[P] = 0;
-
-        Last = HrVote (Ctx, Name, MilliVolts, ExpectedAddress);
-        if (NT_SUCCESS (Last)) {
-            return STATUS_SUCCESS;
-        }
-        if (Last != STATUS_NOT_FOUND) {
-            return Last;
-        }
-    }
-
-    return Last;
+    return Status;
 }

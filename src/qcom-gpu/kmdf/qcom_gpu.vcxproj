@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|ARM64"><Configuration>Debug</Configuration><Platform>ARM64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM64"><Configuration>Release</Configuration><Platform>ARM64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{46A57D08-41C1-4AF1-AA92-D2FE8B842CDE}</ProjectGuid>
+    <RootNamespace>qcom_gpu</RootNamespace>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <Platform Condition="'$(Platform)' == ''">ARM64</Platform>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.props" />
+  <PropertyGroup>
+    <TargetName>qcom_gpu</TargetName>
+    <KmdfLibraryVersion>1.33</KmdfLibraryVersion>
+    <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
+    <GpuVersionDate Condition="'$(GpuVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</GpuVersionDate>
+    <GpuRevision>26</GpuRevision>
+    <GpuDriverDate>$([System.DateTime]::Parse('$(GpuVersionDate)').ToString('MM/dd/yyyy'))</GpuDriverDate>
+    <GpuDriverVersion>$([System.DateTime]::Parse('$(GpuVersionDate)').ToString('yy.M.d')).$(GpuRevision)</GpuDriverVersion>
+    <GpuDriverVersionComma>$([System.String]::Copy('$(GpuDriverVersion)').Replace('.', ','))</GpuDriverVersionComma>
+    <WoAProjectRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..'))</WoAProjectRoot>
+    <OutDir>$(WoAProjectRoot)\out\qcom-gpu\$(Platform)\$(Configuration)\bin\</OutDir>
+    <IntDir>$(WoAProjectRoot)\out\qcom-gpu\$(Platform)\$(Configuration)\obj\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>..;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <WarningLevel>Level4</WarningLevel><Optimization>MinSpace</Optimization>
+    </ClCompile>
+    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>$(GpuDriverDate)</DateStamp><TimeStamp>$(GpuDriverVersion)</TimeStamp></Inf>
+    <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=$(GpuDriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(GpuDriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
+    <DriverSign><FileDigestAlgorithm>sha256</FileDigestAlgorithm></DriverSign>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\driver.c" /><ClInclude Include="..\uapi.h" />
+    <ResourceCompile Include="qcom_gpu.rc" />
+    <Inf Include="qcom_gpu.inx" /><FilesToPackage Include="$(TargetPath)" />
+  </ItemGroup>
+  <Import Project="..\core\core.vcxitems" />
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.targets" />
+</Project>

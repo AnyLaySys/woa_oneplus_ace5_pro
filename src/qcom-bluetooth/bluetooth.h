@@ -46,7 +46,7 @@ VOID QbtStop(QBT*);
 NTSTATUS QbtSend(QBT*, const UCHAR*, ULONG);
 ULONG QbtReceive(QBT*, UCHAR*, ULONG);
 NTSTATUS QbtFastClock(QBT*);
-NTSTATUS QbtFirmware(QBT*);
+NTSTATUS QbtHardwareStart(QBT*);
 VOID QbtIrqOff(QBT*);
 VOID QbtRuntimeFill(QBT*);
 EVT_WDF_INTERRUPT_ISR QbtIsr;

@@ -10,6 +10,7 @@
 #include "security-policy.h"
 #include "aggregation-policy.h"
 #include "hotspot.h"
+#include "p2p.h"
 #define JRXPPT (WCN_DP_RX_PPT_BASE<<9)
 static PWCN_DP_RING Dring(PWCN_DEVICE D,ULONG Id)
 {ULONG I;for(I=0;I<D->Dp.RingCount;I++)if(D->Dp.Ring[I].Id==Id)return &D->Dp.Ring[I];return NULL;}
@@ -19,7 +20,7 @@ static BOOLEAN Dpointer(PWCN_DEVICE D,PWCN_DP_RING R,ULONG *Value)
 {
     if(!R||!R->Desc.Buffer)return FALSE;
     *Value=((volatile ULONG*)D->Dp.Rdp.Va)[R->Id];KeMemoryBarrier();
-    if(*Value>=R->Entries*R->EntryDwords||*Value%R->EntryDwords){D->Runtime.RuntimeErrors++;WcnStage7FailAll(D,"invalid DMA ring pointer/alignment");return FALSE;}
+    if(*Value>=R->Entries*R->EntryDwords||*Value%R->EntryDwords){D->Runtime.RuntimeErrors++;WcnStage7FailAll(D);return FALSE;}
     return TRUE;
 }
 static VOID Dpublish(PWCN_DEVICE D,PWCN_DP_RING R)
@@ -28,7 +29,7 @@ static VOID Dpublish(PWCN_DEVICE D,PWCN_DP_RING R)
     if(R->Lmac)((volatile ULONG*)D->Dp.Wrp.Va)[R->Id-160]=R->Head;
     else WcnWrite(D,R->PointerReg+(R->Source?0:4),R->Head);
 }
-static VOID DhttStation(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *P,ULONG N)
+static VOID DhttStation(PWCN_JOIN J,const UCHAR *P,ULONG N)
 {
     ULONG Type,Info,I1,I2;
     if((!J->Started&&!J->Resetting)||(J->Failed&&!J->Resetting)||N<4)return;
@@ -36,14 +37,13 @@ static VOID DhttStation(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *P,ULONG N)
     if((Type==3||Type==0x1e||Type==0x2b)&&N>=16&&((Info>>8)&255)==J->Vdev){
         I1=Jle32(P+8);I2=Jle32(P+12);
         if(!Jeq(P+4,J->Ap.Bssid,4)||!Jeq(P+8,J->Ap.Bssid+4,2))return;
-        if(J->PeerMapped&&J->PeerId!=(Info>>16)){WcnStage7Fail(D,J,"peer map changed during connection");return;}
+        if(J->PeerMapped&&J->PeerId!=(Info>>16)){WcnStage7Fail(J);return;}
         J->PeerId=Info>>16;J->AstIndex=Type==0x2b?(I2&65535):(I1>>16);J->AstHash=Type==0x2b?(I2>>16):(I2&65535);J->PeerMapped=TRUE;
-
-    }else if((Type==4||Type==0x1f)&&J->PeerMapped&&(Info>>16)==J->PeerId){if(J->Resetting){J->PeerUnmapped=TRUE;}else WcnStage7Fail(D,J,"selected peer unmapped by firmware");}
+    }else if((Type==4||Type==0x1f)&&J->PeerMapped&&(Info>>16)==J->PeerId){if(J->Resetting){J->PeerUnmapped=TRUE;}else WcnStage7Fail(J);}
 }
 VOID WcnStage7Htt(PWCN_DEVICE D,const UCHAR *P,ULONG N)
-{DhttStation(D,&D->Join,P,N);DhttStation(D,&D->Secondary,P,N);if(D->P2pClient)DhttStation(D,&D->P2pJoin,P,N);WcnTdlsHtt(D,P,N);}
-VOID WcnStage7PeerHtt(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *P,ULONG N){DhttStation(D,J,P,N);}
+{DhttStation(&D->Join,P,N);DhttStation(&D->Secondary,P,N);if(D->P2pClient)DhttStation(&D->P2pJoin,P,N);WcnTdlsHtt(D,P,N);}
+VOID WcnStage7PeerHtt(PWCN_JOIN J,const UCHAR *P,ULONG N){DhttStation(J,P,N);}
 NTSTATUS WcnStage7DpInit(PWCN_DEVICE D,PWCN_JOIN J)
 {
     ULONG I,Tid,Ext,Ac,*Q;
@@ -79,7 +79,6 @@ NTSTATUS WcnStage7DpInit(PWCN_DEVICE D,PWCN_JOIN J)
             WcnWrite(D,Base+0x4c,High|0x100u);
             if(WcnRead(D,Base+0x48)!=Low||WcnRead(D,Base+0x4c)!=(High|0x100u)||WcnRead(D,Base+0x50)!=Vector)return STATUS_DEVICE_HARDWARE_ERROR;
         }
-
     }
     /* Each vdev owns two constant encapsulation banks. */
     WcnWrite(D,0xa4408c+J->Vdev*8,(1u<<1)|(1u<<9)|(1u<<11)|(1u<<14));
@@ -103,7 +102,7 @@ NTSTATUS WcnStage7Tx(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *F,ULONG N,BOOLEAN Cl
 NTSTATUS WcnDataTx(PWCN_DEVICE D,const UCHAR *F,ULONG N,BOOLEAN ClearEapol,ULONG Vdev,ULONG MacId,const UCHAR Local[6],const UCHAR Receiver[6],ULONG Ast,ULONG Hash,BOOLEAN LookupOverride)
 {
     PWCN_DP_RING R=Dring(D,24);ULONG I,Tail,Next,*B,Length=N;UCHAR *Out;ULONG64 Pa;
-    if(!D->Runtime.Ready||D->Mhi.SysErr||D->Mhi.RddmSaved||D->Dp.Failed)return STATUS_DEVICE_NOT_READY;
+    if(!D->Runtime.Ready||D->Mhi.SysErr||D->Mhi.RddmFailed||D->Dp.Failed)return STATUS_DEVICE_NOT_READY;
     if(N<14||N>1514||Vdev>2||MacId>1||((Vdev!=1||D->P2pClient)&&!Jeq(F+6,Local,6)))return STATUS_INVALID_PARAMETER;
     if(ClearEapol){if(Jbe16(F+12)!=0x888e)return STATUS_INVALID_PARAMETER;Length=N+18;}
     if(!Dpointer(D,R,&Tail))return STATUS_DEVICE_HARDWARE_ERROR;
@@ -149,15 +148,15 @@ static VOID DtxDone(PWCN_DEVICE D,const ULONG *B)
         Status=(Info&S7_TQM_TX_REASON_MASK)>>S7_TQM_TX_REASON_SHIFT;
         Ack=Status==S7_TQM_TX_FRAME_ACKED;
     }else{
-        WcnLog(D,"stage7: unexpected TX completion source=%u info=0x%x; no ownership release or ACK",Source,Info);
+
         goto Bad;
     }
     if(Source==S7_TX_SOURCE_TQM&&(D->Runtime.TxUsed[Cookie]&0x23)==1&&J&&(B[5]&1)&&((B[5]>>4)&15)>=2)J->TxMcs=(B[5]>>12)&15;
-    D->Runtime.TxCompleted++;
-    if(Ack){D->Runtime.TxAcked++;if(J&&!(D->Runtime.TxUsed[Cookie]&0x20))J->PeerSeenAt=WcnNowMs();}else if((D->Runtime.TxUsed[Cookie]&0x80)&&!D->P2pClient)WcnHotspotTxFailed(D);else WcnStage8TxFailed(D,Vdev);
+
+    if(Ack&&J&&!(D->Runtime.TxUsed[Cookie]&0x20))J->PeerSeenAt=WcnNowMs();
 
     RtlSecureZeroMemory(D->Runtime.TxDma.Va+Cookie*2048,2048);D->Runtime.TxUsed[Cookie]=0;return;
-Bad:D->Runtime.RuntimeErrors++;WcnStage7FailAll(D,"invalid/duplicate TX completion cookie, DMA identity or source");
+Bad:D->Runtime.RuntimeErrors++;WcnStage7FailAll(D);
 }
 
 /* NULL queue means REO could not perform reordering/PN validation. Do not
@@ -221,7 +220,11 @@ static VOID DrxDone(PWCN_DEVICE D,const ULONG *B,BOOLEAN Error)
         /* Only EAPOL can be unprotected. Protected EAPOL/data both require
          * successful hardware decryption. Never weaken cookie, CRC, peer,
          * direction, length, replay-route or controlled-port checks. */
-        if(NullQueue&&((Type!=0x0800&&Type!=0x0806&&Type!=0x86dd)||
+        // WPS has no PTK: a validated unprotected EAP reply may use NULL-REO.
+        BOOLEAN WpsEap=NullQueue&&Type==0x888e&&Length>=18&&!(Fc&0x4000)&&J->Associated&&
+            !J->PairwiseInstalled&&J->Ap.Auth==WCN_AUTH_OPEN&&WcnStage8Provisioning(D,J)&&
+            Jeq(Frame+6,J->Ap.Bssid,6)&&(Jeq(Frame,J->Mac,6)||Jeq(Frame,(const UCHAR*)"\x01\x80\xc2\x00\x00\x03",6));
+        if(NullQueue&&!WpsEap&&((Type!=0x0800&&Type!=0x0806&&Type!=0x86dd)||
            (!Jeq(Frame,J->Mac,6)&&!Jeq(Frame,(const UCHAR*)"\xff\xff\xff\xff\xff\xff",6)&&!(Frame[0]&1))))Drop=17;
         if(!Drop&&(Fc&0x4000)){if(Decrypt!=0)Drop=12;else Drop=DrxReplay(D,J,Buffer,B,Error,Fc,Frame);}
         if(!Drop&&!(Fc&0x4000)){
@@ -232,13 +235,11 @@ static VOID DrxDone(PWCN_DEVICE D,const ULONG *B,BOOLEAN Error)
         if(!Drop){ULONG Rate=Jle32(Buffer+92);if(((Rate>>8)&15)>=2)J->RxMcs=(Rate>>14)&15;
             J->RxFrames++;WcnStage8Ethernet(D,J,Frame,Length);}
     }
-    if(Drop)D->Runtime.RxDropped++;
-
 
 Recycle:
     Head=(D->Runtime.RxPendingHead+1)&4095;if(Head==D->Runtime.RxPendingTail)goto Bad;
     D->Runtime.RxPending[D->Runtime.RxPendingHead]=Index;D->Runtime.RxPendingHead=Head;return;
-Bad:D->Runtime.RuntimeErrors++;WcnStage7FailAll(D,"RX cookie/physical-address/ownership or recycle queue violation");
+Bad:D->Runtime.RuntimeErrors++;WcnStage7FailAll(D);
 }
 static VOID Drefill(PWCN_DEVICE D)
 {
@@ -247,7 +248,7 @@ static VOID Drefill(PWCN_DEVICE D)
     while(D->Runtime.RxPendingTail!=D->Runtime.RxPendingHead){
         Next=(R->Head+2)%(R->Entries*2);if(Next==Tail)break;
         Index=D->Runtime.RxPending[D->Runtime.RxPendingTail];Cookie=JRXPPT+Index;
-        if(Index>=4095||D->Runtime.RxPosted[Index]){D->Runtime.RuntimeErrors++;WcnStage7FailAll(D,"RX double refill");return;}
+        if(Index>=4095||D->Runtime.RxPosted[Index]){D->Runtime.RuntimeErrors++;WcnStage7FailAll(D);return;}
         RtlZeroMemory(D->Dp.RxBuffer[Index/256].Va+(Index%256)*2048,2048);
         Pa=D->Dp.Cookies[Cookie].BufferAddress;B=(ULONG*)(R->Desc.Va+R->Head*4);
         B[0]=(ULONG)Pa;B[1]=(ULONG)(Pa>>32)|(6u<<8)|(Cookie<<12);
@@ -289,7 +290,6 @@ static VOID DreoStatus(PWCN_DEVICE D,const ULONG *B)
     if(Tag!=D->Runtime.ReoTag||!D->Runtime.ReoPending||D->Runtime.ReoCmd!=Num)return;
     if(Tag==287&&(B[4]&0x30007u))Status=4;
     D->Runtime.ReoStatus=Status;D->Runtime.ReoDone=TRUE;
-    if(Status)WcnLog(D,"reo: command rejected vdev=%u tag=%u command=%u tid=%u status=%u detail=0x%x",D->Runtime.ReoOwner,Tag,Num,D->Runtime.ReoTid,Status,B[4]);
 }
 NTSTATUS WcnStage7ReoRelease(PWCN_DEVICE D,PWCN_JOIN J)
 {
@@ -321,7 +321,7 @@ NTSTATUS WcnStage7ReoRelease(PWCN_DEVICE D,PWCN_JOIN J)
 VOID WcnStage7DpPoll(PWCN_DEVICE D)
 {
     PWCN_DP_RING R;ULONG I,Head,Count,B[8];
-    if(!D->Runtime.Ready||D->Runtime.RuntimeErrors||D->Mhi.SysErr||D->Mhi.RddmSaved)return;
+    if(!D->Runtime.Ready||D->Runtime.RuntimeErrors||D->Mhi.SysErr||D->Mhi.RddmFailed)return;
     for(I=0;I<D->Dp.RingCount;I++){
         R=&D->Dp.Ring[I];
         if(!DcompletionRing(R))continue;
@@ -333,7 +333,7 @@ VOID WcnStage7DpPoll(PWCN_DEVICE D)
             else if(R->Id==128||R->Id==130||R->Id==132)DtxDone(D,B);
             else if(R->Id==131)DrxDone(D,B,TRUE);
             else if(!(B[7]&1))DrxDone(D,B,FALSE);
-            else {D->Runtime.RuntimeErrors++;WcnStage7FailAll(D,"unsupported chained REO descriptor; retaining DMA ownership");}
+            else {D->Runtime.RuntimeErrors++;WcnStage7FailAll(D);}
             if(D->Runtime.RuntimeErrors)return;
             R->Head=(R->Head+R->EntryDwords)%(R->Entries*R->EntryDwords);
         }

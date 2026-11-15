@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\hardware.c" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\power.c" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\mmu.c" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\gmu.c" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\gpu.c" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)..\gpu.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)..\regs.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)..\tables.h" />
+    <MARMASM Include="$(MSBuildThisFileDirectory)..\smc.asm" />
+  </ItemGroup>
+</Project>

@@ -12,7 +12,7 @@ extern "C" {
 #define S8_TX_FRAMES (2u*WCN_TX_SLOTS)
 #define S8_RX_FRAMES 1024u
 struct S8_FRAME { ULONG Length; UCHAR Bytes[1536]; };
-struct S8_BSS { ULONG Length,Frequency,ScanId; LONG Rssi; BOOLEAN PrimarySample; LONGLONG At,SignalAt; UCHAR Bytes[2048]; };
+struct S8_BSS { ULONG Length,Frequency,ScanId,ProbeLength,ProbeScanId; LONG Rssi; BOOLEAN PrimarySample; LONGLONG At,SignalAt,ProbeAt; UCHAR Bytes[2048],Probe[2048]; };
 struct S8_KEY { BOOLEAN Group,Sent,Management; UCHAR Index,Bytes[16],Rsc[6]; };
 struct S8_FT {BOOLEAN Enabled,Reassoc,AwaitOs,Ready;UCHAR Mde[5],Request[512],AssocIes[512];ULONG RequestLength,AssocLength,Attempts;LONGLONG At;};
 struct S8 {
@@ -28,10 +28,10 @@ struct S8 {
     BOOLEAN ScanAborting; NTSTATUS ScanAbortStatus;LONGLONG ScanAbortAt;
     LONGLONG ScanAt,ConnectAt,SignalAt,SignalAttemptAt,ReachabilityAt; WIFIREQUEST KeyRequest; S8_KEY Keys[4]; ULONG KeyCount,KeyNext;BOOLEAN KeyDelete;LONGLONG KeyAt;
     S8_BSS *Bss; ULONG BssCount;
-    UCHAR AssocVendor[768];ULONG AssocVendorLength;BOOLEAN AdapterPeer;
+    UCHAR OweDh[71];ULONG OweDhLength;
+    UCHAR AssocVendor[768];ULONG AssocVendorLength,ProvisioningCipher;BOOLEAN AdapterPeer;
     UCHAR AssocRequest[1536],AssocResponse[2048],AuthResponse[1024],ConnectBss[2048]; ULONG AssocRequestSize,AssocResponseSize,AuthResponseSize,ConnectBssSize;
     S8_FRAME Tx[S8_TX_FRAMES],Rx[S8_RX_FRAMES]; ULONG TxHead,TxTail,RxHead,RxTail,TxGeneration;
-    ULONG TxFailed,RxDropped;
     BOOLEAN PmfAvailable,SaeRequested,SaeAwaitOs,SaeConfirmSent,SaePeerConfirm;
     ULONG SaeTxLength,SaeAttempts,SaeGroup;LONGLONG SaeAt;UCHAR SaeTx[488];
     USHORT RxSequence;

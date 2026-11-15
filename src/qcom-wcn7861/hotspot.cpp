@@ -61,12 +61,11 @@ static void HfinishAdvert(HOTSPOT *H,NTSTATUS Status)
 {
     if(!H->AdvertRequest)return;
     auto R=H->AdvertRequest;H->AdvertRequest=nullptr;S8Complete(R,Status);
-
 }
-static void Hfail(HOTSPOT *H,PCSTR Reason)
+static void Hfail(HOTSPOT *H)
 {
     if(H->Failed)return;H->Failed=TRUE;H->Running=FALSE;if(H->Go)H->Go->Resetting=FALSE;HfinishAdvert(H,STATUS_DEVICE_HARDWARE_ERROR);
-    WcnLog(H->D,"hotspot: FAIL step=%u client-step=%u reason=%s; STA context unchanged",H->Step,H->Current->ClientStep,Reason);
+
     if(H->Go){H->Go->Fatal=TRUE;S8SetLink(H->Go,false);}Hfinish(H,STATUS_DEVICE_HARDWARE_ERROR);
     if(H->DefaultRequest){auto R=H->DefaultRequest;H->DefaultRequest=nullptr;S8Complete(R,STATUS_DEVICE_HARDWARE_ERROR);}
     if(H->KeyRequest){auto R=H->KeyRequest;H->KeyRequest=nullptr;S8Complete(R,STATUS_DEVICE_HARDWARE_ERROR);}RtlSecureZeroMemory(H->Keys,sizeof(H->Keys));
@@ -170,10 +169,9 @@ static void Hphy(HOTSPOT *H)
     A->HtRateCount=(UCHAR)(A->Ht?A->Nss*8:0);for(ULONG I=0;I<A->HtRateCount;I++)A->HtRates[I]=(UCHAR)I;
     A->VhtMcs=65535;for(ULONG I=0;I<A->Nss;I++)A->VhtMcs=(USHORT)((A->VhtMcs&~(3u<<(I*2)))|(2u<<(I*2)));
     A->PhyMode=WcnPhyMode(A);A->RateKbps=WcnPhyRate(A);
-
 }
-extern "C" VOID WcnHotspotFail(PWCN_DEVICE D,PCSTR Reason)
-{auto H=Hs(D);if(H)Hfail(H,Reason);}
+extern "C" VOID WcnHotspotFail(PWCN_DEVICE D)
+{auto H=Hs(D);if(H)Hfail(H);}
 static bool HbaBusy(HOTSPOT *H)
 {for(auto &C:H->Clients)for(auto &A:C.Ba)if(A.Phase)return true;return false;}
 static bool HvalidIes(const UCHAR *P,ULONG N)
@@ -231,7 +229,7 @@ static void HassocComplete(HOTSPOT *H,NTSTATUS Status)
     P.AssocResponseFrame.SimpleAssign(H->Current->Assoc+24,H->Current->AssocLength-24);// The Windows GO security path skips the 12-byte beacon fixed body before parsing RSN.
     P.BeaconIEs.SimpleAssign(H->Beacon+24,H->BeaconLength-24);auto C=&H->Current->ClientPhy;WDI_PHY_TYPE Type=C->Eht?WDI_PHY_TYPE_EHT:C->He?WDI_PHY_TYPE_HE:C->Vht?WDI_PHY_TYPE_VHT:C->Ht?WDI_PHY_TYPE_HT:C->PhyMode==2?WDI_PHY_TYPE_HRDSSS:WcnIs2g(H->Frequency)?WDI_PHY_TYPE_ERP:WDI_PHY_TYPE_OFDM;P.ActivePhyList.SimpleAssign(&Type,1);
     UCHAR *Out=nullptr;ULONG N=0;auto Ns=GenerateWdiIndicationSendApAssociationResponseCompleteFromIhv(&P,0,&S->Tlv,&N,&Out);
-    if(Ns==NDIS_STATUS_SUCCESS){S8Indicate(S,&H->Current->AssocHeader,WDI_INDICATION_SEND_AP_ASSOCIATION_RESPONSE_COMPLETE,Status,Out,N);FreeGenerated(Out);}else Hfail(H,"AP association indication encoding");
+    if(Ns==NDIS_STATUS_SUCCESS){S8Indicate(S,&H->Current->AssocHeader,WDI_INDICATION_SEND_AP_ASSOCIATION_RESPONSE_COMPLETE,Status,Out,N);FreeGenerated(Out);}else Hfail(H);
 }
 static void HclientDrop(HOTSPOT *H);
 static NTSTATUS HsaeIndicate(HOTSPOT *H,HOTSPOT_CLIENT *C,WDI_SAE_INDICATION_TYPE Type,const UCHAR *Body,ULONG Length)
@@ -369,9 +367,8 @@ bool HotspotCommand(S8 *S,WIFIREQUEST R,const WDI_MESSAGE_HEADER &Header,UINT16 
     case WDI_SET_RECEIVE_PACKET_FILTER:{WDI_SET_RECEIVE_PACKET_FILTER_PARAMETERS A;auto Ns=ParseWdiSetReceivePacketFilterToIhv(N,P,&S->Tlv,&A);St=Ns==NDIS_STATUS_SUCCESS&&!(A.PacketFilterType&(WDI_PACKET_FILTER_PROMISCUOUS|WDI_PACKET_FILTER_802_11_RAW_DATA))?STATUS_SUCCESS:STATUS_NOT_SUPPORTED;if(NT_SUCCESS(St)&&Role)H->Go->PacketFilter=A.PacketFilterType&15u;CleanupParsedWdiSetReceivePacketFilter(&A);break;}
     case WDI_SET_MULTICAST_LIST:{WDI_SET_MULTICAST_LIST_PARAMETERS A;auto Ns=ParseWdiSetMulticastListToIhv(N,P,&S->Tlv,&A);St=Ns==NDIS_STATUS_SUCCESS?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;CleanupParsedWdiSetMulticastList(&A);break;}
     case WDI_SET_PRIVACY_EXEMPTION_LIST:{WDI_SET_PRIVACY_EXEMPTION_LIST_PARAMETERS A;auto Ns=ParseWdiSetPrivacyExemptionListToIhv(N,P,&S->Tlv,&A);St=Ns==NDIS_STATUS_SUCCESS?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;CleanupParsedWdiSetPrivacyExemptionList(&A);break;}
-
     }
-    S8Complete(R,St);if(!NT_SUCCESS(St))WcnLog(S->D,"hotspot: command=%u rejected status=0x%x",Id,St);return true;
+    S8Complete(R,St);return true;
 }
 static NTSTATUS HstartRequest(HOTSPOT *H,BOOLEAN Restart)
 {
@@ -445,16 +442,16 @@ static void HkeysService(HOTSPOT *H)
                 else{if(!Slot->Valid||!Jeq(Slot->Bytes,K->Bytes,16)){if(K->Group&&!H->GroupKey[0].Valid&&!H->GroupKey[1].Valid&&!H->GroupKey[2].Valid&&!H->GroupKey[3].Valid){H->DefaultKey=K->Index;H->DefaultPending=TRUE;}RtlCopyMemory(Slot->Bytes,K->Bytes,16);
                         if(Peer){ULONG64 Pn=Jle32(K->Rsc)|((ULONG64)Jle16(K->Rsc+4)<<32);for(ULONG I=0;I<17;I++)Peer->Pn[I]=Pn;RtlZeroMemory(Peer->PnValid,sizeof(Peer->PnValid));}}Slot->Valid=TRUE;}
                 RtlSecureZeroMemory(K->Bytes,16);H->KeyStep++;}}}
-    if(St!=STATUS_DEVICE_BUSY&&(!NT_SUCCESS(St)||H->KeyStep==H->KeyCount)){auto R=H->KeyRequest;H->KeyRequest=nullptr;S8Complete(R,St);RtlSecureZeroMemory(H->Keys,sizeof(H->Keys));if(!NT_SUCCESS(St))Hfail(H,"key installation failed");}
+    if(St!=STATUS_DEVICE_BUSY&&(!NT_SUCCESS(St)||H->KeyStep==H->KeyCount)){auto R=H->KeyRequest;H->KeyRequest=nullptr;S8Complete(R,St);RtlSecureZeroMemory(H->Keys,sizeof(H->Keys));if(!NT_SUCCESS(St))Hfail(H);}
 }
 static void HclientService(HOTSPOT *H)
 {
     auto D=H->D;auto C=H->Current;
-    if(C->ClientStep){NTSTATUS St=HclientStep(H);if(St==STATUS_SUCCESS){C->ClientStep++;C->ClientAt=WcnNowMs();}else if(St!=STATUS_PENDING&&St!=STATUS_DEVICE_BUSY){Hfail(H,"client peer/authentication/association transport");return;}
-        if(C->ClientStep&&WcnNowMs()-C->ClientAt>5000){if(C->ClientStep<19)HclientDrop(H);else Hfail(H,"client deletion ownership confirmation timeout");}}
+    if(C->ClientStep){NTSTATUS St=HclientStep(H);if(St==STATUS_SUCCESS){C->ClientStep++;C->ClientAt=WcnNowMs();}else if(St!=STATUS_PENDING&&St!=STATUS_DEVICE_BUSY){Hfail(H);return;}
+        if(C->ClientStep&&WcnNowMs()-C->ClientAt>5000){if(C->ClientStep<19)HclientDrop(H);else Hfail(H);}}
     if(C->Auth==WCN_AUTH_SAE)HsaeService(H);
     if(C->SaQueryPending&&C->Authorized&&!C->ClientStep&&!H->Task){UCHAR B[]={8,1,0,0};RtlCopyMemory(B+2,C->SaQueryId,2);NTSTATUS St=WcnHotspotActionSend(D,B,sizeof(B));if(NT_SUCCESS(St))C->SaQueryPending=FALSE;else if(St!=STATUS_DEVICE_BUSY)HclientDrop(H); }
-    if(H->Running&&C->Associated&&!C->Provisioning&&C->PairKey.Valid&&H->GroupKey[H->DefaultKey].Valid&&!H->DefaultPending&&(!C->ClientPhy.Pmf||H->Igtk[0].Valid||H->Igtk[1].Valid)&&!C->Authorized){NTSTATUS St=WcnPeerParam(D,1,C->Client,3,1);if(NT_SUCCESS(St)){C->Authorized=TRUE;}else if(St!=STATUS_DEVICE_BUSY)Hfail(H,"controlled port authorize");}
+    if(H->Running&&C->Associated&&!C->Provisioning&&C->PairKey.Valid&&H->GroupKey[H->DefaultKey].Valid&&!H->DefaultPending&&(!C->ClientPhy.Pmf||H->Igtk[0].Valid||H->Igtk[1].Valid)&&!C->Authorized){NTSTATUS St=WcnPeerParam(D,1,C->Client,3,1);if(NT_SUCCESS(St)){C->Authorized=TRUE;}else if(St!=STATUS_DEVICE_BUSY)Hfail(H);}
     if(H->Running&&C->Authorized&&!C->ClientStep&&!H->Task)WcnAggregationServicePeer(D,1,&C->ClientPhy,C->Ba,C->Client,C->Reo.La,C->MgmtBusy,C->MgmtStatus);
 }
 static void HadvertService(HOTSPOT *H)
@@ -473,7 +470,7 @@ static bool HresizeService(HOTSPOT *H)
         H->Radio.Width=20;H->Radio.CenterFrequency=H->Frequency;H->Radio.Sgi=!!(D->Ce.HtCap&2);H->Radio.PhyMode=WcnPhyMode(&H->Radio);H->Radio.RateKbps=WcnPhyRate(&H->Radio);
         H->Go->Resetting=TRUE;H->Started=FALSE;H->ResizeStep=1;H->ResizePeer=0;H->ResizeAt=WcnNowMs();
     }
-    if(WcnNowMs()-H->ResizeAt>5000){Hfail(H,"20/40 coexistence width-change confirmation timeout");return true;}
+    if(WcnNowMs()-H->ResizeAt>5000){Hfail(H);return true;}
     switch(H->ResizeStep){
     case 1:St=HstartRequest(H,TRUE);break;
     case 2:if(!H->Started)return true;if(H->Task){H->ResizeRequested=FALSE;H->ResizeStep=0;H->Go->Resetting=FALSE;return true;}break;
@@ -484,26 +481,26 @@ static bool HresizeService(HOTSPOT *H)
                 St=WcnPeerParam(D,1,C->Client,(H->ResizePeer&1)?13:4,(H->ResizePeer&1)?Next.PhyMode:0);
                 if(NT_SUCCESS(St)){if(H->ResizePeer&1)C->ClientPhy=Next;H->ResizePeer++;}}
             else H->ResizePeer=(H->ResizePeer/2+1)*2;
-            if(St==STATUS_DEVICE_BUSY)return true;if(!NT_SUCCESS(St))Hfail(H,"peer coexistence width/mode update");return true;}break;
+            if(St==STATUS_DEVICE_BUSY)return true;if(!NT_SUCCESS(St))Hfail(H);return true;}break;
     case 4:St=Hbeacon(H);break;
     case 5:{ULONG B[]={Jtlv(92,16),1,0,0,0};RtlCopyMemory(B+3,H->Mac,6);St=WcnWmiSend(D,0x5005,B,sizeof(B));break;}
     case 6:H->ResizeRequested=FALSE;H->ResizeStep=0;H->Go->Resetting=FALSE;S8SetLink(H->Go,true);return true;
-    default:Hfail(H,"invalid coexistence state");return true;
+    default:Hfail(H);return true;
     }
-    if(NT_SUCCESS(St))H->ResizeStep++;else if(St!=STATUS_DEVICE_BUSY)Hfail(H,"coexistence restart transport");return true;
+    if(NT_SUCCESS(St))H->ResizeStep++;else if(St!=STATUS_DEVICE_BUSY)Hfail(H);return true;
 }
 static void Hrequest20(HOTSPOT *H)
 {if(H->Running&&WcnIs2g(H->Frequency)&&H->Radio.Width==40){H->Coexist20=H->ResizeRequested=TRUE;}}
 void HotspotService(PWCN_DEVICE D)
 {
-    auto H=Hs(D);if(!H||H->Failed)return;if(D->Mhi.SysErr||D->Mhi.RddmSaved||D->Dp.Failed||D->Ce.SourceFailed){if(H->Task||H->Running)Hfail(H,"shared physical device failed");return;}
-    if(H->MgmtBusy&&WcnNowMs()-H->MgmtAt>1500){Hfail(H,"management DMA completion timeout");return;}
+    auto H=Hs(D);if(!H||H->Failed)return;if(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Dp.Failed||D->Ce.SourceFailed){if(H->Task||H->Running)Hfail(H);return;}
+    if(H->MgmtBusy&&WcnNowMs()-H->MgmtAt>1500){Hfail(H);return;}
     HkeysService(H);if(H->Failed||HresizeService(H))return;HadvertService(H);
     if(H->Task==WDI_TASK_START_AP){auto Secondary=(S8*)D->SecondaryStage8;
-        if(!WcnStage8SecondaryIdle(D)&&((Secondary&&Secondary->Resetting)||!WcnHotspotTriple(D,&D->Join.Ap,&D->Secondary.Ap))){if(WcnNowMs()-H->At>15000)Hfail(H,"secondary STA resource handoff timeout");return;}if(!D->Scan.Passed||!D->Scan.CountryReady){if(WcnNowMs()-H->At>5000)Hfail(H,"regulatory discovery not ready");return;}
-        if(!H->Mgmt.Buffer){NTSTATUS A=WcnDmaAllocAligned(D,1536,0xfff,&H->Mgmt);if(!NT_SUCCESS(A)){Hfail(H,"management DMA allocation");return;}}
-        NTSTATUS St=WcnStage7DpInit(D,&D->Join);if(!NT_SUCCESS(St)){Hfail(H,"shared data path preparation");return;}
-        St=HstartStep(H);if(St==STATUS_SUCCESS){H->Step++;H->At=WcnNowMs();}else if(St!=STATUS_PENDING&&St!=STATUS_DEVICE_BUSY){Hfail(H,"AP start command transport");return;}if(H->Task&&WcnNowMs()-H->At>5000)Hfail(H,"AP start hardware confirmation timeout");}
+        if(!WcnStage8SecondaryIdle(D)&&((Secondary&&Secondary->Resetting)||!WcnHotspotTriple(D,&D->Join.Ap,&D->Secondary.Ap))){if(WcnNowMs()-H->At>15000)Hfail(H);return;}if(!D->Scan.Passed||!D->Scan.CountryReady){if(WcnNowMs()-H->At>5000)Hfail(H);return;}
+        if(!H->Mgmt.Buffer){NTSTATUS A=WcnDmaAllocAligned(D,1536,0xfff,&H->Mgmt);if(!NT_SUCCESS(A)){Hfail(H);return;}}
+        NTSTATUS St=WcnStage7DpInit(D,&D->Join);if(!NT_SUCCESS(St)){Hfail(H);return;}
+        St=HstartStep(H);if(St==STATUS_SUCCESS){H->Step++;H->At=WcnNowMs();}else if(St!=STATUS_PENDING&&St!=STATUS_DEVICE_BUSY){Hfail(H);return;}if(H->Task&&WcnNowMs()-H->At>5000)Hfail(H);}
     else if(H->Task==WDI_TASK_DISCONNECT){H->Current=H->TaskClient;auto C=H->Current;if(C&&C->Used){if(C->ClientStep<19)HclientDrop(H);HclientService(H);}if(!C||!C->Used)Hfinish(H,STATUS_SUCCESS);}
     else if(H->Task){NTSTATUS St=STATUS_SUCCESS;switch(H->Step){
         case 19:{if(H->MgmtBusy)return;bool Pmf=false;for(auto &C:H->Clients)if(C.Authorized&&C.ClientPhy.Pmf)Pmf=true;
@@ -515,8 +512,8 @@ void HotspotService(PWCN_DEVICE D)
         case 22:if(H->Started){ULONG B[]={Jtlv(93,4),1};St=WcnWmiSend(D,0x5006,B,sizeof(B));}else H->Stopped=TRUE;break;
         case 23:if(!H->Stopped)St=STATUS_PENDING;else{for(ULONG I=0;I<WCN_TX_SLOTS;I++)if(D->Runtime.TxUsed[I]&0x80)return;S8ClearStaging(H->Go);P2pRoleStopped(D);H->Go->Connect=FALSE;H->Started=FALSE;RtlSecureZeroMemory(H->Igtk,sizeof(H->Igtk));RtlSecureZeroMemory(H->GroupKey,sizeof(H->GroupKey));Hfinish(H,STATUS_SUCCESS);return;}break;
         default:St=STATUS_INVALID_DEVICE_STATE;break;}
-        if(St==STATUS_SUCCESS){H->Step++;H->At=WcnNowMs();}else if(St!=STATUS_PENDING&&St!=STATUS_DEVICE_BUSY){Hfail(H,"AP stop transport");return;}if(WcnNowMs()-H->At>5000)Hfail(H,"AP stop ownership confirmation timeout");}
-    if(H->DefaultPending){NTSTATUS St=Hparam(H,33,H->DefaultKey);if(St==STATUS_DEVICE_BUSY&&H->DefaultRequest&&WcnNowMs()-H->DefaultAt>2500)St=STATUS_IO_TIMEOUT;if(NT_SUCCESS(St)){H->DefaultPending=FALSE;if(H->DefaultRequest){auto R=H->DefaultRequest;H->DefaultRequest=nullptr;S8Complete(R,STATUS_SUCCESS);}}else if(St!=STATUS_DEVICE_BUSY){Hfail(H,"default GTK selection");return;}}
+        if(St==STATUS_SUCCESS){H->Step++;H->At=WcnNowMs();}else if(St!=STATUS_PENDING&&St!=STATUS_DEVICE_BUSY){Hfail(H);return;}if(WcnNowMs()-H->At>5000)Hfail(H);}
+    if(H->DefaultPending){NTSTATUS St=Hparam(H,33,H->DefaultKey);if(St==STATUS_DEVICE_BUSY&&H->DefaultRequest&&WcnNowMs()-H->DefaultAt>2500)St=STATUS_IO_TIMEOUT;if(NT_SUCCESS(St)){H->DefaultPending=FALSE;if(H->DefaultRequest){auto R=H->DefaultRequest;H->DefaultRequest=nullptr;S8Complete(R,STATUS_SUCCESS);}}else if(St!=STATUS_DEVICE_BUSY){Hfail(H);return;}}
     for(auto &C:H->Clients)if(C.Used){H->Current=&C;if(!H->Task)HclientService(H);}
     if(H->Go&&H->Running){S8QueuesService(H->Go);}
 }
@@ -526,15 +523,14 @@ extern "C" VOID WcnHotspotHtt(PWCN_DEVICE D,const UCHAR *P,ULONG N)
     if((T==3||T==0x1e||T==0x2b)&&N>=16&&((Info>>8)&255)==1){ULONG Ast=T==0x2b?Jle32(P+12)&65535:Jle32(P+8)>>16,Hash=T==0x2b?Jle32(P+12)>>16:Jle32(P+12)&65535;
         if(Jeq(P+4,H->Mac,6)){H->SelfAst=Ast;H->SelfHash=Hash;H->SelfPeerId=Info>>16;H->SelfMapped=TRUE;}
         else if(auto C=Hfind(H,P+4)){C->PeerId=Info>>16;C->Ast=Ast;C->Hash=Hash;C->ClientMapped=TRUE;}
-
     }else if((T==4||T==0x1f)&&H->ReleaseStep&&H->SelfMapped&&(Info>>16)==H->SelfPeerId)H->SelfUnmapped=TRUE;
     else if(T==4||T==0x1f)for(auto &C:H->Clients)if(C.Used&&C.ClientMapped&&(Info>>16)==C.PeerId){C.Unmapped=TRUE;C.Authorized=FALSE;}
 }
 static bool HinitClient(HOTSPOT *H,const UCHAR Mac[6],ULONG Auth)
 {
     auto C=H->Current;
-    if(C->Reo.Buffer){if(C->RetiredCount==8){Hfail(H,"retired client REO ownership exhausted");return false;}C->Retired[C->RetiredCount++]=C->Reo;RtlZeroMemory(&C->Reo,sizeof(C->Reo));}
-    NTSTATUS St=WcnDmaAllocAligned(H->D,17*512,0xfff,&C->Reo);if(!NT_SUCCESS(St)){Hfail(H,"client REO allocation");return false;}
+    if(C->Reo.Buffer){if(C->RetiredCount==8){Hfail(H);return false;}C->Retired[C->RetiredCount++]=C->Reo;RtlZeroMemory(&C->Reo,sizeof(C->Reo));}
+    NTSTATUS St=WcnDmaAllocAligned(H->D,17*512,0xfff,&C->Reo);if(!NT_SUCCESS(St)){Hfail(H);return false;}
     for(ULONG I=0;I<17;I++){auto Q=(ULONG*)(C->Reo.Va+I*512);Q[0]=(0xddbeefu<<8)|(8u<<4)|4;Q[1]=I;ULONG Ac=(I==0||I==3)?0:(I==1||I==2)?1:(I==4||I==5)?2:3;
         Q[2]=3|(Ac<<5)|(1u<<21)|(1u<<25)|(1u<<27)|(I==16?1u<<8:1u<<11);if(I<16)for(ULONG K=0;K<3;K++)Q[(128+K*128)/4]=((0xadbeefu+K*0x100000u)<<8)|(9u<<4)|4;}
     C->Used=TRUE;C->Auth=Auth;RtlCopyMemory(C->Client,Mac,6);RtlZeroMemory(C->Ba,sizeof(C->Ba));RtlSecureZeroMemory(&C->Sae,sizeof(C->Sae));RtlSecureZeroMemory(&C->PairKey,sizeof(C->PairKey));
@@ -598,7 +594,7 @@ extern "C" VOID WcnHotspotWmi(PWCN_DEVICE D,ULONG Event,const UCHAR *P,ULONG N)
     if(H->Failed||D->P2pClient)return;
     if(Event==0x7001){if(H->Running)HmgmtRx(H,P,N);return;}
     if(Event==0x7006){F=Jfind(P,N,423,&L);if(F&&L>=12&&H->MgmtBusy&&Jle32(F)==H->MgmtId&&D->MgmtInUse[1]==H->MgmtId&&Jle32(F+8)>=1&&Jle32(F+8)<=2){H->MgmtStatus=Jle32(F+4);H->MgmtBusy=FALSE;if(H->MgmtClient){H->MgmtClient->MgmtStatus=H->MgmtStatus;H->MgmtClient->MgmtBusy=FALSE;auto A=&H->MgmtClient->Sae;if(A->Sending&&A->Sequence==2&&!H->MgmtStatus&&A->Validated&&A->PeerConfirm){A->ConfirmSent=A->Authenticated=TRUE;}H->MgmtClient=nullptr;}D->MgmtInUse[1]=0;}return;}
-    if(Event==0x5001){F=Jfind(P,N,40,&L);if(!F||L<36||Jle32(F)!=1)return;if(Jle32(F+12)||Jle32(F+24)>1||!Jle32(F+28)||!Jle32(F+32)){Hfail(H,"firmware AP vdev start rejected");return;}H->MacId=Jle32(F+24);ULONG Nss=Jle32(F+28)<Jle32(F+32)?Jle32(F+28):Jle32(F+32);if(H->Radio.Nss>Nss)H->Radio.Nss=(UCHAR)Nss;H->Radio.RateKbps=WcnPhyRate(&H->Radio);H->Started=TRUE;}
+    if(Event==0x5001){F=Jfind(P,N,40,&L);if(!F||L<36||Jle32(F)!=1)return;if(Jle32(F+12)||Jle32(F+24)>1||!Jle32(F+28)||!Jle32(F+32)){Hfail(H);return;}H->MacId=Jle32(F+24);ULONG Nss=Jle32(F+28)<Jle32(F+32)?Jle32(F+28):Jle32(F+32);if(H->Radio.Nss>Nss)H->Radio.Nss=(UCHAR)Nss;H->Radio.RateKbps=WcnPhyRate(&H->Radio);H->Started=TRUE;}
     else if(Event==0x5002){F=Jfind(P,N,41,&L);if(F&&L>=4&&Jle32(F)==1)H->Stopped=TRUE;}
     else if(Event==0x6007){F=Jfind(P,N,451,&L);if(F&&L>=12&&Jle32(F)==1)if(auto C=Hfind(H,F+4))C->DeleteConfirmed=TRUE;}
     else if(Event==S7_WMI_PEER_ASSOC_CONF_EVENTID){F=Jfind(P,N,S7_WMI_TAG_PEER_ASSOC_CONF_EVENT,&L);if(F&&L>=12&&Jle32(F)==1)if(auto C=Hfind(H,F+4))C->AssocConfirmed=TRUE;}
@@ -627,7 +623,7 @@ extern "C" NTSTATUS WcnHotspotTx(PWCN_DEVICE D,const UCHAR *F,ULONG N,BOOLEAN Ea
 }
 extern "C" ULONG WcnHotspotRate(PWCN_DEVICE D)
 {auto H=Hs(D);return H&&H->Radio.RateKbps?H->Radio.RateKbps:54000;}
-extern "C" VOID WcnHotspotTxFailed(PWCN_DEVICE D){auto H=Hs(D);if(H&&H->Go)H->Go->TxFailed++;}
+
 void HotspotStop(PWCN_DEVICE D)
 {
     auto H=Hs(D);if(!H)return;H->Running=H->DefaultPending=FALSE;HfinishAdvert(H,STATUS_CANCELLED);Hfinish(H,STATUS_CANCELLED);if(H->DefaultRequest){auto R=H->DefaultRequest;H->DefaultRequest=nullptr;S8Complete(R,STATUS_CANCELLED);}if(H->KeyRequest){auto R=H->KeyRequest;H->KeyRequest=nullptr;S8Complete(R,STATUS_CANCELLED);}RtlSecureZeroMemory(H->Keys,sizeof(H->Keys));RtlSecureZeroMemory(H->GroupKey,sizeof(H->GroupKey));RtlSecureZeroMemory(H->Igtk,sizeof(H->Igtk));for(auto &C:H->Clients){RtlSecureZeroMemory(&C.PairKey,sizeof(C.PairKey));RtlSecureZeroMemory(&C.Sae,sizeof(C.Sae));}
@@ -661,7 +657,7 @@ const UCHAR *HotspotDeviceMac(PWCN_DEVICE D){auto H=Hs(D);return H?H->DeviceMac:
 NTSTATUS HotspotReleaseRole(PWCN_DEVICE D)
 {
  auto H=Hs(D);auto S=H?H->Go:nullptr;if(!H||!S)return STATUS_DEVICE_NOT_READY;
- if(D->Mhi.SysErr||D->Mhi.RddmSaved||D->Ce.SourceFailed||D->Dp.Failed)return STATUS_DEVICE_HARDWARE_ERROR;
+ if(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Ce.SourceFailed||D->Dp.Failed)return STATUS_DEVICE_HARDWARE_ERROR;
  if(H->Task||H->Running||H->MgmtBusy||S->Connect||S->Resetting||H->KeyRequest||H->AdvertRequest)return STATUS_DEVICE_BUSY;
  for(auto &C:H->Clients)if(C.Used)return STATUS_DEVICE_BUSY;
  for(ULONG I=0;I<WCN_TX_SLOTS;I++)if(D->Runtime.TxUsed[I]&&(D->Runtime.TxUsed[I]&0x80))return STATUS_DEVICE_BUSY;

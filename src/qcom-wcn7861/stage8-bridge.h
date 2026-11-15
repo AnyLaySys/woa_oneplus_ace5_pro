@@ -11,7 +11,8 @@ VOID WcnStage8Mgmt(PWCN_DEVICE Dev,PWCN_JOIN J,const UCHAR *Frame,ULONG Length,B
 VOID WcnStage8Ethernet(PWCN_DEVICE Dev,PWCN_JOIN J,const UCHAR *Frame,ULONG Length);
 VOID WcnStage8SaeService(PWCN_DEVICE Dev,PWCN_JOIN J);
 VOID WcnStage8SaeReceive(PWCN_DEVICE Dev,PWCN_JOIN J,const UCHAR *Body,ULONG Length);
-VOID WcnStage8TxFailed(PWCN_DEVICE Dev,ULONG Vdev);
 NTSTATUS WcnStage8Key(PWCN_DEVICE Dev,PWCN_JOIN J,BOOLEAN Group,UCHAR Index,const UCHAR Key[16],const UCHAR Rsc[6]);
 
 BOOLEAN WcnStage8SecondaryIdle(PWCN_DEVICE D);
+
+BOOLEAN WcnStage8OweResponse(PWCN_DEVICE Dev,PWCN_JOIN J,const UCHAR *Ies,ULONG Length);

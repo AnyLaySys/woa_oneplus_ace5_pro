@@ -18,7 +18,7 @@ NTSTATUS S8SaeIndicate(S8 *S,const WDI_MESSAGE_HEADER &Header,const UCHAR Peer[6
     UCHAR *Out=nullptr;ULONG N=0;if(GenerateWdiIndicationSaeAuthParamsNeeded(&P,0,&S->Tlv,&N,&Out)!=NDIS_STATUS_SUCCESS)return STATUS_INSUFFICIENT_RESOURCES;
     NTSTATUS St=S8Indicate(S,&Header,WDI_INDICATION_SAE_AUTH_PARAMS_NEEDED,STATUS_SUCCESS,Out,N,true);FreeGenerated(Out);return St;
 }
-static void SaeFail(S8 *S,const char *Reason,bool Notify=true){if(S->J->Failed)return;if(Notify)S8SaeIndicate(S,S->ConnectHeader,S->J->Ap.Bssid,WDI_SAE_INDICATION_TYPE_ERROR);RtlSecureZeroMemory(S->SaeTx,sizeof(S->SaeTx));S->SaeTxLength=0;WcnStage7Fail(S->D,S->J,Reason);}
+static void SaeFail(S8 *S,bool Notify=true){if(S->J->Failed)return;if(Notify)S8SaeIndicate(S,S->ConnectHeader,S->J->Ap.Bssid,WDI_SAE_INDICATION_TYPE_ERROR);RtlSecureZeroMemory(S->SaeTx,sizeof(S->SaeTx));S->SaeTxLength=0;WcnStage7Fail(S->J);}
 NTSTATUS S8SaeCommand(S8 *S,const WDI_MESSAGE_HEADER *H,const UCHAR *Tlv,ULONG Length)
 {
     if(!S->ConnectPending||S->J->State!=5||S->J->Ap.Auth!=WCN_AUTH_SAE||!S->SaeRequested||H->PortId!=S->ConnectHeader.PortId)return STATUS_INVALID_DEVICE_STATE;
@@ -26,7 +26,7 @@ NTSTATUS S8SaeCommand(S8 *S,const WDI_MESSAGE_HEADER *H,const UCHAR *Tlv,ULONG L
     if(ParseWdiSetSaeAuthParamsToIhv(Length,Tlv,&S->Tlv,&P)!=NDIS_STATUS_SUCCESS){CleanupParsedWdiSetSaeAuthParams(&P);return STATUS_INVALID_PARAMETER;}
     NTSTATUS St=STATUS_INVALID_PARAMETER;
     if(RtlCompareMemory(P.BssId.Address,S->J->Ap.Bssid,6)!=6)goto Done;
-    if(P.SAERequestType==WDI_SAE_REQUEST_TYPE_FAILURE){SaeFail(S,"Windows rejected SAE peer authentication",false);St=STATUS_SUCCESS;goto Done;}
+    if(P.SAERequestType==WDI_SAE_REQUEST_TYPE_FAILURE){SaeFail(S,false);St=STATUS_SUCCESS;goto Done;}
     if(P.SAERequestType==WDI_SAE_REQUEST_TYPE_SUCCESS){
         if(!S->SaePeerConfirm||!S->SaeConfirmSent||(P.Optional.SAEStatus_IsPresent&&P.SAEStatus!=WDI_SAE_STATUS_SUCCESS))goto Done;
         S->J->Authenticated=TRUE;S->SaeAwaitOs=FALSE;S->SaeTxLength=0;RtlSecureZeroMemory(S->SaeTx,sizeof(S->SaeTx));
@@ -50,17 +50,16 @@ extern "C" VOID WcnStage8SaeReceive(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *Body,
     if(Sequence==2&&(!S->SaeConfirmSent||Jle16(Body+4)!=0))return;
     if(Sequence==2)S->SaePeerConfirm=TRUE;
     S->SaeAwaitOs=TRUE;S->SaeAt=WcnNowMs();S->SaeTxLength=0;
-    if(!NT_SUCCESS(S8SaeIndicate(S,S->ConnectHeader,S->J->Ap.Bssid,Sequence==1?WDI_SAE_INDICATION_TYPE_COMMIT_FRAME:WDI_SAE_INDICATION_TYPE_CONFIRM_FRAME,Body,Length)))SaeFail(S,"SAE frame indication allocation failed");
+    if(!NT_SUCCESS(S8SaeIndicate(S,S->ConnectHeader,S->J->Ap.Bssid,Sequence==1?WDI_SAE_INDICATION_TYPE_COMMIT_FRAME:WDI_SAE_INDICATION_TYPE_CONFIRM_FRAME,Body,Length)))SaeFail(S);
 }
 extern "C" VOID WcnStage8SaeService(PWCN_DEVICE D,PWCN_JOIN J)
 {
     auto S=S8Station(D,J);if(!S||S->Fatal||S->Resetting)return;
-    if(!S->SaeRequested){S->SaeRequested=S->SaeAwaitOs=TRUE;S->SaeAt=WcnNowMs();if(!NT_SUCCESS(S8SaeIndicate(S,S->ConnectHeader,S->J->Ap.Bssid,WDI_SAE_INDICATION_TYPE_COMMIT_REQUEST_PARAMS_NEEDED)))SaeFail(S,"SAE initial indication failed");return;}
-    if(S->SaeAwaitOs){if(WcnNowMs()-S->SaeAt>4000)SaeFail(S,"Windows SAE response timeout");return;}
+    if(!S->SaeRequested){S->SaeRequested=S->SaeAwaitOs=TRUE;S->SaeAt=WcnNowMs();if(!NT_SUCCESS(S8SaeIndicate(S,S->ConnectHeader,S->J->Ap.Bssid,WDI_SAE_INDICATION_TYPE_COMMIT_REQUEST_PARAMS_NEEDED)))SaeFail(S);return;}
+    if(S->SaeAwaitOs){if(WcnNowMs()-S->SaeAt>4000)SaeFail(S);return;}
     if(!S->SaeTxLength||WcnNowMs()-S->SaeAt<700)return;
-    if(S->SaeAttempts>=3){SaeFail(S,"SAE peer response timeout");return;}
+    if(S->SaeAttempts>=3){SaeFail(S);return;}
     NTSTATUS St=WcnStage7AuthSend(D,S->J,S->SaeTx,S->SaeTxLength);if(St==STATUS_DEVICE_BUSY)return;
-    if(!NT_SUCCESS(St)){SaeFail(S,"SAE firmware transmit failed");return;}
+    if(!NT_SUCCESS(St)){SaeFail(S);return;}
     if(Jle16(S->SaeTx+2)==2)S->SaeConfirmSent=TRUE;S->SaeAt=WcnNowMs();S->SaeAttempts++;
-
 }

@@ -1,10 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
-    <ProjectConfiguration Include="Debug|ARM64">
-      <Configuration>Debug</Configuration>
-      <Platform>ARM64</Platform>
-    </ProjectConfiguration>
     <ProjectConfiguration Include="Release|ARM64">
       <Configuration>Release</Configuration>
       <Platform>ARM64</Platform>
@@ -26,14 +22,6 @@
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <ConfigurationType>Driver</ConfigurationType>
   </PropertyGroup>
-  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
-    <TargetVersion>Windows10</TargetVersion>
-    <UseDebugLibraries>True</UseDebugLibraries>
-    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
-    <DriverType>WDM</DriverType>
-    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
-    <ConfigurationType>Driver</ConfigurationType>
-  </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
     <TargetName>qcom_battery</TargetName>
@@ -41,19 +29,23 @@
     <QcbVersionDate Condition="'$(QcbVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</QcbVersionDate>
     <QcbRevision Condition="'$(QcbRevision)' == '' and '$(QcbVersionDate)' == '2026-11-04'">19</QcbRevision>
     <QcbRevision Condition="'$(QcbRevision)' == '' and '$(QcbVersionDate)' == '2026-11-06'">2</QcbRevision>
-    <QcbRevision Condition="'$(QcbRevision)' == ''">0</QcbRevision>
+    <QcbRevision Condition="'$(QcbRevision)' == '' and '$(QcbVersionDate)' == '2026-11-07'">4</QcbRevision>
+    <QcbRevision Condition="'$(QcbRevision)' == ''">4</QcbRevision>
     <QcbDriverDate>$([System.DateTime]::Parse('$(QcbVersionDate)').ToString('MM/dd/yyyy'))</QcbDriverDate>
     <QcbDriverVersion>$([System.DateTime]::Parse('$(QcbVersionDate)').ToString('yy.M.d')).$(QcbRevision)</QcbDriverVersion>
     <QcbDriverVersionComma>$([System.String]::Copy('$(QcbDriverVersion)').Replace('.', ','))</QcbDriverVersionComma>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
+      <DebugInformationFormat>None</DebugInformationFormat>
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..</AdditionalIncludeDirectories>
 
       <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>battc.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <Profile>false</Profile>
+      <AdditionalDependencies>battc.lib;wmilib.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Inf>
       <SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate>
@@ -82,7 +74,7 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <PropertyGroup>
-    <WoAProjectRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\..'))</WoAProjectRoot>
+    <WoAProjectRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..'))</WoAProjectRoot>
     <OutDir>$(WoAProjectRoot)\out\qcom-battery\$(Platform)\$(Configuration)\bin\</OutDir>
     <IntDir>$(WoAProjectRoot)\out\qcom-battery\$(Platform)\$(Configuration)\obj\</IntDir>
   </PropertyGroup>

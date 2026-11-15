@@ -8,8 +8,8 @@ extern "C" {
 #include "security-policy.h"
 #include "ft-wire.h"
 }
-static void Ffail(S8 *S,const char *Reason)
-{S->Ft.AwaitOs=FALSE;S->Ft.Ready=FALSE;WcnStage7Fail(S->D,S->J,Reason);}
+static void Ffail(S8 *S)
+{S->Ft.AwaitOs=FALSE;S->Ft.Ready=FALSE;WcnStage7Fail(S->J);}
 bool S8FtCandidate(S8 *S,const WDI_CONNECT_BSS_ENTRY_CONTAINER &B,const UCHAR *Frame,ULONG N,ULONG Auth,UCHAR *Akm,UCHAR *Mode)
 {
     bool Init=B.Optional.FTInitialAssocParameters_IsPresent,Reassoc=B.Optional.FTReAssocParameters_IsPresent;ULONG L;const UCHAR *M;
@@ -39,7 +39,7 @@ NTSTATUS S8FtCommand(S8 *S,const WDI_MESSAGE_HEADER &H,const UCHAR *P,ULONG N)
     if(!S->ConnectPending||S->Resetting||S->J->State!=5||S->J->Ap.FtMode!=2||!S->Ft.AwaitOs||H.PortId!=S->ConnectHeader.PortId)return STATUS_INVALID_DEVICE_STATE;
     WDI_SET_FAST_BSS_TRANSITION_PARAMETERS_COMMAND K;auto Ns=ParseWdiSetFastBssTransitionParametersToIhv(N,P,&S->Tlv,&K);NTSTATUS St=STATUS_INVALID_PARAMETER;
     if(Ns!=NDIS_STATUS_SUCCESS){CleanupParsedWdiSetFastBssTransitionParameters(&K);return St;}
-    if(K.status!=NDIS_STATUS_SUCCESS){Ffail(S,"Windows rejected FT authentication");St=STATUS_SUCCESS;goto Done;}
+    if(K.status!=NDIS_STATUS_SUCCESS){Ffail(S);St=STATUS_SUCCESS;goto Done;}
     if(K.Optional.RSNIE_IsPresent&&K.Optional.MDE_IsPresent&&K.Optional.FTE_IsPresent&&
        WcnFtElement(K.RSNIE.pElements,K.RSNIE.ElementCount,48,22,257)&&WcnFtElement(K.MDE.pElements,K.MDE.ElementCount,54,5,5)&&
        WcnFtElement(K.FTE.pElements,K.FTE.ElementCount,55,84,257)&&Jeq(K.MDE.pElements,S->Ft.Mde,5)){
@@ -59,21 +59,21 @@ extern "C" ULONG WcnStage8FtIes(PWCN_DEVICE D,PWCN_JOIN J,UCHAR *Out)
 extern "C" VOID WcnStage8FtService(PWCN_DEVICE D,PWCN_JOIN J)
 {
     auto S=S8Station(D,J);if(!S||!S->Ft.Enabled||!S->Ft.Reassoc||S->Resetting||S->Fatal)return;
-    if(S->Ft.AwaitOs){if(WcnNowMs()-S->Ft.At>4000)Ffail(S,"Windows FT parameters timeout");return;}
+    if(S->Ft.AwaitOs){if(WcnNowMs()-S->Ft.At>4000)Ffail(S);return;}
     if(S->Ft.Ready)return;if(S->Ft.Attempts&&WcnNowMs()-S->Ft.At<700)return;
-    if(S->Ft.Attempts>=3){Ffail(S,"FT authentication response timeout");return;}
+    if(S->Ft.Attempts>=3){Ffail(S);return;}
     NTSTATUS St=WcnStage7AuthSend(D,J,S->Ft.Request,S->Ft.RequestLength);if(St==STATUS_DEVICE_BUSY)return;
-    if(!NT_SUCCESS(St)){Ffail(S,"FT authentication transmit");return;}S->Ft.At=WcnNowMs();S->Ft.Attempts++;
+    if(!NT_SUCCESS(St)){Ffail(S);return;}S->Ft.At=WcnNowMs();S->Ft.Attempts++;
 }
 extern "C" VOID WcnStage8FtReceive(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *Frame,ULONG N)
 {
     auto S=S8Station(D,J);if(!S||!S->ConnectPending||!S->Ft.Enabled||!S->Ft.Reassoc||!S->Ft.Attempts||S->Ft.AwaitOs||S->Ft.Ready||N<30||N>sizeof(S->AuthResponse)||Jle16(Frame+24)!=2||Jle16(Frame+26)!=2)return;
-    if(Jle16(Frame+28)){Ffail(S,"AP rejected FT authentication");return;}
+    if(Jle16(Frame+28)){Ffail(S);return;}
     ULONG L1,L2,L3;auto Md=WcnFtIe(Frame+30,N-30,54,&L1);auto Ft=WcnFtIe(Frame+30,N-30,55,&L2);auto Request=WcnFtIe(S->Ft.Request+6,S->Ft.RequestLength-6,55,&L3);
     if(!Md||L1!=5||!Ft||L2<84||!Request||!Jeq(Md+2,S->Ft.Mde+2,2)||!Jeq(Ft+52,Request+52,32))return;
     RtlCopyMemory(S->AuthResponse,Frame,N);S->AuthResponseSize=N;
     WDI_INDICATION_FT_ASSOC_PARAMS_NEEDED_PARAMETERS K;RtlCopyMemory(K.BssId.Address,J->Ap.Bssid,6);K.AuthRequest.SimpleAssign(S->Ft.Request,S->Ft.RequestLength);K.AuthResponse.SimpleAssign(S->AuthResponse+24,N-24);
     UCHAR *Out=nullptr;ULONG Length=0;auto Ns=GenerateWdiIndicationFtAssocParamsNeededFromIhv(&K,0,&S->Tlv,&Length,&Out);
-    if(Ns!=NDIS_STATUS_SUCCESS){Ffail(S,"FT indication allocation");return;}
-    S->Ft.AwaitOs=TRUE;S->Ft.At=WcnNowMs();NTSTATUS St=S8Indicate(S,&S->ConnectHeader,WDI_INDICATION_FT_ASSOC_PARAMS_NEEDED,STATUS_SUCCESS,Out,Length,true);FreeGenerated(Out);if(!NT_SUCCESS(St))Ffail(S,"FT indication delivery");
+    if(Ns!=NDIS_STATUS_SUCCESS){Ffail(S);return;}
+    S->Ft.AwaitOs=TRUE;S->Ft.At=WcnNowMs();NTSTATUS St=S8Indicate(S,&S->ConnectHeader,WDI_INDICATION_FT_ASSOC_PARAMS_NEEDED,STATUS_SUCCESS,Out,Length,true);FreeGenerated(Out);if(!NT_SUCCESS(St))Ffail(S);
 }

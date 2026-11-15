@@ -183,4 +183,3 @@ NTSTATUS WcnPhyBeamform(PWCN_DEVICE D,PWCN_JOIN_AP A,ULONG Vdev)
     if(Cap&(1u<<12)){Value|=1;if(Cap&(1u<<20))Value|=2;}if(Cap&(1u<<11))Value|=4;
     return WcnVdevParam(D,Vdev,45,Value);
 }
-

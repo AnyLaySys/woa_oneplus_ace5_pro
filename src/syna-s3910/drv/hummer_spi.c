@@ -1,6 +1,3 @@
-/*
- * GENI SPI4 transport for the Synaptics S3910 on hummer (SM8750).
- */
 #include "hummer_spi.h"
 
 #define HSP_C_CONFIG            0x00u
@@ -39,7 +36,6 @@
 #define HSP_TRE_TYPE_GO         0x20u
 #define HSP_TRE_TYPE_CONFIG0    0x22u
 #define HSP_TRE_CHAIN           0x1u
-#define HSP_TRE_IEOB            (1u << 8)
 #define HSP_TRE_IEOT            (1u << 9)
 #define HSP_TRE_LINK            (1u << 11)
 #define HSP_TRE_TYPE_SHIFT      16u
@@ -50,7 +46,6 @@
 #define HSP_TCE_SUCCESS         1u
 #define HSP_TCE_EOT             2u
 #define HSP_TCE_EOB             4u
-#define HSP_TCE_UNEXP_ERR       16u
 
 #define HSP_EE_OFF              0x10000u
 
@@ -60,17 +55,14 @@
 #define HSP_CH_DB(n, k)         (0x22000u + 0x4000u * (n) + 0x8u * (k))
 #define HSP_CH_CMD(n)           (0x23008u + 0x4000u * (n))
 #define HSP_EE_STATUS(n)        (0x23000u + 0x4000u * (n))
-#define HSP_EE_STATUS_ENABLED   (1u << 0)
 #define HSP_EV_CNTXT(n)         (0x21000u + 0x4000u * (n))
 #define HSP_EV_DB(n)            (0x22100u + 0x4000u * (n))
 #define HSP_EV_CMD(n)           (0x23010u + 0x4000u * (n))
-#define HSP_TYPE_IRQ(n)         (0x23080u + 0x4000u * (n))
 #define HSP_TYPE_IRQ_MSK(n)     (0x23088u + 0x4000u * (n))
 #define HSP_SRC_CH_IRQ(n)       (0x23090u + 0x4000u * (n))
 #define HSP_SRC_EV_CH_IRQ(n)    (0x23094u + 0x4000u * (n))
 #define HSP_SRC_CH_IRQ_CLR(n)   (0x230A0u + 0x4000u * (n))
 #define HSP_SRC_EV_CH_IRQ_CLR(n)(0x230A4u + 0x4000u * (n))
-#define HSP_GLOB_IRQ_STTS(n)    (0x23100u + 0x4000u * (n))
 #define HSP_GLOB_IRQ_EN(n)      (0x23108u + 0x4000u * (n))
 #define HSP_GPII_IRQ_EN(n)      (0x23120u + 0x4000u * (n))
 #define HSP_ERRL(n)             (0x23200u + 0x4000u * (n))
@@ -97,7 +89,7 @@
 #define HSP_SE_M_RX_FIFO_LAST   (1u << 27)
 
 #define HSP_POLL_TRIES          1000u
-#define HSP_XFER_TRIES          150u    // x 1 ms stall = 150 ms ceiling per transfer
+#define HSP_XFER_TRIES          150u
 
 #define HSP_TLMM_STRIDE         0x1000u
 #define HSP_OE_BIT              9u
@@ -111,19 +103,9 @@
 #define HSP_VOTE_ALL            (HSP_VOTE_CORE_2X | HSP_VOTE_CORE | HSP_VOTE_M_AHB | HSP_VOTE_S_AHB | HSP_VOTE_S4)
 
 #define HSP_HALT_CORE_2X        0x2315Cu
-#define HSP_HALT_CORE           0x23148u
-#define HSP_HALT_M_AHB          0x23140u
-#define HSP_HALT_S_AHB          0x23144u
 #define HSP_HALT_S4             0x183CCu
 #define HSP_CBCR_CLK_OFF        (1u << 31)
 
-#define HSP_S4_RCG              0x183DCu
-#define HSP_RCG_CFG             0x4u
-#define HSP_RCG_DFSR_CMD        0x14u
-#define HSP_RCG_PERF_CFG(l)     (0x1Cu + 4u * (l))
-#define HSP_RCG_PERF_M(l)       (0x5Cu + 4u * (l))
-#define HSP_RCG_PERF_N(l)       (0x9Cu + 4u * (l))
-#define HSP_RCG_DFS_EN          (1u << 0)
 #define HSP_SMMU_IDR0           0x020u
 #define HSP_SMMU_SMR(i)         (0x800u + 4u * (i))
 #define HSP_SMMU_S2CR(i)        (0xC00u + 4u * (i))
@@ -165,7 +147,7 @@ HspGpiAt (
     _In_ ULONG    Offset
     )
 {
-    return Ctx->Gpi + (Offset - Ctx->Ee);
+    return Ctx->Gpi + (Offset - HSP_EE_OFF);
 }
 
 static
@@ -216,11 +198,7 @@ HspWaitUs (
     _In_ ULONG Microseconds
     )
 {
-    //
-    // KeStallExecutionProcessor is exact at these sizes; a thread sleep would
-    // round every call up to the timer resolution and turn the poll budgets
-    // below into minutes. Callers only use this for 1..2000 us slices.
-    //
+
     if (Microseconds > 2000) {
         Microseconds = 2000;
     }
@@ -619,7 +597,7 @@ HspStopDma(PHSP_CTX Ctx)
     if (Ctx->MasksSaved) {
         HspGpiWr(Ctx, HSP_SRC_CH_IRQ_CLR(Ctx->Gpii), 3);
         HspGpiWr(Ctx, HSP_SRC_EV_CH_IRQ_CLR(Ctx->Gpii), 1);
-        if (Ctx->MasksSaved) HspMasks(Ctx, TRUE);
+        HspMasks(Ctx, TRUE);
     }
     for (Index = 0; Index < 2; Index++) {
         Ctx->SmmuChanged[Index] = FALSE;
@@ -652,7 +630,7 @@ HspInit (
     }
     RtlZeroMemory(Ctx, sizeof(*Ctx));
     Ctx->Se = Se; Ctx->Gpi = Gpi; Ctx->Tlmm = Tlmm; Ctx->Gcc = Gcc;
-    Ctx->Smmu = Smmu; Ctx->Ee = HSP_EE_OFF;
+    Ctx->Smmu = Smmu;
     WDF_DMA_ENABLER_CONFIG_INIT(&DmaConfig, WdfDmaProfileScatterGather64Duplex, HSP_DATA_BYTES);
     DmaConfig.AddressWidthOverride = 32;
     Status = WdfDmaEnablerCreate(Device, &DmaConfig, WDF_NO_OBJECT_ATTRIBUTES, &Ctx->DmaEnabler);
@@ -679,14 +657,7 @@ HspInit (
     KeMemoryBarrier();
     return STATUS_SUCCESS;
 fail:
-    for (Index = 0; Index < 5; Index++) {
-        if (Ctx->Buffers[Index] != NULL) {
-            WdfObjectDelete(Ctx->Buffers[Index]);
-            Ctx->Buffers[Index] = NULL;
-        }
-    }
-    WdfObjectDelete(Ctx->DmaEnabler);
-    Ctx->DmaEnabler = NULL;
+    (VOID)HspDeinit(Ctx);
     return Status;
 }
 
@@ -699,8 +670,6 @@ HspStartDma (_Inout_ PHSP_CTX Ctx)
     if (Ctx == NULL || Ctx->DmaEnabler == NULL || !Ctx->SmmuReady || Ctx->Ready || Ctx->MasksSaved) {
         return STATUS_INVALID_DEVICE_STATE;
     }
-    Status = HspClocksOn(Ctx);
-    if (!NT_SUCCESS(Status)) return Status;
     HspSeGpiMode(Ctx);
     if (HspSeRd(Ctx, HSP_SE_OUTPUT_CTRL) != 0x7Fu ||
         (HspSeRd(Ctx, HSP_SE_CGC_CTRL) & 0x7Fu) != 0x7Fu ||
@@ -874,4 +843,3 @@ HspXfer (
     RtlCopyMemory(Rx, Ctx->RxData, Len);
     return STATUS_SUCCESS;
 }
-

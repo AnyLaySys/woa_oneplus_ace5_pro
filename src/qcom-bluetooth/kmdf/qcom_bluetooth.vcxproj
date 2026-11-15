@@ -26,6 +26,7 @@
     <KmdfLibraryVersion>1.33</KmdfLibraryVersion>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
     <QbtVersionDate Condition="'$(QbtVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</QbtVersionDate>
+    <QbtRevision Condition="'$(QbtRevision)' == '' and '$(QbtVersionDate)' == '2026-11-07'">5</QbtRevision>
     <QbtRevision Condition="'$(QbtRevision)' == ''">4</QbtRevision>
     <QbtDriverDate>$([System.DateTime]::Parse('$(QbtVersionDate)').ToString('MM/dd/yyyy'))</QbtDriverDate>
     <QbtDriverVersion>$([System.DateTime]::Parse('$(QbtVersionDate)').ToString('yy.M.d')).$(QbtRevision)</QbtDriverVersion>

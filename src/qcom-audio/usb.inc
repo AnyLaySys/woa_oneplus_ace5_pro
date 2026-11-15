@@ -20,7 +20,7 @@ static VOID SiaUsbActivate(PSIA_LINK L)
     if(!L->VersionReady||!U->Rcid||U->Granted)return;
     SiaGlinkCmd(L,GLINK_CMD_OPEN_ACK,(USHORT)U->Rcid,0);
     SiaUsbOpen(L);
-    for(ULONG I=1;I<=4;I++)SiaUsbGrant(L,I,512);
+    for(ULONG I=1;I<=8;I++)SiaUsbGrant(L,I,512);
     U->Granted=TRUE;
     SiaGlinkCmd(L,GLINK_CMD_RX_INTENT_REQ,SIA_USB_LCID,64);
 }
@@ -63,6 +63,9 @@ static BOOLEAN SiaUsbHandle(PSIA_LINK L,USHORT Cmd,USHORT P1,ULONG P2,ULONG Tail
         return TRUE;
     }
     if(Cmd==GLINK_CMD_TX_DATA||Cmd==GLINK_CMD_TX_DATA_CONT){
+        if(Cmd==GLINK_CMD_TX_DATA&&!Frame[1]&&Frame[0]<=512){
+            UCHAR Payload[512];SiaFifoRead(L,Tail+16,Payload,Frame[0]);QchReceive(L,Payload,Frame[0]);
+        }
         if(Cmd==GLINK_CMD_TX_DATA&&Frame[0]>=24&&!Frame[1]){
             SiaFifoRead(L,Tail+16,Data,24);
             const ULONG UNALIGNED *D=(const ULONG UNALIGNED*)Data;
@@ -76,55 +79,21 @@ static BOOLEAN SiaUsbHandle(PSIA_LINK L,USHORT Cmd,USHORT P1,ULONG P2,ULONG Tail
         return TRUE;
     }
     if(Cmd==GLINK_CMD_CLOSE){
+        if(L->Charge.Bridge==2){L->Charge.Fault=13;QchOff(L);}
         SiaGlinkCmd(L,GLINK_CMD_CLOSE_ACK,P1,0);
         SiaUsbResetPeer(U);
         return TRUE;
     }
     return FALSE;
 }
-static NTSTATUS SiaUsbBatteryIo(PDEVICE_OBJECT Device,QCB_SOURCE *Source,QCB_POWER *Power)
-{
-    KEVENT Event;IO_STATUS_BLOCK Io;LARGE_INTEGER Timeout;
-    KeInitializeEvent(&Event,NotificationEvent,FALSE);
-    PIRP Irp=IoBuildDeviceIoControlRequest(QCB_POWER_EXCHANGE,Device,Source,sizeof(*Source),Power,sizeof(*Power),TRUE,&Event,&Io);
-    if(!Irp)return STATUS_INSUFFICIENT_RESOURCES;
-    NTSTATUS Status=IoCallDriver(Device,Irp);
-    if(Status==STATUS_PENDING){
-        Timeout.QuadPart=-10000000LL;
-        Status=KeWaitForSingleObject(&Event,Executive,KernelMode,FALSE,&Timeout);
-        if(Status==STATUS_TIMEOUT){IoCancelIrp(Irp);KeWaitForSingleObject(&Event,Executive,KernelMode,FALSE,NULL);return STATUS_IO_TIMEOUT;}
-        Status=Io.Status;
-    }
-    return Status;
-}
-static VOID SiaUsbBattery(SIA_USB *U,ULONGLONG Now)
-{
-    static const GUID Guid={0x72631e54,0x78a4,0x11d0,{0xbc,0xf7,0x00,0xaa,0x00,0xb7,0xb3,0x2a}};
-    PWSTR Names=NULL;PFILE_OBJECT File;PDEVICE_OBJECT Device;UNICODE_STRING Name;
-    QCB_SOURCE Source={U->OnlineAt,U->OnlineAt&&U->OnlineAt<=Now&&Now-U->OnlineAt<=QCB_POWER_MAX_AGE_MS,U->Otg.Live[1]};
-    QCB_POWER P={0};
-    NTSTATUS Status=IoGetDeviceInterfaces(&Guid,NULL,0,&Names);
-    if(NT_SUCCESS(Status)){
-        if(!Names[0])Status=STATUS_DEVICE_NOT_READY;
-        else{
-            RtlInitUnicodeString(&Name,Names);Status=IoGetDeviceObjectPointer(&Name,FILE_READ_DATA,&File,&Device);
-            if(NT_SUCCESS(Status)){Status=SiaUsbBatteryIo(Device,&Source,&P);ObDereferenceObject(File);}
-        }
-        ExFreePool(Names);
-    }
-    U->BatteryAt=Now;U->BatteryUntil=0;
-    if(NT_SUCCESS(Status)&&P.Valid&&P.SampleTimeMs&&P.SampleTimeMs<=Now&&Now-P.SampleTimeMs<=QCB_POWER_MAX_AGE_MS&&
-        P.TemperatureDeciK>=2832&&P.TemperatureDeciK<=3182&&P.VoltageMv>=6500&&P.VoltageMv<=8600&&P.Soc>=5&&P.Soc<=100&&P.RemainingMah)
-        U->BatteryUntil=P.SampleTimeMs+QCB_POWER_MAX_AGE_MS;
-}
 static VOID SiaUsbPoll(PSIA_LINK L)
 {
     SIA_USB *U=&L->Usb;ULONGLONG Now=KeQueryInterruptTime()/10000;
     SiaUsbOpen(L);SiaUsbActivate(L);
     if(!U->Acked||!U->Rcid||!U->Count)return;
+    if(QchSharedPoll(L,Now))return;
     if(U->Otg.Stop==3)OtgShutdown(&U->Otg,Now);
     if(U->Otg.Phase==OtgIdle)OtgStart(&U->Otg,Now);
-    if(Now-U->BatteryAt>=500)SiaUsbBattery(U,Now);
     OTG_REQUEST R;
     if(!OtgNext(&U->Otg,Now,U->BatteryUntil&&Now<=U->BatteryUntil,&R))return;
     ULONG I;for(I=0;I<U->Count&&!(U->Free[I]&&U->Size[I]>=24);I++);

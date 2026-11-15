@@ -209,7 +209,7 @@ WcnMhiPrepare (
         Status = WcnDmaAlloc (Dev, sizeof (MHI_CTXT), &Mhi->CmdCtxt);
     }
     if (!NT_SUCCESS (Status)) {
-        WcnLog (Dev, "mhi: context allocation failed 0x%08x", Status);
+
         return Status;
     }
 
@@ -228,14 +228,14 @@ WcnMhiPrepare (
         Event[Index].Dword2 = Index + 1;
         Status = MhiRingAlloc (Dev, &Mhi->Event[Index], Elements[Index], &Event[Index]);
         if (!NT_SUCCESS (Status)) {
-            WcnLog (Dev, "mhi: event ring %u allocation failed 0x%08x", Index, Status);
+
             return Status;
         }
     }
 
     Status = MhiRingAlloc (Dev, &Mhi->Cmd, MHI_CMD_ELEMENTS, (PMHI_CTXT)Mhi->CmdCtxt.Va);
     if (!NT_SUCCESS (Status)) {
-        WcnLog (Dev, "mhi: command ring allocation failed 0x%08x", Status);
+
         return Status;
     }
 
@@ -260,7 +260,7 @@ MhiLoadBhi (
 
     Status = WcnDmaAlloc (Dev, Size, &Dma);
     if (!NT_SUCCESS (Status)) {
-        WcnLog (Dev, "bhi: buffer allocation failed 0x%08x", Status);
+
         return Status;
     }
     RtlCopyMemory (Dma.Va, Image, Size);
@@ -326,7 +326,7 @@ MhiAllocBhie (
         }
         Status = WcnDmaAlloc (Dev, MHI_SEG_LEN, &Table->Segment[Index]);
         if (!NT_SUCCESS (Status)) {
-            WcnLog (Dev, "bhie: segment %u allocation failed 0x%08x", Index, Status);
+
             return Status;
         }
         if (Image != NULL) {
@@ -632,7 +632,6 @@ MhiProcessControlEvents (
                 if (Mhi->MissionMode) {
                     MhiRingEventDoorbells (Dev);
                 }
-
             } else if (Code == MHI_STATE_SYS_ERR) {
 
                 Mhi->SysErr = TRUE;
@@ -657,7 +656,6 @@ MhiProcessControlEvents (
                 Mhi->SysErr = TRUE;
             }
             break;
-
         }
 
         Ring->Wp = (Ring->Wp + sizeof (MHI_ELEMENT)) % Ring->Length;
@@ -797,7 +795,7 @@ MhiStartChannel (
         Status = WcnDmaAlloc (Dev, (SIZE_T)MHI_CHAN_ELEMENTS * MHI_CHAN_BUF_LEN, &Chan->Buffers);
     }
     if (!NT_SUCCESS (Status)) {
-        WcnLog (Dev, "chan %u: allocation failed 0x%08x", Id, Status);
+
         return Status;
     }
     Chan->Ring.Doorbell = Mhi->ChDb + 8 * Id;
@@ -928,9 +926,7 @@ MhiTransferEvent (
 
             return;
         }
-        if (Code == MHI_EV_CC_OVERFLOW) {
-            WcnLog (Dev, "chan %u: overflow, length %u", Id, Length);
-        }
+
         EventPos = (ULONG)(Event->Ptr - Ring->Mem.La);
         DeviceNext = (EventPos + sizeof (MHI_ELEMENT)) % Ring->Length;
         while (Ring->Rp != DeviceNext) {
@@ -958,7 +954,6 @@ MhiTransferEvent (
             MhiRingChannelDoorbell (Dev, Chan);
         }
         break;
-
     }
 }
 
@@ -1003,10 +998,10 @@ MhiProcessDataEvents (
     }
 }
 
-/* main.c / ath12k coredump: collect the RDDM upload once the device asserts */
+/* Latch firmware failure; stop traffic without collecting a memory dump. */
 static VOID MhiLatchRddm(PWCN_DEVICE Dev)
 {
-    Dev->Mhi.RddmSaved=TRUE;WcnLog(Dev,"firmware RDDM failure; data path stopped");
+    Dev->Mhi.RddmFailed=TRUE;
 }
 
 /* Called from the bring-up thread after power up: keeps the event rings drained. */
@@ -1024,7 +1019,7 @@ WcnMhiService (
     if (Mhi->Chan[1].Running) {
         MhiProcessDataEvents (Dev);
     }
-    if (!Mhi->RddmSaved && MhiExecEnv (Dev) == MHI_EE_RDDM) {
+    if (!Mhi->RddmFailed && MhiExecEnv (Dev) == MHI_EE_RDDM) {
         MhiLatchRddm (Dev);
     }
 }

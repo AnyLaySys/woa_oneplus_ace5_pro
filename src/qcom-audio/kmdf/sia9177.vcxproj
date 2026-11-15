@@ -4,14 +4,6 @@
 
   <ItemGroup Label="ProjectConfigurations">
 
-    <ProjectConfiguration Include="Debug|ARM64">
-
-      <Configuration>Debug</Configuration>
-
-      <Platform>ARM64</Platform>
-
-    </ProjectConfiguration>
-
     <ProjectConfiguration Include="Release|ARM64">
 
       <Configuration>Release</Configuration>
@@ -54,22 +46,6 @@
 
   </PropertyGroup>
 
-  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
-
-    <TargetVersion>Windows10</TargetVersion>
-
-    <UseDebugLibraries>True</UseDebugLibraries>
-
-    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
-
-    <DriverType>WDM</DriverType>
-
-    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
-
-    <ConfigurationType>Driver</ConfigurationType>
-
-  </PropertyGroup>
-
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
 
   <PropertyGroup>
@@ -83,7 +59,10 @@
     <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-10-31'">1</SiaRevision>
     <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-05'">17</SiaRevision>
     <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-06'">17</SiaRevision>
-    <SiaRevision Condition="'$(SiaRevision)' == ''">0</SiaRevision>
+    <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-07'">37</SiaRevision>
+    <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-08'">10</SiaRevision>
+    <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-09'">2</SiaRevision>
+    <SiaRevision Condition="'$(SiaRevision)' == ''">4</SiaRevision>
 
     <SiaDriverDate>$([System.DateTime]::Parse('$(SiaVersionDate)').ToString('MM/dd/yyyy'))</SiaDriverDate>
 
@@ -95,6 +74,7 @@
   <ItemDefinitionGroup>
 
     <ClCompile>
+      <DebugInformationFormat>None</DebugInformationFormat>
 
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..</AdditionalIncludeDirectories>
 
@@ -112,8 +92,10 @@
     </ClCompile>
 
     <Link>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <Profile>false</Profile>
 
-      <AdditionalDependencies>portcls.lib;ks.lib;ksguid.lib;ntstrsafe.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>wdmsec.lib;portcls.lib;ks.lib;ksguid.lib;ntstrsafe.lib;%(AdditionalDependencies)</AdditionalDependencies>
 
     </Link>
 
@@ -142,6 +124,7 @@
 
   <ItemGroup>
 
+    <ClCompile Include="..\charge.c" />
     <ClCompile Include="..\driver.c" />
 
     <ClCompile Include="..\i2c.c" />
@@ -169,11 +152,16 @@
     <Inf Include="sia9177.inx" />
 
     <FilesToPackage Include="$(TargetPath)" />
+    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\fw\adsp\adsp*.mdt;$(MSBuildThisFileDirectory)..\..\..\fw\adsp\adsp*.b??">
+      <PackageRelativeDirectory>ADSP</PackageRelativeDirectory>
+    </FilesToPackage>
+    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\out\qcom-charge\ARM64\Release\bin\charge.exe" />
+    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\qcom-charge\credential.bin" />
 
   </ItemGroup>
 
   <PropertyGroup>
-    <WoAProjectRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\..'))</WoAProjectRoot>
+    <WoAProjectRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..'))</WoAProjectRoot>
     <OutDir>$(WoAProjectRoot)\out\qcom-audio\$(Platform)\$(Configuration)\bin\</OutDir>
     <IntDir>$(WoAProjectRoot)\out\qcom-audio\$(Platform)\$(Configuration)\obj\</IntDir>
   </PropertyGroup>

@@ -14,13 +14,6 @@ EVT_WDF_INTERRUPT_ISR WcnEvtIsr;
 EVT_WDF_INTERRUPT_DPC WcnEvtDpc;
 KSTART_ROUTINE WcnThread;
 
-/* Failures remain visible to a kernel debugger; no persistent trace files. */
-VOID WcnLog(PWCN_DEVICE Dev,PCSTR Format,...)
-{
-    va_list Args;UNREFERENCED_PARAMETER(Dev);va_start(Args,Format);
-    vDbgPrintExWithPrefix("wcn7861: ",DPFLTR_IHVNETWORK_ID,DPFLTR_ERROR_LEVEL,Format,Args);va_end(Args);
-}
-
 LONGLONG
 WcnNowMs (
     VOID
@@ -134,8 +127,7 @@ WcnDmaAllocAligned (
     if (!Length || Dma->La > MAXULONG || Length - 1 > MAXULONG - Dma->La ||
         (Dma->La & AlignmentMask) != 0 ||
         (AlignmentMask < PAGE_SIZE && ((ULONG_PTR)Dma->Va & AlignmentMask) != 0)) {
-        WcnLog (Dev, "dma: invalid common buffer LA 0x%llx VA %p len %Iu mask 0x%x",
-                Dma->La, Dma->Va, Length, AlignmentMask);
+
         WdfObjectDelete (Dma->Buffer);
         RtlZeroMemory (Dma, sizeof (*Dma));
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -168,11 +160,9 @@ WcnThread (
     }
     if (NT_SUCCESS (Status)) {
         Status = WcnSmmuSetup ();
-
     }
     if (NT_SUCCESS (Status)) {
         Status = WcnReadFile (WCN_FIRMWARE_PATH, &Dev->Firmware, &Dev->FirmwareSize);
-
     }
     if (NT_SUCCESS (Status)) {
         WcnPcieSwReset (Dev, TRUE);
@@ -204,7 +194,6 @@ WcnThread (
         WcnStage8Service (Dev);
         WcnStage7Service (Dev);
         WcnTdlsService (Dev);
-
     }
 
     PsTerminateSystemThread (STATUS_SUCCESS);

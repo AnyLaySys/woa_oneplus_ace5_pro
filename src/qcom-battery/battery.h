@@ -2,6 +2,8 @@
 
 #include <ntddk.h>
 #include <batclass.h>
+#include <wmilib.h>
+#include <wmistr.h>
 #include "power.h"
 
 #define BAT_GAUGE_ADDRESS       0x55u
@@ -24,10 +26,9 @@
 #define BQ_REG_DESIGN           0x3Cu
 
 #define BAT_POLL_MS             5000u
-#define BAT_SLICE_MS            250u
-#define BAT_PENDING_MAX          32u
 #define BAT_BATTERY_TAG         1u
 #define BAT_DEVICE_NAME         L"OnePlus Ace 5 Pro Battery"
+#define BAT_NOMINAL_MV          7740u
 
 typedef struct _BAT_SNAPSHOT
 {
@@ -42,6 +43,7 @@ typedef struct _BAT_SNAPSHOT
     ULONG   CycleCount;
     ULONG   TempDeciK;
     LONG    CurrentMa;
+    ULONG CellValid,Cell1Mv,Cell2Mv,BatteryStatus,ChargingVoltageMv,ChargingCurrentMa;
 } BAT_SNAPSHOT;
 
 typedef struct _BAT_DEVICE
@@ -51,15 +53,14 @@ typedef struct _BAT_DEVICE
     PDEVICE_OBJECT             Pdo;
     PVOID                      ClassData;
     BATTERY_MINIPORT_INFO_V1_1 Info;
-    UNICODE_STRING             DeviceName;
+    WMILIB_CONTEXT             Wmi;
+    BOOLEAN                    WmiRegistered;
     PUCHAR                     Tlmm;
     HANDLE                     Thread;
     KEVENT                     StopEvent;
     volatile LONG              Stopping;
     BOOLEAN                    I2cReady;
     KSPIN_LOCK                 Lock;
-    KSPIN_LOCK                 PendingLock;
-    PIRP                       Pending[BAT_PENDING_MAX];
     BAT_SNAPSHOT               Now;
     QCB_SOURCE                 Source;
 } BAT_DEVICE, *PBAT_DEVICE;
@@ -78,18 +79,6 @@ BatGaugeSample (
 NTSTATUS
 BatI2cInit (
     _In_ PBAT_DEVICE Dev
-    );
-
-BOOLEAN
-BatPendingAdd (
-    _In_ PBAT_DEVICE Dev,
-    _In_ PIRP Irp
-    );
-
-VOID
-BatPendingDrain (
-    _In_ PBAT_DEVICE Dev,
-    _In_ NTSTATUS Status
     );
 
 NTSTATUS

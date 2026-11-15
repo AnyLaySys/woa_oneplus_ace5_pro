@@ -66,7 +66,7 @@ DpRingCreate (PWCN_DEVICE Dev, ULONG Id, ULONG Entries, ULONG EntryDwords,
         WcnWrite (Dev, RegBase + 0x10, Misc);
         if (WcnRead (Dev, RegBase) != (ULONG)Ring->Desc.La ||
             (WcnRead (Dev, RegBase + 0x10) & 0x40) == 0) {
-            WcnLog (Dev, "dp: ring %u register readback failed", Id);
+
             return STATUS_DEVICE_HARDWARE_ERROR;
         }
     }
@@ -130,8 +130,7 @@ DpCookiesInitialize (PWCN_DEVICE Dev)
     if (!Cmem || Dev->Qmi.CmemBase > MAXULONG ||
         Dev->Qmi.CmemSize < WCN_DP_SPT_PAGES * 4 ||
         Dev->Qmi.CmemBase + Dev->Qmi.CmemSize > 0x100000000ull) {
-        WcnLog (Dev, "dp: invalid CAP CMEM base 0x%llx size 0x%llx",
-                Dev->Qmi.CmemBase, Dev->Qmi.CmemSize);
+
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
     WDF_OBJECT_ATTRIBUTES_INIT (&Attributes);
@@ -152,7 +151,7 @@ DpCookiesInitialize (PWCN_DEVICE Dev)
         KeMemoryBarrier ();
         WcnWrite (Dev, Cmem + Page * 4, (ULONG)(Dev->Dp.Spt[Page].La >> 12));
         if (WcnRead (Dev, Cmem + Page * 4) != (ULONG)(Dev->Dp.Spt[Page].La >> 12)) {
-            WcnLog (Dev, "dp: CMEM PPT readback failed page %u", Page);
+
             return STATUS_DEVICE_HARDWARE_ERROR;
         }
     }
@@ -287,7 +286,7 @@ WcnDpInitialize (_In_ PWCN_DEVICE Dev)
     return STATUS_SUCCESS;
 Fail:
     Dev->Dp.Failed = TRUE;
-    WcnLog (Dev, "dp: setup failed 0x%08x; WMI_INIT blocked, DMA retained until device teardown", Status);
+
     return Status;
 #undef DP_TRY
 }
@@ -390,7 +389,6 @@ WcnDpHttRxPrepare (PWCN_DEVICE Dev)
         B[11] = Batch * Ring->EntryDwords | ((Timer >> 3) << 16);
         B[12] = Low;
         Status = WcnHttSend (Dev, B, 52);
-
     } else {
         /* ath12k_dp_rxdma_ring_sel_config_qcc2072, normal receive filter.
          * No monitor-mode capture and no direct data-packet injection. */
@@ -404,7 +402,6 @@ WcnDpHttRxPrepare (PWCN_DEVICE Dev)
         B[8] = S6_QCC_MPDU_START_TAG_OFFSET << 16;
         B[9] = S6_QCC_MSDU_END_TAG_OFFSET;
         Status = WcnHttSend (Dev, B, sizeof (B));
-
     }
     if (!NT_SUCCESS (Status)) return Status;
     Dev->Dp.HttRxStep++;

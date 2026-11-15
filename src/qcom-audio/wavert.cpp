@@ -372,6 +372,7 @@ static NTSTATUS AddDevice(PDRIVER_OBJECT Driver, PDEVICE_OBJECT Device)
 static NTSTATUS DispatchPnp(PDEVICE_OBJECT Device, PIRP Irp)
 {
     auto Stack = IoGetCurrentIrpStackLocation(Irp);
+    if (Stack->MinorFunction == IRP_MN_REMOVE_DEVICE) QchRemove();
     if (Stack->MinorFunction == IRP_MN_STOP_DEVICE || Stack->MinorFunction == IRP_MN_REMOVE_DEVICE ||
         Stack->MinorFunction == IRP_MN_SURPRISE_REMOVAL) SiaHardwareStop(DeviceContext(Device));
     return PcDispatchIrp(Device, Irp);
@@ -382,5 +383,6 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT Driver, PUNICODE_STRING RegistryP
 {
     NTSTATUS Status = PcInitializeAdapterDriver(Driver, RegistryPath, AddDevice);
     if (NT_SUCCESS(Status)) Driver->MajorFunction[IRP_MJ_PNP] = DispatchPnp;
+    if (NT_SUCCESS(Status)) Status=QchInit(Driver,RegistryPath);
     return Status;
 }

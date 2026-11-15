@@ -11,15 +11,8 @@
 #include "tdls-wire.h"
 #include "hotspot.h"
 
-VOID WcnStage7Fail(PWCN_DEVICE Dev,PWCN_JOIN J,PCSTR Reason)
-{
-
-    if(J->Failed)return;
-    J->Failed=TRUE;
-    WcnLog(Dev,"stage7: FAIL state=%u reason=%s auth=%u assoc=%u PTK=%u GTK=%u authorized=%u tx=%u ack=%u rx=%u dropped=%u runtime-errors=%u",
-        J->State,Reason,J->Authenticated,J->Associated,J->PairwiseInstalled,J->GroupInstalled,J->Authorized,Dev->Runtime.TxCompleted,Dev->Runtime.TxAcked,J->RxFrames,Dev->Runtime.RxDropped,Dev->Runtime.RuntimeErrors);
-
-}
+VOID WcnStage7Fail(PWCN_JOIN J)
+{J->Failed=TRUE;}
 BOOLEAN WcnJoinCandidate(PWCN_DEVICE Dev,const UCHAR *F,ULONG N,ULONG Frequency,LONG Rssi,const UCHAR *Name,ULONG NameLength,ULONG Auth,BOOLEAN Pmf,UCHAR Akm,BOOLEAN Hidden,PWCN_JOIN_AP Out)
 {
     WCN_JOIN_AP A={0};const UCHAR *Ssid=NULL,*Rsn=NULL;ULONG I,K,L,SsidLength=0,Rate,Index;BOOLEAN Wpa=FALSE,NeedHt=FALSE,NeedVht=FALSE,NeedHe=FALSE,NeedEht=FALSE;
@@ -166,10 +159,10 @@ static VOID JmgmtRx(PWCN_DEVICE Dev,PWCN_JOIN J,const UCHAR *P,ULONG N)
         // Scan discovery already forwards these frames; outside scans, keep the associated signal live.
         if(Size>=36&&!Dev->Scan.RuntimeScan){ULONG Frequency=Jle32(H+64);if(!Frequency)Frequency=WcnChannelFrequency(Jle32(H));WcnStage8Observe(Dev,F,Size,Frequency,(LONG)Jle32(H+44));}
         if(Size>=36)WcnTdlsObserve(J,F+36,Size-36);
-        if(WcnPhyChannelChanged(Dev,J,F,Size,36))WcnStage7Fail(Dev,J,"AP changed channel geometry; fresh regulatory discovery required");return;
+        if(WcnPhyChannelChanged(Dev,J,F,Size,36))WcnStage7Fail(J);return;
     }
     if(!Jeq(F+4,J->Mac,6)&&!(J->Ap.Pmf&&(F[4]&1)))return;
-    if((Fc&0xfc)==0xd0&&!(Fc&0x4000)&&Size>=30&&F[24]==4&&F[25]==4){if(WcnPhyChannelChanged(Dev,J,F,Size,24))WcnStage7Fail(Dev,J,"AP announced extended channel switch");return;}
+    if((Fc&0xfc)==0xd0&&!(Fc&0x4000)&&Size>=30&&F[24]==4&&F[25]==4){if(WcnPhyChannelChanged(Dev,J,F,Size,24))WcnStage7Fail(J);return;}
     if(J->Ap.FtMode==2&&(Fc&0xfc)==0xb0&&J->State==5){if(!(Fc&0x4000))WcnStage8FtReceive(Dev,J,F,Size);return;}
     if(J->Ap.Auth==WCN_AUTH_SAE&&(Fc&0xfc)==0xb0&&J->State==5){
         if(Fc&0x4000)return;
@@ -177,28 +170,29 @@ static VOID JmgmtRx(PWCN_DEVICE Dev,PWCN_JOIN J,const UCHAR *P,ULONG N)
     }
     if(((Fc&0xfc)==0xa0||(Fc&0xfc)==0xc0||(Fc&0xfc)==0xd0)&&J->Ap.Pmf){
         ULONG Off;if(!WcnPmfReceive(Dev,J,F,Size,&Off))return;
-        if((Fc&0xfc)==0xd0){if(WcnPhyChannelChanged(Dev,J,F,Size,Off)){WcnStage7Fail(Dev,J,"PMF-verified channel switch");return;}WcnStage8ActionReceive(Dev,J,F+Off,Size-Off);if(Size>=Off+2&&F[Off]==3)WcnAggregationReceive(Dev,J,F+Off,Size-Off);if(Size>=Off+4&&F[Off]==8&&F[Off+1]==0){J->SaQueryPending=TRUE;RtlCopyMemory(J->SaQueryId,F+Off+2,2);}return;}
-        if(Size>=Off+2){WcnStage7Fail(Dev,J,"protected AP disconnect");}return;
+        if((Fc&0xfc)==0xd0){if(WcnPhyChannelChanged(Dev,J,F,Size,Off)){WcnStage7Fail(J);return;}WcnStage8ActionReceive(Dev,J,F+Off,Size-Off);if(Size>=Off+2&&F[Off]==3)WcnAggregationReceive(Dev,J,F+Off,Size-Off);if(Size>=Off+4&&F[Off]==8&&F[Off+1]==0){J->SaQueryPending=TRUE;RtlCopyMemory(J->SaQueryId,F+Off+2,2);}return;}
+        if(Size>=Off+2){WcnStage7Fail(J);}return;
     }
     if(Fc&0x4000)return; /* protocol/type, To/FromDS, protected */
-    if((Fc&0xfc)==0xd0){if(WcnPhyChannelChanged(Dev,J,F,Size,24)){WcnStage7Fail(Dev,J,"AP announced channel switch");return;}WcnStage8ActionReceive(Dev,J,F+24,Size-24);if(Size>=26&&F[24]==3)WcnAggregationReceive(Dev,J,F+24,Size-24);return;}
+    if((Fc&0xfc)==0xd0){if(WcnPhyChannelChanged(Dev,J,F,Size,24)){WcnStage7Fail(J);return;}WcnStage8ActionReceive(Dev,J,F+24,Size-24);if(Size>=26&&F[24]==3)WcnAggregationReceive(Dev,J,F+24,Size-24);return;}
     WcnStage8Mgmt(Dev,J,F,Size,FALSE);
     if((Fc&0xfc)==0xb0&&J->State==5&&Size>=30){
         if(Jle16(F+24)!=0||Jle16(F+26)!=2)return;
-        if(Jle16(F+28)){WcnStage7Fail(Dev,J,"AP rejected open-system authentication");return;}
+        if(Jle16(F+28)){WcnStage7Fail(J);return;}
         J->Authenticated=TRUE;
     }else if((Fc&0xfc)==(J->Reassociate?0x30:0x10)&&J->State==6&&Size>=30){
-        if(Jle16(F+26)){if(WcnRsnCacheRejected(Jle16(F+26),&J->Ap.HasPmkid,J->Ap.Pmkid)){J->Attempts=0;J->LastSendAt=0;return;}WcnStage7Fail(Dev,J,"AP rejected association");return;}
+        if(Jle16(F+26)){if(J->Ap.Auth!=WCN_AUTH_OWE&&WcnRsnCacheRejected(Jle16(F+26),&J->Ap.HasPmkid,J->Ap.Pmkid)){J->Attempts=0;J->LastSendAt=0;return;}WcnStage7Fail(J);return;}
         J->Aid=Jle16(F+28)&0x3fff;
-        if(!J->Aid||J->Aid>2007){WcnStage7Fail(Dev,J,"invalid association ID");return;}
+        if(!J->Aid||J->Aid>2007){WcnStage7Fail(J);return;}
         /* Validate the complete response IE stream before accepting it. */
         {BOOLEAN Ht=FALSE,Vht=FALSE,He=FALSE,Eht=FALSE;
-        for(N=30;N<Size;N+=L+2){if(Size-N<2){J->BadEvents++;return;}L=F[N+1];if(L>Size-N-2){J->BadEvents++;return;}
+        for(N=30;N<Size;N+=L+2){if(Size-N<2){return;}L=F[N+1];if(L>Size-N-2){return;}
             if(F[N]==45&&L==26)Ht=TRUE;if(F[N]==191&&L==12)Vht=TRUE;if(F[N]==255&&L>=22&&F[N+2]==35)He=TRUE;if(F[N]==255&&L>=15&&F[N+2]==108)Eht=TRUE;}
-        if((J->Ap.Ht&&!Ht)||(J->Ap.Vht&&!Vht)||(J->Ap.He&&!He)||(J->Ap.Eht&&!Eht)){WcnStage7Fail(Dev,J,"AP association response omitted negotiated HT/VHT capabilities");return;}
+        if((J->Ap.Ht&&!Ht)||(J->Ap.Vht&&!Vht)||(J->Ap.He&&!He)||(J->Ap.Eht&&!Eht)){WcnStage7Fail(J);return;}
         }
+        if(J->Ap.Auth==WCN_AUTH_OWE&&!WcnStage8OweResponse(Dev,J,F+30,Size-30)){WcnStage7Fail(J);return;}
         J->Associated=TRUE;
-    }else if(((Fc&0xfc)==0xa0||(Fc&0xfc)==0xc0)&&Size>=26){WcnStage7Fail(Dev,J,"selected AP disconnected station");}
+    }else if(((Fc&0xfc)==0xa0||(Fc&0xfc)==0xc0)&&Size>=26){WcnStage7Fail(J);}
 }
 static VOID Jreceive(PWCN_DEVICE Dev,PWCN_JOIN J,ULONG Event,const UCHAR *P,ULONG N)
 {
@@ -221,33 +215,31 @@ static VOID Jreceive(PWCN_DEVICE Dev,PWCN_JOIN J,ULONG Event,const UCHAR *P,ULON
     case S7_WMI_MGMT_TX_COMPLETION_EVENTID:Tag=S7_WMI_TAG_MGMT_TX_COMPL_EVENT;break;
     case S7_WMI_PEER_ASSOC_CONF_EVENTID:Tag=S7_WMI_TAG_PEER_ASSOC_CONF_EVENT;break;
     case S7_WMI_VDEV_INSTALL_KEY_COMPLETE_EVENTID:Tag=S7_WMI_TAG_VDEV_INSTALL_KEY_COMPLETE_EVENT;break;
-    case 0x7001:if(Jtlvs(P,N))JmgmtRx(Dev,J,P,N);else J->BadEvents++;return;
+    case 0x7001:if(Jtlvs(P,N))JmgmtRx(Dev,J,P,N);else ;return;
     default:return;
     }
-    if(!Jtlvs(P,N)){J->BadEvents++;return;}F=Jfind(P,N,Tag,&L);if(!F){J->BadEvents++;return;}
+    if(!Jtlvs(P,N)){return;}F=Jfind(P,N,Tag,&L);if(!F){return;}
     if(Event==S7_WMI_VDEV_START_RESP_EVENTID){
         if(WcnChannelEvent(Dev,J,P,N))return;
-        if(L<sizeof(struct wmi_vdev_start_resp_event)){J->BadEvents++;return;}
+        if(L<sizeof(struct wmi_vdev_start_resp_event)){return;}
         if(J->State!=3||Jle32(F)!=J->Vdev||Jle32(F+4)!=0||Jle32(F+8)!=0){
 
             return;
         }
 
-        if(Jle32(F+12)){WcnLog(Dev,"stage7: VDEV_START rejected status=%u",Jle32(F+12));WcnStage7Fail(Dev,J,"VDEV_START rejected");return;}
-        if(!Jle32(F+28)||!Jle32(F+32)){WcnStage7Fail(Dev,J,"firmware VDEV_START returned zero NSS");return;}
+        if(Jle32(F+12)){WcnStage7Fail(J);return;}
+        if(!Jle32(F+28)||!Jle32(F+32)){WcnStage7Fail(J);return;}
         WcnPhyLimitNss(Dev,J,Jle32(F+28)<Jle32(F+32)?Jle32(F+28):Jle32(F+32));
-        J->MacId=Jle32(F+24);if(J->MacId>1){WcnStage7Fail(Dev,J,"unsupported firmware MAC routing");return;}J->VdevStarted=TRUE;
-
+        J->MacId=Jle32(F+24);if(J->MacId>1){WcnStage7Fail(J);return;}J->VdevStarted=TRUE;
     }else if(Event==S7_WMI_MGMT_TX_COMPLETION_EVENTID){
         /* DBS can migrate vdev0 between firmware pdev1/pdev2. Descriptor IDs
          * are globally reserved until completion, so match ownership, not the initial pdev. */
         if(L<12||!J->MgmtBusy||Jle32(F)!=J->MgmtId||Dev->MgmtInUse[J->Vdev]!=J->MgmtId||Jle32(F+8)<1||Jle32(F+8)>2)return;
         J->MgmtStatus=Jle32(F+4);J->MgmtBusy=FALSE;Dev->MgmtInUse[J->Vdev]=0;
-
     }else if(Event==S7_WMI_PEER_ASSOC_CONF_EVENTID){
         if(L<12||J->State!=8||Jle32(F)!=J->Vdev||!Jeq(F+4,J->Ap.Bssid,6))return;
         J->AssocConfirmed=TRUE;
-    }else WcnStationKeyComplete(Dev,J,F,L);
+    }else WcnStationKeyComplete(J,F,L);
 }
 static NTSTATUS JsaQueryReply(PWCN_DEVICE Dev,PWCN_JOIN J);
 NTSTATUS WcnStage7EnsureVdev(PWCN_DEVICE D,PWCN_JOIN J)
@@ -266,28 +258,27 @@ static VOID Jservice(PWCN_DEVICE Dev,PWCN_JOIN J)
 {
     LONGLONG Now=WcnNowMs();NTSTATUS St=STATUS_SUCCESS;
     if(J->Failed||J->Resetting||!Dev->Ce.WmiReady)return;
-    if(Dev->Ce.SourceFailed){WcnStage7Fail(Dev,J,"CE source consumer pointer/ownership failure");return;}
-    if(Dev->Mhi.SysErr||Dev->Mhi.RddmSaved||Dev->Dp.Failed){WcnStage7Fail(Dev,J,"firmware or data-path failure");return;}
-    if(Dev->Scan.Failed){WcnStage7Fail(Dev,J,"country/scan prerequisites failed");return;}
+    if(Dev->Ce.SourceFailed){WcnStage7Fail(J);return;}
+    if(Dev->Mhi.SysErr||Dev->Mhi.RddmFailed||Dev->Dp.Failed){WcnStage7Fail(J);return;}
+    if(Dev->Scan.Failed){WcnStage7Fail(J);return;}
     if(!Dev->Scan.Passed)return;
     if(!WcnStage8ConnectRequested(Dev,J))return;
-    if(!J->Created){St=WcnStage7EnsureVdev(Dev,J);if(!NT_SUCCESS(St)&&St!=STATUS_DEVICE_BUSY)WcnStage7Fail(Dev,J,"vdev creation transport");return;}if(J->VdevAt&&Now-J->VdevAt<200)return;
+    if(!J->Created){St=WcnStage7EnsureVdev(Dev,J);if(!NT_SUCCESS(St)&&St!=STATUS_DEVICE_BUSY)WcnStage7Fail(J);return;}if(J->VdevAt&&Now-J->VdevAt<200)return;
     if(!J->Started){
         if(J->Vdev==1&&!WcnStage8SecondaryIdle(Dev))return;
         if(J->Vdev==0&&Dev->Secondary.Started&&(WcnIs2g(J->Ap.Frequency)==WcnIs2g(Dev->Secondary.Ap.Frequency)||!WcnHotspotTriple(Dev,&J->Ap,&Dev->Secondary.Ap)))return;
         J->Started=TRUE;J->StartedAt=J->StateAt=Now;
-        if(!J->Ap.Valid){WcnStage7Fail(Dev,J,"selected BSS absent or incompatible; no fallback to another SSID");return;}
-        if(Dev->Scan.Alpha2[0]!='C'||Dev->Scan.Alpha2[1]!='N'){WcnStage7Fail(Dev,J,"CN country not confirmed");return;}
-        St=J->MgmtDma.Buffer?STATUS_SUCCESS:WcnDmaAllocAligned(Dev,1536,0xfff,&J->MgmtDma);if(!NT_SUCCESS(St)){WcnStage7Fail(Dev,J,"management DMA allocation");return;}
-        St=WcnStage7DpInit(Dev,J);if(!NT_SUCCESS(St)){WcnStage7Fail(Dev,J,"runtime data-path preparation");return;}
-
+        if(!J->Ap.Valid){WcnStage7Fail(J);return;}
+        if(Dev->Scan.Alpha2[0]!='C'||Dev->Scan.Alpha2[1]!='N'){WcnStage7Fail(J);return;}
+        St=J->MgmtDma.Buffer?STATUS_SUCCESS:WcnDmaAllocAligned(Dev,1536,0xfff,&J->MgmtDma);if(!NT_SUCCESS(St)){WcnStage7Fail(J);return;}
+        St=WcnStage7DpInit(Dev,J);if(!NT_SUCCESS(St)){WcnStage7Fail(J);return;}
     }
     if(J->Failed)return;
     if(J->KeyUpdate.Slot){WcnStationKeysService(Dev,J);if(J->KeyUpdate.Slot||J->Failed)return;}
     if(J->State>=9&&J->Authorized){if(J->CsaState<2)WcnAggregationService(Dev,J);if(WcnChannelService(Dev,J))return;}
     if(J->SaQueryPending){St=JsaQueryReply(Dev,J);if(St==STATUS_DEVICE_BUSY)return;if(!NT_SUCCESS(St))goto Transport;J->SaQueryPending=FALSE;}
-    if(Now-J->StartedAt>24000&&J->State<9){WcnStage7Fail(Dev,J,"association deadline");return;}
-    if(J->MgmtBusy&&Now-J->MgmtAt>1500){WcnStage7Fail(Dev,J,"management completion deadline; DMA not reused while firmware owns it");return;}
+    if(Now-J->StartedAt>24000&&J->State<9){WcnStage7Fail(J);return;}
+    if(J->MgmtBusy&&Now-J->MgmtAt>1500){WcnStage7Fail(J);return;}
     switch(J->State){
     case 0:St=WcnVdevParam(Dev,J->Vdev,S7_WMI_VDEV_PARAM_TX_ENCAP_TYPE,2);break;
     case 1:St=WcnVdevParam(Dev,J->Vdev,S7_WMI_VDEV_PARAM_RX_DECAP_TYPE,2);break;
@@ -297,11 +288,11 @@ static VOID Jservice(PWCN_DEVICE Dev,PWCN_JOIN J)
         if(!J->BeamformSet){St=WcnPhyBeamform(Dev,&J->Ap,J->Vdev);if(St==STATUS_DEVICE_BUSY)return;if(!NT_SUCCESS(St))goto Transport;J->BeamformSet=TRUE;return;}
         St=Jstart(Dev,J,FALSE);break;
     case 3:
-        if(!J->VdevStarted){if(Now-J->StateAt>3000)WcnStage7Fail(Dev,J,"VDEV_START response deadline");return;}
+        if(!J->VdevStarted){if(Now-J->StateAt>3000)WcnStage7Fail(J);return;}
         if(!J->AggregationSet){St=WcnAggregationConfigure(Dev,J->Vdev);if(St==STATUS_DEVICE_BUSY)return;if(!NT_SUCCESS(St))goto Transport;J->AggregationSet=TRUE;return;}
         St=Jcreate(Dev,J);if(NT_SUCCESS(St))J->PeerCreated=TRUE;break;
     case 4:
-        if(!J->PeerMapped){if(Now-J->StateAt>2000)WcnStage7Fail(Dev,J,"HTT peer-map deadline");return;}
+        if(!J->PeerMapped){if(Now-J->StateAt>2000)WcnStage7Fail(J);return;}
         if(!J->RoutingSet){
             St=WcnPeerParam(Dev,J->Vdev,J->Ap.Bssid,19,1u|((J->MacId+1)<<1));
             if(St==STATUS_DEVICE_BUSY)return;if(!NT_SUCCESS(St))goto Transport;
@@ -313,18 +304,18 @@ static VOID Jservice(PWCN_DEVICE Dev,PWCN_JOIN J)
         if(J->Ap.Auth==WCN_AUTH_SAE&&!J->Authenticated){WcnStage8SaeService(Dev,J);return;}
         if(J->Authenticated){J->Attempts=0;break;}
         if(J->Attempts&&Now-J->LastSendAt<600)return;
-        if(J->Attempts>=3){WcnStage7Fail(Dev,J,"authentication response deadline");return;}
+        if(J->Attempts>=3){WcnStage7Fail(J);return;}
         St=Jmanagement(Dev,J,FALSE);if(St==STATUS_DEVICE_BUSY)return;if(!NT_SUCCESS(St))goto Transport;
         J->Attempts++;J->LastSendAt=Now;return;
     case 6:
         if(J->Associated){J->Attempts=0;break;}
         if(J->Attempts&&Now-J->LastSendAt<700)return;
-        if(J->Attempts>=3){WcnStage7Fail(Dev,J,"association response deadline");return;}
+        if(J->Attempts>=3){WcnStage7Fail(J);return;}
         St=Jmanagement(Dev,J,TRUE);if(St==STATUS_DEVICE_BUSY)return;if(!NT_SUCCESS(St))goto Transport;
         J->Attempts++;J->LastSendAt=Now;return;
     case 7:St=JpeerAssoc(Dev,J);break;
     case 8:
-        if(!J->AssocConfirmed){if(Now-J->StateAt>2000)WcnStage7Fail(Dev,J,"PEER_ASSOC_CONF deadline");return;}
+        if(!J->AssocConfirmed){if(Now-J->StateAt>2000)WcnStage7Fail(J);return;}
         St=Jup(Dev,J);break;
     default:return; /* Windows now owns EAPOL, keys and networking. */
     }
@@ -332,10 +323,8 @@ static VOID Jservice(PWCN_DEVICE Dev,PWCN_JOIN J)
     if(!NT_SUCCESS(St))goto Transport;
     J->State++;J->StateAt=Now;J->LastSendAt=0;
     return;
-Transport:WcnStage7Fail(Dev,J,"command transport error");
+Transport:WcnStage7Fail(J);
 }
-
-
 
 /* Serialized teardown: every command honors HTC credits, and the owner waits
  * for firmware response/HTT unmap before permitting descriptor reuse. */
@@ -378,8 +367,8 @@ static NTSTATUS JsaQueryReply(PWCN_DEVICE Dev,PWCN_JOIN J)
     return WcnStage7ActionSend(Dev,J,Body,sizeof(Body));
 }
 
-VOID WcnStage7FailAll(PWCN_DEVICE D,PCSTR Reason)
-{WcnStage7Fail(D,&D->Join,Reason);WcnStage7Fail(D,&D->Secondary,Reason);if(D->P2pClient)WcnStage7Fail(D,&D->P2pJoin,Reason);}
+VOID WcnStage7FailAll(PWCN_DEVICE D)
+{WcnStage7Fail(&D->Join);WcnStage7Fail(&D->Secondary);if(D->P2pClient)WcnStage7Fail(&D->P2pJoin);}
 VOID WcnStage7Receive(PWCN_DEVICE D,ULONG Event,const UCHAR *P,ULONG N)
 {WcnTwtEvent(D,Event,P,N);WcnStage8RoamEvent(D,Event,P,N);Jreceive(D,&D->Join,Event,P,N);Jreceive(D,&D->Secondary,Event,P,N);if(D->P2pClient)Jreceive(D,&D->P2pJoin,Event,P,N);WcnTdlsWmi(D,Event,P,N);}
 VOID WcnStage7PeerReceive(PWCN_DEVICE D,PWCN_JOIN J,ULONG Event,const UCHAR *P,ULONG N){Jreceive(D,J,Event,P,N);}
