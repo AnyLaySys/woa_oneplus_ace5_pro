@@ -5,7 +5,7 @@ NTSTATUS A830DisplayStart(A830_ADAPTER *a) {
     /* Read once at PASSIVE startup; mode enumeration and current-mode queries
        use the same bounded value. The inherited panel is already 120 Hz. */
     a->RefreshRate=60;
-    UNICODE_STRING path=RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\a830_native");
+    UNICODE_STRING path=RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\qcom_gpu\\Parameters");
     UNICODE_STRING name=RTL_CONSTANT_STRING(L"RefreshRate");OBJECT_ATTRIBUTES attributes;HANDLE key;
     InitializeObjectAttributes(&attributes,&path,OBJ_KERNEL_HANDLE|OBJ_CASE_INSENSITIVE,NULL,NULL);
     if(NT_SUCCESS(ZwOpenKey(&key,KEY_QUERY_VALUE,&attributes))) {
@@ -18,7 +18,7 @@ NTSTATUS A830DisplayStart(A830_ADAPTER *a) {
     if(!NT_SUCCESS(status))return status;
     DXGK_DISPLAY_INFORMATION *d=&a->DisplayInfo;
     status=A830DisplayLayout(d,&a->FramebufferSize);if(!NT_SUCCESS(status))return status;
-    A830Record(L"DisplayWidth",d->Width);A830Record(L"DisplayHeight",d->Height);A830Record(L"DisplayPitch",d->Pitch);
+
     a->Framebuffer=MmMapIoSpaceEx(d->PhysicAddress,a->FramebufferSize,PAGE_READWRITE|PAGE_WRITECOMBINE);
     if(!a->Framebuffer)return STATUS_INSUFFICIENT_RESOURCES;
     a->Visible=TRUE;return STATUS_SUCCESS;
@@ -50,7 +50,7 @@ static NTSTATUS SourceModes(A830_ADAPTER *a,D3DKMDT_HVIDPN h,const DXGK_VIDPN_IN
     if(NT_SUCCESS(status)) {
         m->Type=D3DKMDT_RMT_GRAPHICS;m->Format.Graphics.PrimSurfSize.cx=a->DisplayInfo.Width;
         m->Format.Graphics.PrimSurfSize.cy=a->DisplayInfo.Height;m->Format.Graphics.VisibleRegionSize=m->Format.Graphics.PrimSurfSize;
-        m->Format.Graphics.Stride=a->DisplayOnly?a->DisplayInfo.Pitch:(a->DisplayInfo.Width*4+255)&~255u;m->Format.Graphics.PixelFormat=a->DisplayInfo.ColorFormat;
+        m->Format.Graphics.Stride=(a->DisplayInfo.Width*4+255)&~255u;m->Format.Graphics.PixelFormat=a->DisplayInfo.ColorFormat;
         m->Format.Graphics.ColorBasis=D3DKMDT_CB_SCRGB;m->Format.Graphics.PixelValueAccessMode=D3DKMDT_PVAM_DIRECT;
         status=i->pfnAddMode(set,m);if(!NT_SUCCESS(status))i->pfnReleaseModeInfo(set,m);
     }
@@ -89,17 +89,16 @@ static NTSTATUS APIENTRY Supported(HANDLE adapter,DXGKARG_ISSUPPORTEDVIDPN *p) {
     const D3DKMDT_VIDPN_PRESENT_PATH *path;
     status=t->pfnAcquireFirstPathInfo(topology,&path);if(!NT_SUCCESS(status))return status;
     p->IsVidPnSupported=!path->VidPnSourceId && !path->VidPnTargetId &&
-        (A830RotationSupported(a,path->ContentTransformation.Rotation) || path->ContentTransformation.Rotation==D3DKMDT_VPPR_UNPINNED) &&
+        (A830RotationSupported(path->ContentTransformation.Rotation) || path->ContentTransformation.Rotation==D3DKMDT_VPPR_UNPINNED) &&
         (path->ContentTransformation.Scaling==D3DKMDT_VPPS_IDENTITY || path->ContentTransformation.Scaling==D3DKMDT_VPPS_UNPINNED);
-    A830Record(L"SupportedRotation",path->ContentTransformation.Rotation);A830Record(L"SupportedScaling",path->ContentTransformation.Scaling);
-    A830Record(L"VidPnSupported",p->IsVidPnSupported);
+
     t->pfnReleasePathInfo(topology,path);return STATUS_SUCCESS;
 }
 static NTSTATUS CofuncModes(HANDLE adapter,const DXGKARG_ENUMVIDPNCOFUNCMODALITY *p) {
     A830_ADAPTER *a=adapter;const DXGK_VIDPN_INTERFACE *v;
     NTSTATUS status=Interface(a,p->hConstrainingVidPn,&v);if(!NT_SUCCESS(status))return status;
-    if(p->EnumPivotType!=D3DKMDT_EPT_VIDPNSOURCE){status=SourceModes(a,p->hConstrainingVidPn,v);A830Record(L"SourceModesStatus",status);}
-    if(NT_SUCCESS(status) && p->EnumPivotType!=D3DKMDT_EPT_VIDPNTARGET){status=TargetModes(a,p->hConstrainingVidPn,v);A830Record(L"TargetModesStatus",status);}
+    if(p->EnumPivotType!=D3DKMDT_EPT_VIDPNSOURCE){status=SourceModes(a,p->hConstrainingVidPn,v);}
+    if(NT_SUCCESS(status) && p->EnumPivotType!=D3DKMDT_EPT_VIDPNTARGET){status=TargetModes(a,p->hConstrainingVidPn,v);}
     if(NT_SUCCESS(status)) {
         D3DKMDT_HVIDPNTOPOLOGY topology;const DXGK_VIDPNTOPOLOGY_INTERFACE *t;
         status=v->pfnGetTopology(p->hConstrainingVidPn,&topology,&t);if(!NT_SUCCESS(status))return status;
@@ -108,13 +107,13 @@ static NTSTATUS CofuncModes(HANDLE adapter,const DXGKARG_ENUMVIDPNCOFUNCMODALITY
         if(status==STATUS_GRAPHICS_NO_MORE_ELEMENTS_IN_DATASET || status==STATUS_GRAPHICS_DATASET_IS_EMPTY)return STATUS_SUCCESS;
         if(!NT_SUCCESS(status))return status;
         D3DKMDT_VIDPN_PRESENT_PATH supported=*path;
-        if(A830PathSupport(a,&supported,p))status=t->pfnUpdatePathSupportInfo(topology,&supported);
+        if(A830PathSupport(&supported,p))status=t->pfnUpdatePathSupportInfo(topology,&supported);
         t->pfnReleasePathInfo(topology,path);
     }
     return status;
 }
 static NTSTATUS APIENTRY Cofunc(HANDLE adapter,const DXGKARG_ENUMVIDPNCOFUNCMODALITY *p) {
-    NTSTATUS status=CofuncModes(adapter,p);A830Record(L"CofuncPivot",p->EnumPivotType);A830Record(L"CofuncStatus",status);return status;
+    NTSTATUS status=CofuncModes(adapter,p);return status;
 }
 static NTSTATUS APIENTRY Recommend(HANDLE adapter,const DXGKARG_RECOMMENDFUNCTIONALVIDPN *p) {
     UNREFERENCED_PARAMETER(adapter);UNREFERENCED_PARAMETER(p);return STATUS_GRAPHICS_NO_RECOMMENDED_FUNCTIONAL_VIDPN;
@@ -125,12 +124,12 @@ static NTSTATUS APIENTRY Commit(HANDLE adapter,const DXGKARG_COMMITVIDPN *p) {
     D3DKMDT_HVIDPNTOPOLOGY topology;const DXGK_VIDPNTOPOLOGY_INTERFACE *t;
     status=v->pfnGetTopology(p->hFunctionalVidPn,&topology,&t);if(!NT_SUCCESS(status))return status;
     SIZE_T count=0;status=t->pfnGetNumPaths(topology,&count);if(!NT_SUCCESS(status))return status;
-    A830Record(L"CommitPaths",(ULONG)count);
-    if(!count){a->Visible=FALSE;a->ScanoutPitch=0;InterlockedExchange(&a->FlipPending,0);A830Record(L"CommitStatus",STATUS_SUCCESS);return STATUS_SUCCESS;}
+
+    if(!count){a->Visible=FALSE;a->ScanoutPitch=0;InterlockedExchange(&a->FlipPending,0);return STATUS_SUCCESS;}
     const D3DKMDT_VIDPN_PRESENT_PATH *path=NULL;
     status=t->pfnAcquireFirstPathInfo(topology,&path);if(!NT_SUCCESS(status))return status;
-    BOOLEAN valid=A830RotationSupported(a,path->ContentTransformation.Rotation);
-    A830Record(L"ActiveRotation",path->ContentTransformation.Rotation);
+    BOOLEAN valid=A830RotationSupported(path->ContentTransformation.Rotation);
+
     t->pfnReleasePathInfo(topology,path);
     if(!valid)return STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED;
     D3DKMDT_HVIDPNSOURCEMODESET set;const DXGK_VIDPNSOURCEMODESET_INTERFACE *i;
@@ -143,21 +142,15 @@ static NTSTATUS APIENTRY Commit(HANDLE adapter,const DXGKARG_COMMITVIDPN *p) {
             status=STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_SOURCE_MODE;
         i->pfnReleaseModeInfo(set,m);
     }
-    v->pfnReleaseSourceModeSet(p->hFunctionalVidPn,set);A830Record(L"CommitStatus",status);return status;
+    v->pfnReleaseSourceModeSet(p->hFunctionalVidPn,set);return status;
 }
 static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDRESS *p) {
     A830_ADAPTER *a=adapter;
-    A830Count(&a->Telemetry.AddressCalls,1);
-    if(KeGetCurrentIrql()>DISPATCH_LEVEL)A830Count(&a->Telemetry.AddressDirql,1);
-    for(ULONG flags=p->Flags.Value,i=0;flags;flags>>=1,i++)if(flags&1)A830Count(a->Telemetry.AddressFlags+i,1);
+
     if(p->VidPnSourceId || !a->Framebuffer || !a->Memory.Segment.Cpu)return STATUS_INVALID_PARAMETER;
     A830_ALLOCATION *allocation=p->hAllocation;
     if(allocation && ((allocation->Resource.Format!=D3DDDIFMT_X8R8G8B8 && allocation->Resource.Format!=D3DDDIFMT_A8R8G8B8) || allocation->Resource.Pitch<a->DisplayInfo.Width*4 || allocation->Resource.Width!=a->DisplayInfo.Width ||
         allocation->Resource.Height!=a->DisplayInfo.Height || allocation->Resource.Size<(SIZE_T)allocation->Resource.Pitch*a->DisplayInfo.Height)) {
-        A830Count(&a->Telemetry.AddressRejected,1);
-        InterlockedExchange64((volatile LONG64 *)&a->Telemetry.RejectedWidth,allocation->Resource.Width);
-        InterlockedExchange64((volatile LONG64 *)&a->Telemetry.RejectedHeight,allocation->Resource.Height);
-        InterlockedExchange64((volatile LONG64 *)&a->Telemetry.RejectedPitch,allocation->Resource.Pitch);
         return STATUS_INVALID_PARAMETER;
     }
     ULONG pitch=allocation?allocation->Resource.Pitch:(a->DisplayInfo.Width*4+255)&~255u;
@@ -165,18 +158,18 @@ static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDR
     ULONGLONG offset=(ULONGLONG)p->PrimaryAddress.QuadPart;
     if(allocation && allocation->Buffer.Mdl) {
         if(A830DpuEnabled(a)) {
-            if(A830GpuScanoutBusy(a) || !allocation->Buffer.Contiguous || allocation->Buffer.Physical>MAXULONG ||
+            if(QcomGpuScanoutBusy(a) || !allocation->Buffer.Contiguous || allocation->Buffer.Physical>MAXULONG ||
                bytes-1>MAXULONG-allocation->Buffer.Physical)
-                return A830GpuScanoutQueue(a,allocation,0,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
+                return QcomGpuScanoutQueue(a,allocation,0,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
             /* Bridge teardown sees either this transient pin or the published
                pending/active physical address; there is no unowned window. */
             InterlockedIncrement(&allocation->ScanoutReferences);
             NTSTATUS status=A830DpuQueue(a,allocation->Buffer.Physical,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
             InterlockedDecrement(&allocation->ScanoutReferences);return status;
         }
-        if(A830GpuScanoutEnabled(a)) {
+        if(QcomGpuScanoutEnabled(a)) {
             a->ScanoutPitch=pitch;
-            return A830GpuScanoutQueue(a,allocation,0,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
+            return QcomGpuScanoutQueue(a,allocation,0,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
         }
         a->ScanoutOffset=0;a->ScanoutPitch=pitch;a->ScanoutAddress=(ULONGLONG)p->PrimaryAddress.QuadPart;
         a->ScanoutCpu=allocation->Buffer.Cpu;
@@ -186,13 +179,13 @@ static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDR
     if(p->PrimarySegment!=1 || offset>A830_SEGMENT_BYTES || bytes>A830_SEGMENT_BYTES-offset)return STATUS_INVALID_PARAMETER;
     if(A830DpuEnabled(a)) {
         ULONGLONG physical=a->Memory.Segment.Physical+offset;
-        if(A830GpuScanoutBusy(a) || physical>MAXULONG || bytes-1>MAXULONG-physical)
-            return A830GpuScanoutQueue(a,NULL,offset,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
+        if(QcomGpuScanoutBusy(a) || physical>MAXULONG || bytes-1>MAXULONG-physical)
+            return QcomGpuScanoutQueue(a,NULL,offset,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
         return A830DpuQueue(a,physical,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
     }
-    if(A830GpuScanoutEnabled(a)) {
+    if(QcomGpuScanoutEnabled(a)) {
         a->ScanoutPitch=pitch;
-        return A830GpuScanoutQueue(a,NULL,offset,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
+        return QcomGpuScanoutQueue(a,NULL,offset,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
     }
     a->ScanoutOffset=offset;a->ScanoutPitch=pitch;a->ScanoutAddress=(ULONGLONG)p->PrimaryAddress.QuadPart;
     a->ScanoutCpu=a->Memory.Segment.Cpu+(SIZE_T)offset;
@@ -201,14 +194,14 @@ static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDR
 }
 static NTSTATUS APIENTRY Visible(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEVISIBILITY *p) {
     A830_ADAPTER *a=adapter;if(p->VidPnSourceId && p->VidPnSourceId!=D3DDDI_ID_ALL)return STATUS_INVALID_PARAMETER;
-    a->Visible=p->Visible;A830Record(L"SourceVisible",p->Visible);return STATUS_SUCCESS;
+    a->Visible=p->Visible;return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY Update(HANDLE adapter,const DXGKARG_UPDATEACTIVEVIDPNPRESENTPATH *p) {
-    A830_ADAPTER *a=adapter;
+    UNREFERENCED_PARAMETER(adapter);
     if(p->VidPnPresentPathInfo.VidPnSourceId || p->VidPnPresentPathInfo.VidPnTargetId)return STATUS_INVALID_PARAMETER;
-    if(!A830RotationSupported(a,p->VidPnPresentPathInfo.ContentTransformation.Rotation) ||
+    if(!A830RotationSupported(p->VidPnPresentPathInfo.ContentTransformation.Rotation) ||
         p->VidPnPresentPathInfo.ContentTransformation.Scaling!=D3DKMDT_VPPS_IDENTITY)return STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED;
-    A830Record(L"ActiveRotation",p->VidPnPresentPathInfo.ContentTransformation.Rotation);
+
     return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY MonitorModes(HANDLE adapter,const DXGKARG_RECOMMENDMONITORMODES *p) {
@@ -218,11 +211,11 @@ static NTSTATUS APIENTRY MonitorModes(HANDLE adapter,const DXGKARG_RECOMMENDMONI
     m->VideoSignalInfo=A830Signal(a);m->Origin=D3DKMDT_MCO_DRIVER;m->Preference=D3DKMDT_MP_PREFERRED;
     m->ColorBasis=D3DKMDT_CB_SRGB;m->ColorCoeffDynamicRanges.FirstChannel=8;m->ColorCoeffDynamicRanges.SecondChannel=8;
     m->ColorCoeffDynamicRanges.ThirdChannel=8;m->ColorCoeffDynamicRanges.FourthChannel=8;
-    status=i->pfnAddMode(p->hMonitorSourceModeSet,m);A830Record(L"MonitorModesStatus",status);if(!NT_SUCCESS(status))i->pfnReleaseModeInfo(p->hMonitorSourceModeSet,m);return status;
+    status=i->pfnAddMode(p->hMonitorSourceModeSet,m);if(!NT_SUCCESS(status))i->pfnReleaseModeInfo(p->hMonitorSourceModeSet,m);return status;
 }
 static NTSTATUS APIENTRY HardwareCaps(HANDLE adapter,DXGKARG_QUERYVIDPNHWCAPABILITY *p) {
-    A830_ADAPTER *a=adapter;if(p->SourceId || p->TargetId)return STATUS_INVALID_PARAMETER;
-    RtlZeroMemory(&p->VidPnHWCaps,sizeof(p->VidPnHWCaps));p->VidPnHWCaps.DriverRotation=!a->DisplayOnly && !a->RenderOnly;return STATUS_SUCCESS;
+    UNREFERENCED_PARAMETER(adapter);if(p->SourceId || p->TargetId)return STATUS_INVALID_PARAMETER;
+    RtlZeroMemory(&p->VidPnHWCaps,sizeof(p->VidPnHWCaps));p->VidPnHWCaps.DriverRotation=TRUE;return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY Palette(HANDLE adapter,const DXGKARG_SETPALETTE *p) {
     UNREFERENCED_PARAMETER(adapter);UNREFERENCED_PARAMETER(p);return STATUS_NOT_SUPPORTED;
@@ -263,29 +256,5 @@ VOID A830DisplayDdi(DRIVER_INITIALIZATION_DATA *d) {
     d->DxgkDdiSetVidPnSourceAddress=Address;d->DxgkDdiSetVidPnSourceVisibility=Visible;
     d->DxgkDdiUpdateActiveVidPnPresentPath=Update;d->DxgkDdiRecommendMonitorModes=MonitorModes;
     d->DxgkDdiQueryVidPnHWCapability=HardwareCaps;d->DxgkDdiStopDeviceAndReleasePostDisplayOwnership=StopOwnership;
-    d->DxgkDdiSystemDisplayEnable=SystemEnable;d->DxgkDdiSystemDisplayWrite=SystemWrite;
-}
-static NTSTATUS APIENTRY PresentDisplayOnly(HANDLE adapter,const DXGKARG_PRESENT_DISPLAYONLY *p) {
-    A830_ADAPTER *a=adapter;if(p->VidPnSourceId || !a->Framebuffer || p->BytesPerPixel!=4)return STATUS_INVALID_PARAMETER;
-    if(!a->Visible)return STATUS_SUCCESS;
-    NTSTATUS status=STATUS_SUCCESS;DXGK_DISPLAY_INFORMATION *d=&a->DisplayInfo;
-    __try {
-        for(ULONG i=0;i<p->NumMoves && NT_SUCCESS(status);i++)status=A830MoveFrame(a->Framebuffer,d->Pitch,d->Width,d->Height,&p->pMoves[i].SourcePoint,&p->pMoves[i].DestRect);
-        for(ULONG i=0;i<p->NumDirtyRects && NT_SUCCESS(status);i++)status=A830BlitFrame(a->Framebuffer,d->Pitch,d->Width,d->Height,p->pSource,p->Pitch,p->pDirtyRect+i);
-        if(!p->NumMoves && !p->NumDirtyRects) {
-            RECT full={0,0,(LONG)d->Width,(LONG)d->Height};status=A830BlitFrame(a->Framebuffer,d->Pitch,d->Width,d->Height,p->pSource,p->Pitch,&full);
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER){status=GetExceptionCode();}
-    KeMemoryBarrier();ULONG count=(ULONG)InterlockedIncrement((volatile LONG *)&a->PresentCount);
-    if(count==1 || !NT_SUCCESS(status)){A830Record(L"PresentStatus",status);A830Record(L"PresentCount",count);}
-    return status;
-}
-VOID A830DisplayOnlyDdi(KMDDOD_INITIALIZATION_DATA *d) {
-    d->DxgkDdiSetPalette=Palette;d->DxgkDdiSetPointerPosition=PointerPosition;d->DxgkDdiSetPointerShape=PointerShape;
-    d->DxgkDdiIsSupportedVidPn=Supported;d->DxgkDdiRecommendFunctionalVidPn=Recommend;
-    d->DxgkDdiEnumVidPnCofuncModality=Cofunc;d->DxgkDdiCommitVidPn=Commit;
-    d->DxgkDdiSetVidPnSourceVisibility=Visible;d->DxgkDdiUpdateActiveVidPnPresentPath=Update;
-    d->DxgkDdiRecommendMonitorModes=MonitorModes;d->DxgkDdiQueryVidPnHWCapability=HardwareCaps;
-    d->DxgkDdiPresentDisplayOnly=PresentDisplayOnly;d->DxgkDdiStopDeviceAndReleasePostDisplayOwnership=StopOwnership;
     d->DxgkDdiSystemDisplayEnable=SystemEnable;d->DxgkDdiSystemDisplayWrite=SystemWrite;
 }

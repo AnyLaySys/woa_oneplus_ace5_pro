@@ -6,16 +6,6 @@
 #define SCANOUT_COUNT 9
 typedef struct { GPU_BO Buffer;BOOLEAN Used; } SCANOUT_SLOT;
 typedef struct { FAST_MUTEX Lock;BOOLEAN Closing;SCANOUT_SLOT Slots[SCANOUT_COUNT];GPU_BO Staging[2]; } SCANOUT_POOL;
-static BOOLEAN Requested(VOID) {
-    UNICODE_STRING path=RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\a830_native");
-    UNICODE_STRING name=RTL_CONSTANT_STRING(L"EnableDpu");OBJECT_ATTRIBUTES attributes;HANDLE key;
-    InitializeObjectAttributes(&attributes,&path,OBJ_KERNEL_HANDLE|OBJ_CASE_INSENSITIVE,NULL,NULL);
-    if(!NT_SUCCESS(ZwOpenKey(&key,KEY_QUERY_VALUE,&attributes)))return FALSE;
-    UCHAR storage[sizeof(KEY_VALUE_PARTIAL_INFORMATION)+sizeof(ULONG)];ULONG bytes;
-    NTSTATUS status=ZwQueryValueKey(key,&name,KeyValuePartialInformation,storage,sizeof(storage),&bytes);ZwClose(key);
-    PKEY_VALUE_PARTIAL_INFORMATION value=(PVOID)storage;
-    return NT_SUCCESS(status) && value->Type==REG_DWORD && value->DataLength==4 && *(PULONG)value->Data==1;
-}
 static NTSTATUS AllocateLow(GPU_BO *b,ULONG size) {
     PHYSICAL_ADDRESS low={0},high,skip={0};high.QuadPart=MAXULONG;
     if(!size || size>GPU_BUFFER_LIMIT || (size&(PAGE_SIZE-1)))return STATUS_INVALID_PARAMETER;
@@ -39,7 +29,6 @@ NTSTATUS A830ScanoutStaging(PVOID context,ULONG index,GPU_BO *buffer) {
 }
 NTSTATUS A830ScanoutStart(PVOID context) {
     A830_ADAPTER *a=context;
-    if(a->DisplayOnly || a->RenderOnly || !Requested())return STATUS_SUCCESS;
     if(a->ScanoutPool)return A830ScanoutStagingReady(a)?STATUS_SUCCESS:STATUS_DEVICE_BUSY;
     SCANOUT_POOL *pool=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*pool),GPU_TAG);
     if(!pool)return STATUS_SUCCESS;

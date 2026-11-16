@@ -4,16 +4,11 @@
 #include <dispmprt.h>
 #include <ntstrsafe.h>
 #include "abi.h"
-#include "kernel-api.h"
+#include "memory-layout.h"
 #include "fence-order.h"
 
-#if defined(A830_RENDER_ONLY) || defined(A830_NATIVE_DISPLAY)
-#define A830_SEGMENT_ADDRESS A830_KERNEL_BASE
-#define A830_COMMAND_ADDRESS (A830_KERNEL_BASE+A830_SEGMENT_BYTES)
-#else
-#define A830_SEGMENT_ADDRESS 0x44000000ULL
-#define A830_COMMAND_ADDRESS 0x48000000ULL
-#endif
+#define A830_SEGMENT_ADDRESS 0x70000000ULL
+#define A830_COMMAND_ADDRESS (A830_SEGMENT_ADDRESS+A830_SEGMENT_BYTES)
 #define A830_QUEUE_DEPTH 32
 typedef struct A830_CONTEXT A830_CONTEXT;
 typedef struct A830_PREPARED A830_PREPARED;
@@ -35,7 +30,6 @@ typedef struct {
     SIZE_T SourceBytes,DestinationBytes;
     BOOLEAN SourceSharedMap,DestinationSharedMap,SourcePinned,DestinationPinned;
     ULONG Width,Height,SourcePitch,DestinationPitch;
-    ULONGLONG PresentBytes;
     PEPROCESS Process;
     PKEVENT Completion;
     ULONGLONG Lease;
@@ -45,7 +39,7 @@ typedef struct {
     ULONG Count;
     union { GPU_SUBMIT Commands[256]; RECT Rects[256]; } Payload;
 } A830_DMA;
-typedef struct { LIST_ENTRY Entry; ULONGLONG QueuedAt,HardwareFence; ULONG Fence; BOOLEAN Dynamic; A830_DMA Dma; } A830_JOB;
+typedef struct { LIST_ENTRY Entry; ULONGLONG HardwareFence; ULONG Fence; BOOLEAN Dynamic; A830_DMA Dma; } A830_JOB;
 typedef struct {
     GPU Hardware;
     PVOID Dpu,ScanoutPool,GpuScanout;
@@ -57,8 +51,6 @@ typedef struct {
     PUCHAR Framebuffer;
     SIZE_T FramebufferSize;
     BOOLEAN Visible;
-    BOOLEAN DisplayOnly;
-    BOOLEAN RenderOnly;
     BOOLEAN BridgeAttached;
     volatile LONG FlipPending;
     volatile LONG VsyncEnabled;
@@ -67,17 +59,11 @@ typedef struct {
     ULONGLONG ScanoutAddress;
     PUCHAR ScanoutCpu;
     EX_RUNDOWN_REF ScanoutAccess;
-    PFILE_OBJECT HardwareFile;
-    A830_KERNEL_INTERFACE Kernel;
-    ULONG PresentCount;
     ULONG RefreshRate;
     HANDLE Thread;
     PEX_TIMER CompletionTimer;
     KEVENT Wake;
     KDPC DisplayWake;
-    GPU_TELEMETRY Telemetry;
-    GPU_PATCH_DIAGNOSTICS PatchDiagnostics;
-    KSPIN_LOCK PatchDiagnosticsLock;
     KSPIN_LOCK QueueLock;
     LIST_ENTRY Pending,Free;
     LIST_ENTRY Inflight;
@@ -87,19 +73,13 @@ typedef struct {
     struct { ULONGLONG HardwareFence,Sequence; ULONG Fence; A830_CONTEXT *Context; } IrqRecords[128];
     volatile ULONG IrqRead,IrqWrite;
     volatile LONG WorkerBusy;
-    volatile LONG ResetCount;
-    volatile LONG64 CompletionPolls,PolledCompletions;
     A830_JOB Jobs[A830_QUEUE_DEPTH];
     volatile LONG Stopping,Failed,PreemptPending,SchedulerDpcPending,Generation,CpuBarriers;
     ULONG Completed,Preemption,LastSubmitted;
     DXGKARGCB_NOTIFY_INTERRUPT_DATA Notify;
 } A830_ADAPTER;
-BOOLEAN A830RotationSupported(const A830_ADAPTER *adapter,D3DKMDT_VIDPN_PRESENT_PATH_ROTATION rotation);
-VOID A830SchedulerSnapshot(A830_ADAPTER *adapter,GPU_SCHEDULER_INFO *info);
+BOOLEAN A830RotationSupported(D3DKMDT_VIDPN_PRESENT_PATH_ROTATION rotation);
 VOID A830CompletionTick(PEX_TIMER timer,PVOID context);
-static __forceinline VOID A830Count(GPU_U64 *field,ULONGLONG amount) {
-    InterlockedAdd64((volatile LONG64 *)field,(LONG64)amount);
-}
 static __forceinline ULONG A830PublishFence(volatile ULONG *field,ULONG fence) {
     LONG previous=InterlockedCompareExchange((volatile LONG *)field,0,0);
     while(A830FenceAfter(fence,(ULONG)previous)) {
@@ -108,11 +88,6 @@ static __forceinline ULONG A830PublishFence(volatile ULONG *field,ULONG fence) {
         previous=seen;
     }
     return (ULONG)previous;
-}
-static __forceinline VOID A830Sample(GPU_U64 *histogram,ULONGLONG interval) {
-    static const ULONG bounds[]={10000,20000,40000,80000,160000,200000,330000,670000};
-    ULONG i=0;while(i<RTL_NUMBER_OF(bounds) && interval>=bounds[i])i++;
-    A830Count(histogram+i,1);
 }
 static __forceinline VOID A830WakeDisplay(A830_ADAPTER *a) {
     if(KeGetCurrentIrql()<=DISPATCH_LEVEL)KeSetEvent(&a->Wake,IO_NO_INCREMENT,FALSE);
@@ -155,7 +130,6 @@ NTSTATUS APIENTRY A830Render(HANDLE context,DXGKARG_RENDER *args);
 NTSTATUS APIENTRY A830Patch(HANDLE adapter,const DXGKARG_PATCH *args);
 NTSTATUS APIENTRY A830Submit(HANDLE adapter,const DXGKARG_SUBMITCOMMAND *args);
 VOID A830Worker(PVOID context);
-VOID A830Record(PCWSTR label,ULONG value);
 NTSTATUS A830DisplayStart(A830_ADAPTER *adapter);
 NTSTATUS A830DisplayLayout(const DXGK_DISPLAY_INFORMATION *display,SIZE_T *bytes);
 ULONG A830RefreshRate(const A830_ADAPTER *adapter);
@@ -163,17 +137,13 @@ D3DKMDT_VIDEO_SIGNAL_INFO A830Signal(const A830_ADAPTER *adapter);
 NTSTATUS A830AdapterStop(PVOID context);
 VOID A830DisplayStop(A830_ADAPTER *adapter);
 VOID A830DisplayDdi(DRIVER_INITIALIZATION_DATA *data);
-VOID A830DisplayOnlyDdi(KMDDOD_INITIALIZATION_DATA *data);
-NTSTATUS A830BlitFrame(PUCHAR destination,ULONG pitch,ULONG width,ULONG height,const VOID *source,LONG sourcePitch,const RECT *rect);
-NTSTATUS A830MoveFrame(PUCHAR destination,ULONG pitch,ULONG width,ULONG height,const POINT *source,const RECT *rect);
 NTSTATUS A830BridgeInitialize(PDRIVER_OBJECT object);
 VOID A830BridgeDestroy(VOID);
+VOID A830BridgeRemove(VOID);
 VOID A830BridgeAttach(A830_ADAPTER *adapter);
 VOID A830BridgeDetach(A830_ADAPTER *adapter);
 VOID A830BridgeCollectShared(VOID);
-BOOLEAN A830PathSupport(const A830_ADAPTER *adapter,D3DKMDT_VIDPN_PRESENT_PATH *path,const DXGKARG_ENUMVIDPNCOFUNCMODALITY *args);
-NTSTATUS A830KernelConnect(A830_ADAPTER *adapter);
-VOID A830KernelDisconnect(A830_ADAPTER *adapter);
+BOOLEAN A830PathSupport(D3DKMDT_VIDPN_PRESENT_PATH *path,const DXGKARG_ENUMVIDPNCOFUNCMODALITY *args);
 NTSTATUS A830Map(A830_ADAPTER *adapter,GPU_BO *buffer,ULONGLONG address);
 NTSTATUS APIENTRY A830Present(HANDLE context,DXGKARG_PRESENT *args);
 NTSTATUS A830CopyPresent(const A830_DMA *dma);

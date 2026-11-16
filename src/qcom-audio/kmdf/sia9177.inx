@@ -8,7 +8,7 @@ ClassGuid={4d36e96c-e325-11ce-bfc1-08002be10318}
 
 Provider=%Provider%
 
-DriverVer=11/05/2026,26.11.5.17
+DriverVer=11/15/2026,26.11.15.5
 
 CatalogFile=sia9177.cat
 
@@ -32,7 +32,6 @@ Sia.Adsp=13,ADSP
 [SourceDisksFiles]
 
 sia9177.sys=1
-charge.exe=1
 credential.bin=1
 adsp.b00=1,ADSP
 adsp.b01=1,ADSP
@@ -122,7 +121,6 @@ AddReg=Sia.Registry
 [Sia.Files]
 
 sia9177.sys
-charge.exe
 credential.bin
 
 
@@ -204,7 +202,7 @@ HKR,Drivers\wave\wdmaud.drv,Description,,%DeviceName%
 [Sia.NT.Services]
 
 AddService=sia9177,0x00000002,Sia.Service
-AddService=ALSCharge,0x00000000,Charge.Service
+DelService=ALSCharge,0x00000200
 
 
 
@@ -221,13 +219,6 @@ ErrorControl=1
 ServiceBinary=%13%\sia9177.sys
 
 
-
-[Charge.Service]
-DisplayName="AnyLaySys Charging"
-ServiceType=0x10
-StartType=2
-ErrorControl=1
-ServiceBinary=%13%\charge.exe
 
 [Sia.NT.Interfaces]
 AddInterface=%KSCATEGORY_AUDIO%,WaveMic,Sia.MicWave

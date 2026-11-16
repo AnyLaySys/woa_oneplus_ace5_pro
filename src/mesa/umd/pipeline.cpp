@@ -29,9 +29,9 @@ static VkPrimitiveTopology topology(D3D10_DDI_PRIMITIVE_TOPOLOGY t) {
 }
 template<class T> static void key_append(std::string &key,const T &v){key.append((const char *)&v,sizeof(v));}
 bool draw(Device *d,UINT count,UINT first,INT bias,UINT instances,UINT first_instance,bool indexed) {
- ProfileTimer timing(d->profile.draw_ticks);d->profile.draws++;
+
  if(!count || !instances)return true;
- if(!d->shaders[0] || !d->shaders[1]){error(d,DXGI_ERROR_UNSUPPORTED,"draw missing shader");return false;}
+ if(!d->shaders[0] || !d->shaders[1]){error(d,DXGI_ERROR_UNSUPPORTED);return false;}
  UINT width=~0u,height=~0u;std::array<VkFormat,9> formats{};std::vector<VkImageView> views;
  for(UINT i=0;i<d->target_count;i++) {
    View *v=d->targets[i];if(!v){formats[i]=VK_FORMAT_UNDEFINED;continue;}
@@ -42,7 +42,7 @@ bool draw(Device *d,UINT count,UINT first,INT bias,UINT instances,UINT first_ins
    if(!view_create(d,d->depth_view))return false;formats[8]=format(d->depth_view->format);views.push_back(d->depth_view->image);
    width=std::min(width,std::max(1u,d->depth_view->resource->width>>d->depth_view->level));height=std::min(height,std::max(1u,d->depth_view->resource->height>>d->depth_view->level));
  }
- if(width==~0u || !width || !height){error(d,DXGI_ERROR_UNSUPPORTED,"draw no framebuffer");return false;}
+ if(width==~0u || !width || !height){error(d,DXGI_ERROR_UNSUPPORTED);return false;}
  std::string key;for(auto *s:d->shaders)key_append(key,s?s->id:0ull);
  UINT elements=d->layout?(UINT)d->layout->elements.size():0;key_append(key,elements);
  if(d->layout)for(const auto &e:d->layout->elements){key_append(key,e.InputSlot);key_append(key,e.AlignedByteOffset);key_append(key,e.Format);key_append(key,e.InputSlotClass);key_append(key,e.InstanceDataStepRate);key_append(key,e.InputRegister);}
@@ -53,8 +53,15 @@ bool draw(Device *d,UINT count,UINT first,INT bias,UINT instances,UINT first_ins
  key_append(key,d->topology);key_append(key,d->sample_mask);key_append(key,d->target_count);key_append(key,formats);
  for(auto &v:d->vertices)key_append(key,v.stride);
  auto found=d->pipelines.find(key);Pipeline pipeline{};
+ bool dual=false;
+ if(d->blend && d->blend->desc.BlendEnable[0]) {
+   const auto &b=d->blend->desc;
+   for(auto factor:{b.SrcBlend,b.DestBlend,b.SrcBlendAlpha,b.DestBlendAlpha})
+     if(factor>=D3D10_DDI_BLEND_SRC1_COLOR && factor<=D3D10_DDI_BLEND_INV_SRC1_ALPHA)dual=true;
+ }
+ if(dual && (d->target_count!=1 || !d->shaders[1]->dual_module)){error(d,DXGI_ERROR_UNSUPPORTED);return false;}
  if(found==d->pipelines.end()) {
-   ProfileTimer compiling(d->profile.pipeline_ticks);d->profile.pipelines++;
+
    std::vector<VkAttachmentDescription> attachments;std::vector<VkAttachmentReference> colors;
    for(UINT i=0;i<d->target_count;i++) {
      VkAttachmentReference ref{VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_GENERAL};
@@ -65,15 +72,15 @@ bool draw(Device *d,UINT count,UINT first,INT bias,UINT instances,UINT first_ins
    if(formats[8]!=VK_FORMAT_UNDEFINED){depth_ref.attachment=(UINT)attachments.size();attachments.push_back({0,formats[8],VK_SAMPLE_COUNT_1_BIT,VK_ATTACHMENT_LOAD_OP_LOAD,VK_ATTACHMENT_STORE_OP_STORE,VK_ATTACHMENT_LOAD_OP_LOAD,VK_ATTACHMENT_STORE_OP_STORE,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL});}
    VkSubpassDescription sub{};sub.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS;sub.colorAttachmentCount=(UINT)colors.size();sub.pColorAttachments=colors.data();sub.pDepthStencilAttachment=d->depth_view?&depth_ref:nullptr;
    VkRenderPassCreateInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};pass.attachmentCount=(UINT)attachments.size();pass.pAttachments=attachments.data();pass.subpassCount=1;pass.pSubpasses=&sub;
-   if(!check(d,d->vk.CreateRenderPass(d->device,&pass,nullptr,&pipeline.pass),"RenderPass"))return false;
+   if(!check(d,d->vk.CreateRenderPass(d->device,&pass,nullptr,&pipeline.pass)))return false;
    std::vector<VkPipelineShaderStageCreateInfo> stages;
-   for(UINT i=0;i<3;i++)if(d->shaders[i]){VkPipelineShaderStageCreateInfo st{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};st.stage=i==0?VK_SHADER_STAGE_VERTEX_BIT:i==1?VK_SHADER_STAGE_FRAGMENT_BIT:VK_SHADER_STAGE_GEOMETRY_BIT;st.module=d->shaders[i]->module;st.pName="main";stages.push_back(st);}
+   for(UINT i=0;i<3;i++)if(d->shaders[i]){VkPipelineShaderStageCreateInfo st{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};st.stage=i==0?VK_SHADER_STAGE_VERTEX_BIT:i==1?VK_SHADER_STAGE_FRAGMENT_BIT:VK_SHADER_STAGE_GEOMETRY_BIT;st.module=i==1 && dual?d->shaders[i]->dual_module:d->shaders[i]->module;st.pName="main";stages.push_back(st);}
    std::vector<VkVertexInputBindingDescription> bindings;std::vector<VkVertexInputAttributeDescription> attributes;
    std::array<bool,32> used{};
    if(d->layout)for(const auto &e:d->layout->elements){
-     if(e.InputSlot>=32){error(d,E_INVALIDARG,"vertex input slot");return false;}
+     if(e.InputSlot>=32){error(d,E_INVALIDARG);return false;}
      if(!used[e.InputSlot]){bindings.push_back({e.InputSlot,d->vertices[e.InputSlot].stride,e.InputSlotClass==D3D10_DDI_INPUT_PER_INSTANCE_DATA?VK_VERTEX_INPUT_RATE_INSTANCE:VK_VERTEX_INPUT_RATE_VERTEX});used[e.InputSlot]=true;}
-     if(e.InstanceDataStepRate>1){error(d,DXGI_ERROR_UNSUPPORTED,"instance divisor");return false;}
+     if(e.InstanceDataStepRate>1){error(d,DXGI_ERROR_UNSUPPORTED);return false;}
      attributes.push_back({e.InputRegister,e.InputSlot,format(e.Format),e.AlignedByteOffset});
    }
    VkPipelineVertexInputStateCreateInfo vertex{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};vertex.vertexBindingDescriptionCount=(UINT)bindings.size();vertex.pVertexBindingDescriptions=bindings.data();vertex.vertexAttributeDescriptionCount=(UINT)attributes.size();vertex.pVertexAttributeDescriptions=attributes.data();
@@ -89,11 +96,11 @@ bool draw(Device *d,UINT count,UINT first,INT bias,UINT instances,UINT first_ins
    VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};cb.attachmentCount=(UINT)blend.size();cb.pAttachments=blend.data();
    VkDynamicState states[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR,VK_DYNAMIC_STATE_BLEND_CONSTANTS,VK_DYNAMIC_STATE_STENCIL_REFERENCE};VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};dynamic.dynamicStateCount=4;dynamic.pDynamicStates=states;
    VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};ci.stageCount=(UINT)stages.size();ci.pStages=stages.data();ci.pVertexInputState=&vertex;ci.pInputAssemblyState=&assembly;ci.pViewportState=&viewport;ci.pRasterizationState=&raster;ci.pMultisampleState=&ms;ci.pDepthStencilState=&depth;ci.pColorBlendState=&cb;ci.pDynamicState=&dynamic;ci.layout=d->pipeline_layout;ci.renderPass=pipeline.pass;
-   if(!check(d,d->vk.CreateGraphicsPipelines(d->device,d->pipeline_cache,1,&ci,nullptr,&pipeline.handle),"GraphicsPipeline")){d->vk.DestroyRenderPass(d->device,pipeline.pass,nullptr);return false;}
+   if(!check(d,d->vk.CreateGraphicsPipelines(d->device,d->pipeline_cache,1,&ci,nullptr,&pipeline.handle))){d->vk.DestroyRenderPass(d->device,pipeline.pass,nullptr);return false;}
    d->pipelines.emplace(key,pipeline);
  } else pipeline=found->second;
  VkDescriptorSet sets[3];VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};dai.descriptorPool=d->descriptors;dai.descriptorSetCount=3;dai.pSetLayouts=d->sets;
- if(!check(d,d->vk.AllocateDescriptorSets(d->device,&dai,sets),"DescriptorSets"))return false;
+ if(!check(d,d->vk.AllocateDescriptorSets(d->device,&dai,sets)))return false;
  for(UINT stage=0;stage<3;stage++)if(d->shaders[stage]) {
    Shader *shader=d->shaders[stage];
    for(UINT i=0;i<16;i++)if(shader->cb[i]){
@@ -115,10 +122,10 @@ bool draw(Device *d,UINT count,UINT first,INT bias,UINT instances,UINT first_ins
  if(!d->render_pass || d->pass_views!=views || d->pass_formats!=formats) {
    barrier(d);
    VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};fci.renderPass=pipeline.pass;fci.attachmentCount=(UINT)views.size();fci.pAttachments=views.data();fci.width=width;fci.height=height;fci.layers=1;VkFramebuffer fb;
-   if(!check(d,d->vk.CreateFramebuffer(d->device,&fci,nullptr,&fb),"Framebuffer"))return false;d->framebuffers.push_back({fb});
+   if(!check(d,d->vk.CreateFramebuffer(d->device,&fci,nullptr,&fb)))return false;d->framebuffers.push_back({fb});
    VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};rp.renderPass=pipeline.pass;rp.framebuffer=fb;rp.renderArea.extent={width,height};
    d->vk.CmdBeginRenderPass(d->cmd,&rp,VK_SUBPASS_CONTENTS_INLINE);d->render_pass=true;d->pass_views=views;d->pass_formats=formats;
-   d->profile.passes++;
+
  }
  d->vk.CmdBindPipeline(d->cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline.handle);d->vk.CmdBindDescriptorSets(d->cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,d->pipeline_layout,0,3,sets,0,nullptr);
  VkViewport viewport{d->viewport.TopLeftX,d->viewport.TopLeftY+d->viewport.Height,d->viewport.Width,-d->viewport.Height,d->viewport.MinDepth,d->viewport.MaxDepth};
@@ -128,11 +135,10 @@ bool draw(Device *d,UINT count,UINT first,INT bias,UINT instances,UINT first_ins
  d->vk.CmdSetScissor(d->cmd,0,1,&scissor);d->vk.CmdSetBlendConstants(d->cmd,d->blend_color);d->vk.CmdSetStencilReference(d->cmd,VK_STENCIL_FACE_FRONT_AND_BACK,d->stencil_ref);
  for(UINT i=0;i<32;i++)if(d->vertices[i].resource){d->vertices[i].resource->storage.in_use=true;VkBuffer b=d->vertices[i].resource->storage.buffer;VkDeviceSize offset=d->vertices[i].offset;d->vk.CmdBindVertexBuffers(d->cmd,i,1,&b,&offset);}
  for(auto *q:d->queries)if(q->active && q->pool && q->count<256)d->vk.CmdBeginQuery(d->cmd,q->pool,q->count,VK_QUERY_CONTROL_PRECISE_BIT);
- if(indexed){if(!d->indices){end_pass(d);error(d,E_INVALIDARG,"null index buffer");return false;}d->indices->storage.in_use=true;d->vk.CmdBindIndexBuffer(d->cmd,d->indices->storage.buffer,d->index_offset,d->index_size==2?VK_INDEX_TYPE_UINT16:VK_INDEX_TYPE_UINT32);d->vk.CmdDrawIndexed(d->cmd,count,instances,first,bias,first_instance);}
+ if(indexed){if(!d->indices){end_pass(d);error(d,E_INVALIDARG);return false;}d->indices->storage.in_use=true;d->vk.CmdBindIndexBuffer(d->cmd,d->indices->storage.buffer,d->index_offset,d->index_size==2?VK_INDEX_TYPE_UINT16:VK_INDEX_TYPE_UINT32);d->vk.CmdDrawIndexed(d->cmd,count,instances,first,bias,first_instance);}
  else d->vk.CmdDraw(d->cmd,count,instances,first,first_instance);
  for(auto *q:d->queries)if(q->active && q->pool && q->count<256){d->vk.CmdEndQuery(d->cmd,q->pool,q->count);q->count++;}
  d->draws++;
- if(d->draws<=4)fprintf(stderr,"A830 DIRECT draw=%llu count=%u framebuffer=%ux%u\n",d->draws,count,width,height);
- timing.finish();
+
  if(d->framebuffers.size()>=400 || d->renamed.size()>=256 || d->draws%400==0)return flush(d);return true;
 }

@@ -21,7 +21,6 @@ typedef struct {
     ULONG ByteOffset;
     ULONGLONG Fence,Address;
     BOOLEAN Pending;
-    volatile LONG64 CopyCount,CopyBytes;
     volatile LONG Barrier;
     COPY_REQUEST Queued,Active;
 } GPU_SCANOUT;
@@ -57,7 +56,7 @@ static NTSTATUS SynchronizeRequest(REQUEST_ACCESS *access) {
     BOOLEAN result=FALSE;A830_ADAPTER *a=access->Adapter;
     return a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,AccessRequest,access,0,&result);
 }
-NTSTATUS A830GpuScanoutQueue(PVOID context,PVOID allocation,ULONGLONG offset,ULONG pitch,ULONGLONG address) {
+NTSTATUS QcomGpuScanoutQueue(PVOID context,PVOID allocation,ULONGLONG offset,ULONG pitch,ULONGLONG address) {
     A830_ADAPTER *a=context;A830_ALLOCATION *bo=allocation;
     if(!a->GpuScanout)return STATUS_DEVICE_NOT_READY;
     REQUEST_ACCESS access={0};access.Adapter=a;
@@ -75,26 +74,16 @@ NTSTATUS A830GpuScanoutQueue(PVOID context,PVOID allocation,ULONGLONG offset,ULO
     else A830WakeDisplay(a);
     return status;
 }
-static BOOLEAN Requested(VOID) {
-    UNICODE_STRING path=RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\a830_native");
-    UNICODE_STRING name=RTL_CONSTANT_STRING(L"EnableGpuScanout");OBJECT_ATTRIBUTES attributes;HANDLE key;
-    InitializeObjectAttributes(&attributes,&path,OBJ_KERNEL_HANDLE|OBJ_CASE_INSENSITIVE,NULL,NULL);
-    if(!NT_SUCCESS(ZwOpenKey(&key,KEY_QUERY_VALUE,&attributes)))return FALSE;
-    UCHAR storage[sizeof(KEY_VALUE_PARTIAL_INFORMATION)+sizeof(ULONG)];ULONG bytes=0;
-    NTSTATUS status=ZwQueryValueKey(key,&name,KeyValuePartialInformation,storage,sizeof(storage),&bytes);
-    ZwClose(key);PKEY_VALUE_PARTIAL_INFORMATION value=(PVOID)storage;
-    return NT_SUCCESS(status) && value->Type==REG_DWORD && value->DataLength==4 && *(PULONG)value->Data==1;
-}
-BOOLEAN A830GpuScanoutStagingReady(PVOID context) {
+BOOLEAN QcomGpuScanoutStagingReady(PVOID context) {
     GPU_SCANOUT *s=((A830_ADAPTER *)context)->GpuScanout;
     return s && s->StagingMapped && s->Staging[0].Address && s->Staging[1].Address;
 }
-NTSTATUS A830GpuScanoutReserveStaging(PVOID context) {
+NTSTATUS QcomGpuScanoutReserveStaging(PVOID context) {
     A830_ADAPTER *a=context;GPU_SCANOUT *s=a->GpuScanout;
     if(KeGetCurrentIrql()!=PASSIVE_LEVEL)return STATUS_INVALID_DEVICE_STATE;
     if(s && s->StagingMapped)return STATUS_SUCCESS;
     if(s && s->Pending) {
-        NTSTATUS status=A830GpuScanoutRetire(a);if(status!=STATUS_SUCCESS)return status;
+        NTSTATUS status=QcomGpuScanoutRetire(a);if(status!=STATUS_SUCCESS)return status;
         DropRequest(&s->Active);
     }
     GPU_BO buffers[2]={0};NTSTATUS status=A830BridgeReserveDisplay(a,buffers);
@@ -103,23 +92,12 @@ NTSTATUS A830GpuScanoutReserveStaging(PVOID context) {
     s->Staging[0]=buffers[0];s->Staging[1]=buffers[1];KeMemoryBarrier();s->StagingMapped=TRUE;
     return STATUS_SUCCESS;
 }
-BOOLEAN A830GpuScanoutBusy(PVOID context) {
+BOOLEAN QcomGpuScanoutBusy(PVOID context) {
     GPU_SCANOUT *s=((A830_ADAPTER *)context)->GpuScanout;
     return s && InterlockedCompareExchange(&s->Barrier,0,0)!=0;
 }
-VOID A830GpuScanoutSnapshot(PVOID context,PVOID output) {
-    A830_ADAPTER *a=context;GPU_DISPLAY_ACTIVATION *report=output;
-    KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);GPU_SCANOUT *s=a->GpuScanout;
-    if(s) {
-        report->BackendFlags|=4;
-        report->GpuCopyCount=(GPU_U64)ReadAcquire64(&s->CopyCount);
-        report->GpuCopyBytes=(GPU_U64)ReadAcquire64(&s->CopyBytes);
-        report->GpuCopyPending=s->Pending || s->Active.Valid || s->Queued.Valid;
-    }
-    KeReleaseSpinLock(&a->QueueLock,old);
-}
-BOOLEAN A830GpuScanoutEnabled(PVOID context) {return ((A830_ADAPTER *)context)->GpuScanout!=NULL;}
-NTSTATUS A830GpuScanoutRemap(PVOID context) {
+BOOLEAN QcomGpuScanoutEnabled(PVOID context) {return ((A830_ADAPTER *)context)->GpuScanout!=NULL;}
+NTSTATUS QcomGpuScanoutRemap(PVOID context) {
     A830_ADAPTER *a=context;GPU_SCANOUT *s=a->GpuScanout;
     if(!s)return STATUS_DEVICE_NOT_READY;
     if(s->Pending && a->Hardware.Submitted)return STATUS_DEVICE_BUSY;
@@ -131,7 +109,7 @@ NTSTATUS A830GpuScanoutRemap(PVOID context) {
     if(s->StagingMapped)for(ULONG i=0;NT_SUCCESS(status) && i<2;i++)status=GpuMap(&a->Hardware,0,s->Staging+i,STAGING_ADDRESS+STAGING_STEP*i);
     return status;
 }
-NTSTATUS A830GpuScanoutAfterReset(PVOID context) {
+NTSTATUS QcomGpuScanoutAfterReset(PVOID context) {
     A830_ADAPTER *a=context;GPU_SCANOUT *s=a->GpuScanout;if(!s)return STATUS_SUCCESS;
     REQUEST_ACCESS access={0};access.Adapter=a;access.Take=TRUE;
     NTSTATUS status=SynchronizeRequest(&access);if(!NT_SUCCESS(status))return status;
@@ -140,13 +118,12 @@ NTSTATUS A830GpuScanoutAfterReset(PVOID context) {
     status=SynchronizeRequest(&access);if(!NT_SUCCESS(status))return status;
     s->Frame.Address=0;s->Commands.Address=0;
     for(ULONG i=0;i<2;i++)s->Staging[i].Address=0;
-    return A830GpuScanoutRemap(a);
+    return QcomGpuScanoutRemap(a);
 }
-NTSTATUS A830GpuScanoutStart(PVOID context) {
+NTSTATUS QcomGpuScanoutStart(PVOID context) {
     A830_ADAPTER *a=context;
-    if(a->DisplayOnly || a->RenderOnly || a->GpuScanout || !a->Hardware.Online)return STATUS_NOT_SUPPORTED;
+    if(a->GpuScanout || !a->Hardware.Online)return STATUS_NOT_SUPPORTED;
     if(KeGetCurrentIrql()!=PASSIVE_LEVEL)return STATUS_INVALID_DEVICE_STATE;
-    if(!Requested() && !A830ScanoutStagingReady(a))return STATUS_NOT_SUPPORTED;
     ULONGLONG physical=(ULONGLONG)a->DisplayInfo.PhysicAddress.QuadPart;
     ULONG offset=(ULONG)(physical&(PAGE_SIZE-1));
     if(!physical || !a->Framebuffer || !a->FramebufferSize ||
@@ -170,11 +147,11 @@ NTSTATUS A830GpuScanoutStart(PVOID context) {
     }
     a->GpuScanout=s;
     NTSTATUS status=GpuAllocate(&s->Commands,COPY_BYTES);
-    if(NT_SUCCESS(status))status=A830GpuScanoutRemap(a);
-    if(!NT_SUCCESS(status)){A830GpuScanoutStop(a);return status;}
+    if(NT_SUCCESS(status))status=QcomGpuScanoutRemap(a);
+    if(!NT_SUCCESS(status)){QcomGpuScanoutStop(a);return status;}
     return STATUS_SUCCESS;
 }
-NTSTATUS A830GpuScanoutIssue(PVOID context,ULONGLONG source,ULONG sourceBytes,ULONG pitch,ULONGLONG address,PULONGLONG fence) {
+NTSTATUS QcomGpuScanoutIssue(PVOID context,ULONGLONG source,ULONG sourceBytes,ULONG pitch,ULONGLONG address,PULONGLONG fence) {
     A830_ADAPTER *a=context;GPU_SCANOUT *s=a->GpuScanout;
     if(!s || !fence)return STATUS_INVALID_PARAMETER;
     if(!a->Hardware.Online || !a->Hardware.Memory.Cpu)return STATUS_DEVICE_NOT_READY;
@@ -202,7 +179,7 @@ NTSTATUS A830GpuScanoutIssue(PVOID context,ULONGLONG source,ULONG sourceBytes,UL
     s->Fence=a->Hardware.Submitted;s->Address=address;s->Pending=TRUE;*fence=s->Fence;
     return STATUS_SUCCESS;
 }
-NTSTATUS A830GpuScanoutRetire(PVOID context) {
+NTSTATUS QcomGpuScanoutRetire(PVOID context) {
     A830_ADAPTER *a=context;GPU_SCANOUT *s=a->GpuScanout;
     if(!s)return STATUS_DEVICE_NOT_READY;
     if(!s->Pending)return STATUS_SUCCESS;
@@ -219,17 +196,15 @@ NTSTATUS A830GpuScanoutRetire(PVOID context) {
         /* WDDM scanout address is acknowledged only by DPU's TE callback. */
     } else {
         InterlockedExchange64((volatile LONG64 *)&a->ScanoutAddress,(LONG64)s->Address);
-        InterlockedIncrement((volatile LONG *)&a->PresentCount);
+
     }
     s->Pending=FALSE;
-    InterlockedIncrement64(&s->CopyCount);
-    InterlockedAdd64(&s->CopyBytes,(LONG64)a->DisplayInfo.Width*a->DisplayInfo.Height*4);
     return STATUS_SUCCESS;
 }
-BOOLEAN A830GpuScanoutPump(PVOID context) {
+BOOLEAN QcomGpuScanoutPump(PVOID context) {
     A830_ADAPTER *a=context;GPU_SCANOUT *s=a->GpuScanout;if(!s)return FALSE;
     if(s->Pending) {
-        NTSTATUS retired=A830GpuScanoutRetire(a);
+        NTSTATUS retired=QcomGpuScanoutRetire(a);
         if(retired==STATUS_PENDING)return TRUE;
         if(!NT_SUCCESS(retired)){InterlockedExchange(&a->Failed,retired);return TRUE;}
         DropRequest(&s->Active);
@@ -241,7 +216,7 @@ BOOLEAN A830GpuScanoutPump(PVOID context) {
         s->Active=access.Request;
     }
     if(s->Active.Valid) {
-        NTSTATUS status=A830GpuScanoutIssue(a,s->Active.Source,s->Active.Size,s->Active.Pitch,s->Active.Address,&s->Fence);
+        NTSTATUS status=QcomGpuScanoutIssue(a,s->Active.Source,s->Active.Size,s->Active.Pitch,s->Active.Address,&s->Fence);
         if(status==STATUS_DEVICE_BUSY)return TRUE;
         if(!NT_SUCCESS(status)){InterlockedExchange(&a->Failed,status);return TRUE;}
         return TRUE;
@@ -251,7 +226,7 @@ BOOLEAN A830GpuScanoutPump(PVOID context) {
     if(!NT_SUCCESS(status)){InterlockedExchange(&a->Failed,status);return TRUE;}
     return InterlockedCompareExchange(&s->Barrier,0,0)!=0;
 }
-NTSTATUS A830GpuScanoutStop(PVOID context) {
+NTSTATUS QcomGpuScanoutStop(PVOID context) {
     A830_ADAPTER *a=context;GPU_SCANOUT *s=a->GpuScanout;if(!s)return STATUS_SUCCESS;
     if(KeGetCurrentIrql()!=PASSIVE_LEVEL)return STATUS_INVALID_DEVICE_STATE;
     if(a->Hardware.Online) {

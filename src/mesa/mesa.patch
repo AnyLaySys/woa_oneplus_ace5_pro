@@ -16,7 +16,7 @@ index b8e1b86..6146003 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -1737,7 +1737,7 @@ endif
- 
+
  # Check for some linker flags
  ld_args_bsymbolic = []
 -if cc.links('int main() { return 0; }', args : '-Wl,-Bsymbolic', name : 'Bsymbolic')
@@ -49,17 +49,17 @@ index 77baf02..a4554f3 100644
 +#include "util/strndup.h"
  #include "util/u_debug.h"
  #include "util/u_math.h"
- 
+
 diff --git a/src/freedreno/common/freedreno_dev_info.c b/src/freedreno/common/freedreno_dev_info.c
 index 271eebc..03e30eb 100644
 --- a/src/freedreno/common/freedreno_dev_info.c
 +++ b/src/freedreno/common/freedreno_dev_info.c
 @@ -6,6 +6,7 @@
- 
+
  #include "freedreno_dev_info.h"
  #include "util/macros.h"
 +#include "util/u_string.h"
- 
+
  /**
   * Table entry for a single GPU version
 diff --git a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/freedreno_devices.py
@@ -67,7 +67,7 @@ index 47791d6..aab32fb 100644
 --- a/src/freedreno/common/freedreno_devices.py
 +++ b/src/freedreno/common/freedreno_devices.py
 @@ -1382,7 +1382,7 @@ add_gpus([
- 
+
  add_gpus([
          GPUId(chip_id=0xffff44050000, name="Adreno (TM) 830"),
 -        GPUId(chip_id=0x44050001, name="Adreno (TM) 830"), # KGSL
@@ -89,14 +89,14 @@ index 3a5d805..42ce09c 100644
 +#else
  #include <unistd.h>
 +#endif
- 
+
  #include "c11/threads.h"
  #include "util/detect_os.h"
  #include "util/log.h"
  #include "util/u_atomic.h"
  #include "util/u_debug.h"
 +#include "util/u_string.h"
- 
+
  static const struct debug_control fd_rd_dump_options[] = {
     { "enable", FD_RD_DUMP_ENABLE },
 diff --git a/src/freedreno/common/freedreno_rd_output.h b/src/freedreno/common/freedreno_rd_output.h
@@ -108,7 +108,7 @@ index 05c86c5..cc84e58 100644
  #include <stdint.h>
  #include <zlib.h>
 +#include "util/memstream.h"
- 
+
  #include "redump.h"
  #include "util/u_dynarray.h"
 diff --git a/src/freedreno/common/redump.h b/src/freedreno/common/redump.h
@@ -118,13 +118,13 @@ index 68aa688..da6b9ec 100644
 @@ -6,7 +6,11 @@
  #ifndef REDUMP_H_
  #define REDUMP_H_
- 
+
 +#ifdef _WIN32
 +#include <io.h>
 +#else
  #include <unistd.h>
 +#endif
- 
+
  enum rd_sect_type {
     RD_NONE,
 diff --git a/src/freedreno/ir3/instr-a3xx.h b/src/freedreno/ir3/instr-a3xx.h
@@ -132,7 +132,7 @@ index 5185437..d300805 100644
 --- a/src/freedreno/ir3/instr-a3xx.h
 +++ b/src/freedreno/ir3/instr-a3xx.h
 @@ -15,7 +15,11 @@
- 
+
  /* clang-format off */
  void ir3_assert_handler(const char *expr, const char *file, int line,
 -                        const char *func) __attribute__((weak)) __attribute__((__noreturn__));
@@ -142,7 +142,7 @@ index 5185437..d300805 100644
 +#endif
 +   __attribute__((__noreturn__));
  /* clang-format on */
- 
+
  /* A wrapper for assert() that allows overriding handling of a failed
 diff --git a/src/freedreno/ir3/ir3_disk_cache.c b/src/freedreno/ir3/ir3_disk_cache.c
 index 3b732d3..5b9d6eb 100644
@@ -156,21 +156,21 @@ index 3b732d3..5b9d6eb 100644
 +#if HAVE_BUILD_ID && defined(ENABLE_SHADER_CACHE)
     if (ir3_shader_debug & IR3_DBG_NOCACHE)
        return;
- 
+
 @@ -55,6 +57,7 @@ ir3_disk_cache_init(struct ir3_compiler *compiler)
- 
+
     uint64_t driver_flags = ir3_shader_debug_hash_key();
     compiler->disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
 +#endif
  }
- 
+
  void
 diff --git a/src/freedreno/ir3/ir3_lexer.l b/src/freedreno/ir3/ir3_lexer.l
 index 2aef2f5..c4afe7a 100644
 --- a/src/freedreno/ir3/ir3_lexer.l
 +++ b/src/freedreno/ir3/ir3_lexer.l
 @@ -23,6 +23,9 @@
- 
+
  %{
  #include <stdlib.h>
 +#ifdef _WIN32
@@ -208,33 +208,33 @@ index 2aef2f5..c4afe7a 100644
  {
    if (!input_buffer)
 @@ -115,7 +139,7 @@ static int parse_reg(const char *str)
- 
+
  %}
- 
+
 -%option noyywrap
 +%option noyywrap nounistd
  %option prefix="ir3_yy"
- 
+
  %%
 diff --git a/src/freedreno/ir3/ir3_parser_support.c b/src/freedreno/ir3/ir3_parser_support.c
 index 79cc989..a218f61 100644
 --- a/src/freedreno/ir3/ir3_parser_support.c
 +++ b/src/freedreno/ir3/ir3_parser_support.c
 @@ -7,6 +7,7 @@
- 
+
  #include "util/half_float.h"
  #include "util/u_math.h"
 +#include "util/simple_mtx.h"
- 
+
  #include "ir3/instr-a3xx.h"
  #include "ir3/ir3.h"
 @@ -29,7 +30,7 @@
  #define IR3_REG_ABS    IR3_REG_FABS
  #define IR3_REG_NEGATE IR3_REG_FNEG
- 
+
 -static pthread_mutex_t ir3_parse_mtx = PTHREAD_MUTEX_INITIALIZER;
 +static simple_mtx_t ir3_parse_mtx = SIMPLE_MTX_INITIALIZER;
- 
+
  static struct ir3_kernel_info *info;
  static struct ir3_shader_variant *variant;
 @@ -342,7 +343,7 @@ yyerror(const char *error)
@@ -243,12 +243,12 @@ index 79cc989..a218f61 100644
  {
 -   pthread_mutex_lock(&ir3_parse_mtx);
 +   simple_mtx_lock(&ir3_parse_mtx);
- 
+
     ir3_yyset_lineno(1);
     ir3_yyset_input(f);
 @@ -363,6 +364,6 @@ ir3_parse(struct ir3_shader_variant *v, struct ir3_kernel_info *k, FILE *f)
     ralloc_free(ir3_parser_dead_ctx);
- 
+
     struct ir3 *ir = variant->ir;
 -   pthread_mutex_unlock(&ir3_parse_mtx);
 +   simple_mtx_unlock(&ir3_parse_mtx);
@@ -263,7 +263,7 @@ index a7466a7..2699e49 100644
  #include "ir3_parser.h"
  #include "ir3_shader.h"
 +#include "util/memstream.h"
- 
+
  #include "nir/nir.h"
  #include "nir/nir_xfb_info.h"
 @@ -245,7 +246,9 @@ disasm_collect(struct ir3_shader_variant *v, uint8_t *mismatch_array,
@@ -274,18 +274,18 @@ index a7466a7..2699e49 100644
 +   struct u_memstream mem;
 +   if (!u_memstream_open(&mem, &stream_data, &stream_size)) return NULL;
 +   FILE *stream = u_memstream_get(&mem);
- 
+
     struct disasm_context context = {
        .stream = stream,
 @@ -263,7 +266,7 @@ disasm_collect(struct ir3_shader_variant *v, uint8_t *mismatch_array,
- 
+
     ir3_isa_disasm(binary_data, binary_size, stream, &decode_options);
- 
+
 -   fclose(stream);
 +   u_memstream_close(&mem);
     return stream_data;
  }
- 
+
 @@ -351,9 +354,11 @@ create_roundtrip_variant(struct ir3_shader *shader, struct ir3_shader_variant *v
      */
     char *disasm_data = NULL;
@@ -297,17 +297,17 @@ index a7466a7..2699e49 100644
     ir3_shader_disasm(v, v->bin, disasm_stream);
 -   fflush(disasm_stream);
 +   u_memstream_flush(&mem);
- 
+
     struct ir3_kernel_info info;
     memset(&info, 0, sizeof(info));
 @@ -362,7 +367,7 @@ create_roundtrip_variant(struct ir3_shader *shader, struct ir3_shader_variant *v
     fseek(disasm_stream, 0, SEEK_SET);
     rt_v->ir = ir3_parse(rt_v, &info, disasm_stream);
- 
+
 -   fclose(disasm_stream);
 +   u_memstream_close(&mem);
     free(disasm_data);
- 
+
     if (!rt_v->ir) {
 @@ -411,7 +416,9 @@ assemble_variant(struct ir3_shader_variant *v, bool internal)
        if (v->disasm_info.write_disasm || dbg_enabled || shader_overridden) {
@@ -317,16 +317,16 @@ index a7466a7..2699e49 100644
 +         struct u_memstream mem;
 +         if (!u_memstream_open(&mem, &stream_data, &stream_size)) return;
 +         FILE *stream = u_memstream_get(&mem);
- 
+
           fprintf(stream,
                   "Native code%s for unnamed %s shader %s with blake3 %s:\n",
 @@ -419,7 +426,7 @@ assemble_variant(struct ir3_shader_variant *v, bool internal)
                   v->name, v->blake3_str);
           ir3_shader_disasm(v, v->bin, stream);
- 
+
 -         fclose(stream);
 +         u_memstream_close(&mem);
- 
+
           if (v->disasm_info.write_disasm) {
              v->disasm_info.disasm = ralloc_size(v, stream_size + 1);
 diff --git a/src/freedreno/perfcntrs/meson.build b/src/freedreno/perfcntrs/meson.build
@@ -342,7 +342,7 @@ index 3b9f71c..4695e2b 100644
    'freedreno_perfcntr.c',
    'freedreno_perfcntr.h',
  )
- 
+
 +if not with_platform_windows
 +  libfreedreno_perfcntrs_files += files('freedreno_dt.c')
 +endif
@@ -357,7 +357,7 @@ index b019710..45c4b49 100644
 @@ -103,7 +103,13 @@ tu_link_with = []
  tu_deps = []
  tu_flags = [sse2_args]
- 
+
 -tu_wsi = false
 +tu_wsi = with_platform_windows
 +
@@ -366,7 +366,7 @@ index b019710..45c4b49 100644
 +  libtu_files += files('tu_knl_windows.cc')
 +  tu_deps += cc.find_library('cfgmgr32')
 +endif
- 
+
  if with_platform_x11
    tu_deps += dep_xcb_dri3
 @@ -226,7 +232,8 @@ libvulkan_freedreno = shared_library(
@@ -385,7 +385,7 @@ index bf5c503..d5f0687 100644
 +++ b/src/freedreno/vulkan/tu_common.h
 @@ -11,7 +11,7 @@
  #define TU_COMMON_H
- 
+
  #include <assert.h>
 -#include <pthread.h>
 +#include "util/u_thread.h"
@@ -399,7 +399,7 @@ index d607623..d4838d5 100644
 @@ -3,9 +3,14 @@
   * SPDX-License-Identifier: MIT
   */
- 
+
 +#ifdef _WIN32
 +#include <winsock2.h>
 +#else
@@ -408,21 +408,21 @@ index d607623..d4838d5 100644
  #include <sys/socket.h>
 +#include <unistd.h>
 +#endif
- 
+
  #include "tu_cs.h"
  #include "tu_device.h"
 @@ -31,14 +36,14 @@ struct breadcrumbs_context
     uint32_t breadcrumb_breakpoint_hits;
- 
+
     bool thread_stop;
 -   pthread_t breadcrumbs_thread;
 +   thrd_t breadcrumbs_thread;
- 
+
     struct tu_device *device;
- 
+
     uint32_t breadcrumb_idx;
  };
- 
+
 -static void *
 +static int
  sync_gpu_with_cpu(void *_job)
@@ -431,7 +431,7 @@ index d607623..d4838d5 100644
 @@ -46,11 +51,17 @@ sync_gpu_with_cpu(void *_job)
     uint32_t last_breadcrumb = 0;
     uint32_t breakpoint_hits = 0;
- 
+
 +#ifdef _WIN32
 +   WSADATA wsa;
 +   if (WSAStartup(MAKEWORD(2, 2), &wsa)) return 0;
@@ -439,18 +439,18 @@ index d607623..d4838d5 100644
 +#else
     int s = socket(AF_INET, SOCK_DGRAM, 0);
 +#endif
- 
+
 -   if (s < 0) {
 +   if (s == (decltype(s))-1) {
        mesa_loge("TU_BREADCRUMBS: Error while creating socket");
 -      return NULL;
 +      return 0;
     }
- 
+
     struct sockaddr_in to_addr;
 @@ -69,7 +80,7 @@ sync_gpu_with_cpu(void *_job)
           last_breadcrumb = current_breadcrumb;
- 
+
           uint32_t data = htonl(last_breadcrumb);
 -         if (sendto(s, &data, sizeof(data), 0, (struct sockaddr *) &to_addr,
 +         if (sendto(s, (const char *)&data, sizeof(data), 0, (struct sockaddr *) &to_addr,
@@ -459,7 +459,7 @@ index d607623..d4838d5 100644
              goto fail;
 @@ -91,9 +102,14 @@ sync_gpu_with_cpu(void *_job)
     }
- 
+
  fail:
 +#ifdef _WIN32
 +   closesocket(s);
@@ -467,28 +467,28 @@ index d607623..d4838d5 100644
 +#else
     close(s);
 +#endif
- 
+
 -   return NULL;
 +   return 0;
  }
- 
+
  /* Same as tu_cs_emit_pkt7 but without instrumentation */
 @@ -137,7 +153,7 @@ tu_breadcrumbs_init(struct tu_device *device)
     global->breadcrumb_cpu_sync_seqno = 0;
     global->breadcrumb_gpu_sync_seqno = 0;
- 
+
 -   pthread_create(&ctx->breadcrumbs_thread, NULL, sync_gpu_with_cpu, ctx);
 +   u_thread_create(&ctx->breadcrumbs_thread, sync_gpu_with_cpu, ctx);
  }
- 
+
  void
 @@ -148,7 +164,7 @@ tu_breadcrumbs_finish(struct tu_device *device)
        return;
- 
+
     ctx->thread_stop = true;
 -   pthread_join(ctx->breadcrumbs_thread, NULL);
 +   thrd_join(ctx->breadcrumbs_thread, NULL);
- 
+
     free(ctx);
  }
 diff --git a/src/freedreno/vulkan/tu_device.h b/src/freedreno/vulkan/tu_device.h
@@ -496,7 +496,7 @@ index 4ed479c..37d02ac 100644
 --- a/src/freedreno/vulkan/tu_device.h
 +++ b/src/freedreno/vulkan/tu_device.h
 @@ -102,6 +102,9 @@ struct tu_physical_device
- 
+
     char fd_path[20];
     int local_fd;
 +#ifdef TU_HAS_WINDOWS
@@ -514,19 +514,19 @@ index 4ed479c..37d02ac 100644
 +   void *windows_context;
 +#endif
     struct tu_instance *instance;
- 
+
     struct tu_queue *queues[TU_MAX_QUEUE_FAMILIES];
 @@ -447,8 +453,8 @@ struct tu_device
- 
+
     /* Condition variable for timeline semaphore to notify waiters when a
      * new submit is executed. */
 -   pthread_cond_t timeline_cond;
 -   pthread_mutex_t submit_mutex;
 +   cnd_t timeline_cond;
 +   mtx_t submit_mutex;
- 
+
     struct fd_perfcntr_state *perfcntrs;
- 
+
 diff --git a/src/freedreno/vulkan/tu_knl.h b/src/freedreno/vulkan/tu_knl.h
 index 4c2bf6a..9f950d6 100644
 --- a/src/freedreno/vulkan/tu_knl.h
@@ -534,11 +534,11 @@ index 4c2bf6a..9f950d6 100644
 @@ -261,6 +261,8 @@ VkResult tu_sparse_vma_init(struct tu_device *dev,
  void tu_sparse_vma_finish(struct tu_device *device,
                            struct tu_sparse_vma *vma);
- 
+
 +VkResult tu_knl_windows_load(struct tu_instance *instance);
 +
  VkResult tu_knl_kgsl_load(struct tu_instance *instance, int fd);
- 
+
  struct _drmVersion;
 diff --git a/src/freedreno/vulkan/tu_queue.cc b/src/freedreno/vulkan/tu_queue.cc
 index 3e6cd0a..bc594da 100644
@@ -547,59 +547,59 @@ index 3e6cd0a..bc594da 100644
 @@ -342,7 +342,7 @@ queue_submit_sparse(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
     struct tu_queue *queue = list_entry(_queue, struct tu_queue, vk);
     struct tu_device *device = queue->device;
- 
+
 -   pthread_mutex_lock(&device->submit_mutex);
 +   mtx_lock(&device->submit_mutex);
- 
+
     void *submit = tu_submit_create(device);
     if (!submit)
 @@ -395,14 +395,14 @@ queue_submit_sparse(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
                        NULL);
- 
+
     if (result != VK_SUCCESS) {
 -      pthread_mutex_unlock(&device->submit_mutex);
 +      mtx_unlock(&device->submit_mutex);
        goto out;
     }
- 
+
     device->submit_count++;
- 
+
 -   pthread_mutex_unlock(&device->submit_mutex);
 -   pthread_cond_broadcast(&queue->device->timeline_cond);
 +   mtx_unlock(&device->submit_mutex);
 +   cnd_broadcast(&queue->device->timeline_cond);
- 
+
  out:
     tu_submit_finish(device, submit);
 @@ -433,7 +433,7 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
     if (TU_DEBUG(LOG_SKIP_GMEM_OPS))
        tu_dbg_log_gmem_load_store_skips(device);
- 
+
 -   pthread_mutex_lock(&device->submit_mutex);
 +   mtx_lock(&device->submit_mutex);
- 
+
     struct tu_cmd_buffer **cmd_buffers =
        (struct tu_cmd_buffer **) vk_submit->command_buffers;
 @@ -559,7 +559,7 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
                        u_trace_submission_data);
- 
+
     if (result != VK_SUCCESS) {
 -      pthread_mutex_unlock(&device->submit_mutex);
 +      mtx_unlock(&device->submit_mutex);
        goto out;
     }
- 
+
 @@ -588,8 +588,8 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
- 
+
     device->submit_count++;
- 
+
 -   pthread_mutex_unlock(&device->submit_mutex);
 -   pthread_cond_broadcast(&queue->device->timeline_cond);
 +   mtx_unlock(&device->submit_mutex);
 +   cnd_broadcast(&queue->device->timeline_cond);
- 
+
     u_trace_context_process(&device->trace_context, false);
- 
+
 diff --git a/src/freedreno/vulkan/tu_shader.cc b/src/freedreno/vulkan/tu_shader.cc
 index 983a92c..7dbf890 100644
 --- a/src/freedreno/vulkan/tu_shader.cc
@@ -607,18 +607,18 @@ index 983a92c..7dbf890 100644
 @@ -2950,10 +2950,10 @@ tu_upload_shader(struct tu_device *dev,
           size += vpc_size;
     }
- 
+
 -   pthread_mutex_lock(&dev->pipeline_mutex);
 +   mtx_lock(&dev->pipeline_mutex);
     VkResult result = tu_suballoc_bo_alloc(&shader->bo, &dev->pipeline_suballoc,
                                            size * 4, 128);
 -   pthread_mutex_unlock(&dev->pipeline_mutex);
 +   mtx_unlock(&dev->pipeline_mutex);
- 
+
     if (result != VK_SUCCESS)
        return result;
 @@ -2983,9 +2983,9 @@ tu_upload_shader(struct tu_device *dev,
- 
+
     result = tu_setup_pvtmem(dev, shader, &pvtmem_config, pvtmem_size, per_wave);
     if (result != VK_SUCCESS) {
 -      pthread_mutex_lock(&dev->pipeline_mutex);
@@ -628,30 +628,30 @@ index 983a92c..7dbf890 100644
 +      mtx_unlock(&dev->pipeline_mutex);
        return result;
     }
- 
+
 @@ -3809,10 +3809,10 @@ tu_empty_shader_create(struct tu_device *dev,
     if (!shader)
        return VK_ERROR_OUT_OF_HOST_MEMORY;
- 
+
 -   pthread_mutex_lock(&dev->pipeline_mutex);
 +   mtx_lock(&dev->pipeline_mutex);
     VkResult result = tu_suballoc_bo_alloc(&shader->bo, &dev->pipeline_suballoc,
                                            32 * 4, 128);
 -   pthread_mutex_unlock(&dev->pipeline_mutex);
 +   mtx_unlock(&dev->pipeline_mutex);
- 
+
     if (result != VK_SUCCESS) {
        vk_free(&dev->vk.alloc, shader);
 @@ -3923,9 +3923,9 @@ tu_shader_destroy(struct tu_device *dev,
     tu_cs_finish(&shader->cs);
     TU_RMV(resource_destroy, dev, &shader->bo);
- 
+
 -   pthread_mutex_lock(&dev->pipeline_mutex);
 +   mtx_lock(&dev->pipeline_mutex);
     tu_suballoc_bo_free(&dev->pipeline_suballoc, &shader->bo);
 -   pthread_mutex_unlock(&dev->pipeline_mutex);
 +   mtx_unlock(&dev->pipeline_mutex);
- 
+
     if (shader->pvtmem_bo)
        tu_bo_finish(dev, shader->pvtmem_bo);
 diff --git a/src/freedreno/vulkan/tu_util.cc b/src/freedreno/vulkan/tu_util.cc
@@ -660,7 +660,7 @@ index cfc03d6..40fca87 100644
 +++ b/src/freedreno/vulkan/tu_util.cc
 @@ -9,6 +9,7 @@
  #include <stdarg.h>
- 
+
  #include "util/os_file.h"
 +#include "util/os_time.h"
  #include "util/os_file_notify.h"
@@ -669,14 +669,14 @@ index cfc03d6..40fca87 100644
 @@ -598,15 +599,15 @@ tu_dbg_log_gmem_load_store_skips(struct tu_device *device)
     static uint32_t last_total_stores = 0;
     static struct timespec last_time = {};
- 
+
 -   pthread_mutex_lock(&device->submit_mutex);
 +   mtx_lock(&device->submit_mutex);
- 
+
     struct timespec current_time;
 -   clock_gettime(CLOCK_MONOTONIC, &current_time);
 +   timespec_from_nsec(&current_time, os_time_get_nano());
- 
+
     if (timespec_sub_to_nsec(&current_time, &last_time) > 1000 * 1000 * 1000) {
        last_time = current_time;
     } else {
@@ -684,11 +684,11 @@ index cfc03d6..40fca87 100644
 +      mtx_unlock(&device->submit_mutex);
        return;
     }
- 
+
 @@ -638,5 +639,5 @@ tu_dbg_log_gmem_load_store_skips(struct tu_device *device)
     last_total_loads = current_total_loads;
     last_total_stores = current_total_stores;
- 
+
 -   pthread_mutex_unlock(&device->submit_mutex);
 +   mtx_unlock(&device->submit_mutex);
  }
@@ -699,7 +699,7 @@ index 4db6d5e..d15f8e6 100644
 @@ -38,7 +38,7 @@ tu_wsi_init(struct tu_physical_device *physical_device)
  {
     VkResult result;
- 
+
 -   const struct wsi_device_options options = { .sw_device = false };
 +   const struct wsi_device_options options = { .sw_device = DETECT_OS_WINDOWS };
     result = wsi_device_init(&physical_device->wsi_device,
@@ -717,15 +717,15 @@ index db9de56..7082f80 100644
 +    defined(VK_USE_PLATFORM_DISPLAY_KHR) || defined(VK_USE_PLATFORM_WIN32_KHR)
  #define TU_USE_WSI_PLATFORM
  #endif
- 
+
 diff --git a/src/util/meson.build b/src/util/meson.build
 index b11f0c4..12abfd7 100644
 --- a/src/util/meson.build
 +++ b/src/util/meson.build
 @@ -186,7 +186,7 @@ files_mesa_util = files(
- 
+
  libmesa_util_links = []
- 
+
 -if host_machine.cpu_family() == 'aarch64' and cc.get_id() != 'msvc'
 +if host_machine.cpu_family() == 'aarch64' and cc.get_id() != 'msvc' and host_machine.system() != 'windows'
    files_mesa_util += files('cache_ops_aarch64.c')
@@ -738,7 +738,7 @@ index 9f79113..44225cf 100644
 @@ -119,6 +119,13 @@
  #include <intrin.h>
  #include <assert.h>
- 
+
 +__forceinline long _interlockedadd(long volatile *p, long value) {
 +   return _InterlockedExchangeAdd(p, value) + value;
 +}
@@ -756,7 +756,7 @@ index 9f79113..44225cf 100644
 -   sizeof *(_v) == sizeof(__int64) ? _interlockedincrement64((__int64 *)(_v)) : \
 +   sizeof *(_v) == sizeof(__int64) ? _InterlockedIncrement64((__int64 *)(_v)) : \
                                       (assert(!"should not get here"), 0))
- 
+
  #define p_atomic_dec(_v) \
 @@ -179,7 +186,7 @@ __forceinline short _interlockedadd16(short volatile * _Addend, short _Value)
     sizeof *(_v) == sizeof(char)    ? p_atomic_add_return((_v), -1) : \
@@ -765,7 +765,7 @@ index 9f79113..44225cf 100644
 -   sizeof *(_v) == sizeof(__int64) ? _interlockeddecrement64((__int64 *)(_v)) : \
 +   sizeof *(_v) == sizeof(__int64) ? _InterlockedDecrement64((__int64 *)(_v)) : \
                                       (assert(!"should not get here"), 0))
- 
+
  #define p_atomic_add(_v, _i) \
 @@ -196,7 +203,7 @@ __forceinline short _interlockedadd16(short volatile * _Addend, short _Value)
     sizeof *(_v) == sizeof(char)    ? _InterlockedExchangeAdd8 ((char *)   (_v), (char) (_i)) : \
@@ -774,7 +774,7 @@ index 9f79113..44225cf 100644
 -   sizeof *(_v) == sizeof(__int64) ? _interlockedexchangeadd64((__int64 *)(_v), (__int64) (_i)) : \
 +   sizeof *(_v) == sizeof(__int64) ? _InterlockedExchangeAdd64((__int64 *)(_v), (__int64) (_i)) : \
                                       (assert(!"should not get here"), 0))
- 
+
  #define p_atomic_cmpxchg(_v, _old, _new) (\
 @@ -217,7 +224,7 @@ __forceinline short _interlockedadd16(short volatile * _Addend, short _Value)
     sizeof *(_v) == sizeof(char)    ? _InterlockedExchange8 ((char *)   (_v), (char)   (_new)) : \
@@ -783,7 +783,7 @@ index 9f79113..44225cf 100644
 -   sizeof *(_v) == sizeof(__int64) ? _interlockedexchange64((__int64 *)(_v), (__int64)(_new)) : \
 +   sizeof *(_v) == sizeof(__int64) ? _InterlockedExchange64((__int64 *)(_v), (__int64)(_new)) : \
                                       (assert(!"should not get here"), 0))
- 
+
  #endif
 diff --git a/src/util/u_math.c b/src/util/u_math.c
 index 722eac7..4bc8dd1 100644
@@ -791,25 +791,25 @@ index 722eac7..4bc8dd1 100644
 +++ b/src/util/u_math.c
 @@ -41,6 +41,7 @@
  #endif
- 
+
  #if DETECT_CC_MSVC && DETECT_ARCH_AARCH64
 +#define ARM64_FPCR 0x5a20
  #include <intrin.h>
  #endif
- 
+
 diff --git a/src/vulkan/runtime/radix_sort/common/util.c b/src/vulkan/runtime/radix_sort/common/util.c
 index 2ed2425..966ba28 100644
 --- a/src/vulkan/runtime/radix_sort/common/util.c
 +++ b/src/vulkan/runtime/radix_sort/common/util.c
 @@ -74,7 +74,7 @@ msb_idx_u32(uint32_t n)
- 
+
    return index;
- 
+
 -#elif defined(__GNUC__)
 +#elif defined(__GNUC__) || defined(__clang__)
- 
+
    return __builtin_clz(n) ^ 31;
- 
+
 diff --git a/src/vulkan/util/vk_dispatch_table_gen.py b/src/vulkan/util/vk_dispatch_table_gen.py
 index c2776d2..f818938 100644
 --- a/src/vulkan/util/vk_dispatch_table_gen.py
@@ -861,7 +861,7 @@ index bba9e26..deb806c 100644
 --- a/src/freedreno/vulkan/tu_formats.h
 +++ b/src/freedreno/vulkan/tu_formats.h
 @@ -19,8 +19,9 @@
- 
+
  struct tu_native_format
  {
 -   enum a6xx_format fmt : 8;
@@ -870,7 +870,7 @@ index bba9e26..deb806c 100644
 +   enum a6xx_format fmt;
 +   enum a3xx_color_swap swap;
  };
- 
+
  struct tu_native_format tu6_format_vtx(enum pipe_format format);
 diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
 index e8ef940..4de046f 100644
@@ -878,13 +878,13 @@ index e8ef940..4de046f 100644
 +++ b/src/freedreno/vulkan/tu_device.cc
 @@ -8,6 +8,10 @@
   */
- 
+
  #include "tu_device.h"
 +#ifdef TU_HAS_WINDOWS
 +#include <io.h>
 +#define close _close
 +#endif
- 
+
  #include "drm-uapi/drm_fourcc.h"
  #include "git_sha1.h"
 @@ -140,6 +144,9 @@ static const struct vk_instance_extension_table tu_instance_extensions_supported
@@ -907,12 +907,12 @@ index e8ef940..4de046f 100644
 +   device->has_cached_non_coherent_memory=tu_windows_cached_memory(device);
 +#endif
     device->preferred_uncached_as_cached_index = -1;
- 
+
     device->memory.type_count = 1;
 @@ -1896,6 +1908,9 @@ tu_physical_device_finish(struct tu_physical_device *device)
     tu_wsi_finish(device);
  #endif
- 
+
 +#ifdef TU_HAS_WINDOWS
 +   CloseHandle(device->windows_handle);
 +#else
@@ -922,37 +922,37 @@ index e8ef940..4de046f 100644
 @@ -1903,6 +1918,7 @@ tu_physical_device_finish(struct tu_physical_device *device)
     if (device->kgsl_dma_fd != -1)
        close(device->kgsl_dma_fd);
- 
+
 +#endif
     disk_cache_destroy(device->vk.disk_cache);
     vk_free(&device->instance->vk.alloc, (void *)device->name);
- 
+
 @@ -2785,7 +2801,7 @@ tu_device_destroy_mutexes(struct tu_device *device)
- 
+
     u_rwlock_destroy(&device->dma_bo_lock);
     u_rwlock_destroy(&device->vm_bind_fence_lock);
 -   pthread_mutex_destroy(&device->submit_mutex);
 +   mtx_destroy(&device->submit_mutex);
- 
+
     if (device->physical_device->has_set_iova) {
        mtx_destroy(&device->vma_mutex);
 @@ -2902,7 +2918,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
- 
+
     u_rwlock_init(&device->dma_bo_lock);
     u_rwlock_init(&device->vm_bind_fence_lock);
 -   pthread_mutex_init(&device->submit_mutex, NULL);
 +   mtx_init(&device->submit_mutex, mtx_plain);
     device->vm_bind_fence_fd = -1;
- 
+
     if (physical_device->has_set_iova) {
 @@ -3031,12 +3047,12 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
     }
- 
+
     tu_bo_suballocator_init(&device->event_suballoc, device,
 -      getpagesize(), TU_BO_ALLOC_INTERNAL_RESOURCE,
 +      os_page_size, TU_BO_ALLOC_INTERNAL_RESOURCE,
        "event_suballoc");
- 
+
     tu_bo_suballocator_init(
        &device->vis_stream_suballocator, device,
 -      getpagesize(),
@@ -962,7 +962,7 @@ index e8ef940..4de046f 100644
        "vis_stream_suballoc");
 @@ -3167,28 +3183,10 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
     tu_init_dbg_reg_stomper(device);
- 
+
     /* Initialize a condition variable for timeline semaphore */
 -   pthread_condattr_t condattr;
 -   if (pthread_condattr_init(&condattr) != 0) {
@@ -988,49 +988,48 @@ index e8ef940..4de046f 100644
        goto fail_timeline_cond;
     }
 -   pthread_condattr_destroy(&condattr);
- 
+
     device->use_z24uint_s8uint =
        physical_device->info->props.has_z24uint_s8uint &&
 @@ -3405,7 +3403,7 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
- 
+
     u_vector_finish(&device->zombie_vmas);
- 
+
 -   pthread_cond_destroy(&device->timeline_cond);
 +   cnd_destroy(&device->timeline_cond);
     _mesa_hash_table_destroy(device->bo_sizes, NULL);
     vk_free(&device->vk.alloc, device->submit_bo_list);
     util_dynarray_fini(&device->dump_bo_list);
 diff --git a/src/freedreno/vulkan/tu_knl.cc b/src/freedreno/vulkan/tu_knl.cc
-index ab27798..2066c80 100644
 --- a/src/freedreno/vulkan/tu_knl.cc
 +++ b/src/freedreno/vulkan/tu_knl.cc
 @@ -16,7 +16,9 @@
  #include <sys/sysmacros.h>
  #endif
- 
+
 +#ifndef TU_HAS_WINDOWS
  #include <sys/mman.h>
 +#endif
- 
+
  #include "util/cache_ops.h"
  #include "util/libdrm.h"
-@@ -151,6 +153,7 @@ tu_bo_unmap(struct tu_device *dev, struct tu_bo *bo, bool reserve)
- 
+@@ -151,6 +153,7 @@
+
     TU_RMV(bo_unmap, dev, bo);
- 
+
 + #ifndef TU_HAS_WINDOWS
     if (reserve) {
        void *map = mmap(bo->map, bo->size, PROT_NONE,
                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-@@ -161,6 +164,7 @@ tu_bo_unmap(struct tu_device *dev, struct tu_bo *bo, bool reserve)
+@@ -161,6 +164,7 @@
        munmap(bo->map, bo->size);
     }
- 
+
 + #endif
     bo->map = NULL;
- 
+
     return VK_SUCCESS;
-@@ -173,6 +177,11 @@ tu_bo_sync_cache(struct tu_device *dev,
+@@ -173,6 +177,11 @@
                   VkDeviceSize size,
                   enum tu_mem_sync_op op)
  {
@@ -1040,9 +1039,36 @@ index ab27798..2066c80 100644
 +   return;
 +#endif
     char *start = (char *) bo->map + offset;
- 
+
     size = size == VK_WHOLE_SIZE ? (bo->size - offset) : size;
-@@ -336,7 +345,9 @@ tu_queue_submit(struct tu_queue *queue, void *submit,
+@@ -185,6 +194,8 @@
+
+ void tu_bo_allow_dump(struct tu_device *dev, struct tu_bo *bo)
+ {
++   if (!dev->instance->knl->bo_allow_dump)
++      return;
+    dev->instance->knl->bo_allow_dump(dev, bo);
+
+    p_atomic_set(&bo->dump, true);
+@@ -219,6 +230,8 @@
+ tu_sparse_vma_finish(struct tu_device *dev,
+                      struct tu_sparse_vma *vma)
+ {
++   if (!dev->instance->knl->sparse_vma_finish)
++      return;
+    dev->instance->knl->sparse_vma_finish(dev, vma);
+ }
+
+@@ -281,6 +294,8 @@
+ void
+ tu_drm_submitqueue_close(struct tu_device *dev, struct tu_queue *queue)
+ {
++   if (!dev->instance->knl->submitqueue_close)
++      return;
+    dev->instance->knl->submitqueue_close(dev, queue);
+ }
+
+@@ -336,7 +351,9 @@
  VkResult
  tu_enumerate_devices(struct vk_instance *vk_instance)
  {
@@ -1052,8 +1078,8 @@ index ab27798..2066c80 100644
 +#elif defined(TU_HAS_KGSL)
     struct tu_instance *instance =
        container_of(vk_instance, struct tu_instance, vk);
- 
-@@ -375,6 +386,9 @@ tu_physical_device_try_create(struct vk_instance *vk_instance,
+
+@@ -375,6 +392,9 @@
                                struct _drmDevice *drm_device,
                                struct vk_physical_device **out)
  {
@@ -1062,10 +1088,11 @@ index ab27798..2066c80 100644
 +#else
     struct tu_instance *instance =
        container_of(vk_instance, struct tu_instance, vk);
- 
-@@ -490,4 +504,5 @@ out:
+
+@@ -490,4 +510,5 @@
     drmFreeVersion(version);
- 
+
     return result;
+-}
 +#endif
- }
++}

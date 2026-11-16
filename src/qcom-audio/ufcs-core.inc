@@ -129,10 +129,10 @@ static VOID QchPoll(PSIA_LINK L)
     QCH_LINK *C=&L->Charge;SIA_USB *U=&L->Usb;ULONGLONG Now=KeQueryInterruptTime()/10000;
     if(!U->Acked||!U->Rcid)return;
     if(!C->Running && !C->OffMask && C->Phase!=90 && (C->Phase!=92 || C->Fault==39) && QchInputPoll(L,Now))return;
-    ULONG Action=QchTakeCommand();
-    if((Action==ChargeStart||Action==ChargeNormal) && C->Waiting && !C->Running && !C->OffMask && !C->UfcsStarted && C->Phase!=92){QchDeferCommand(Action);Action=0xffffffffu;}
+    ULONG Action=C->Command;C->Command=ChargeNone;
+    if((Action==ChargeStart||Action==ChargeNormal) && C->Waiting && !C->Running && !C->OffMask && !C->UfcsStarted && C->Phase!=92){C->Command=Action;Action=ChargeNone;}
     if(Action==ChargeStop){QchOff(L);return;}
-    if((Action==ChargeStart||Action==ChargeNormal) && C->InputState){QchDeferCommand(Action);Action=0xffffffffu;}
+    if((Action==ChargeStart||Action==ChargeNormal) && C->InputState){C->Command=Action;Action=ChargeNone;}
     if(Action==ChargeStart||Action==ChargeNormal){
         if(C->Running||C->OffMask){C->Fault=6;QchOff(L);return;}
         if(Action==ChargeStart && !QchAuthAvailable()){C->Fault=23;return;}
@@ -211,7 +211,6 @@ static VOID QchPoll(PSIA_LINK L)
         }
         if(C->Phase==4){
             if(!C->NotifyAcked){if(Now-C->Last>1000){C->Fault=5;QchOff(L);}return;}
-            // Material is staged once per session by the protected broker.
             C->NotifyFlags&=~16u; // Only pre-session notices, not active-session failures.
             if(QchRequest(L,0x33,54,1)){C->UfcsStarted=TRUE;C->NotifyFlags=0;C->Phase=5;}
             return;

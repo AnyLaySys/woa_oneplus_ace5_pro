@@ -19,19 +19,17 @@ static std::vector<uint32_t> signature(const D3D10DDIARG_SIGNATURE_ENTRY *entrie
  return words;
 }
 bool shader_create(Device *d,Shader *s,const UINT *code,const D3D10DDIARG_STAGE_IO_SIGNATURES *io,unsigned stage) {
- ProfileTimer timing(d->profile.shader_ticks);d->profile.shaders++;
- if(!code || code[1]<2 || code[1]>1048576){error(d,E_INVALIDARG,"shader bytecode");return false;}
+
+ if(!code || code[1]<2 || code[1]>1048576){error(d,E_INVALIDARG);return false;}
  auto input=signature(io?io->pInputSignature:nullptr,io?io->NumInputSignatureEntries:0,stage,false);
  auto output=signature(io?io->pOutputSignature:nullptr,io?io->NumOutputSignatureEntries:0,stage,true);
  vkd3d_shader_dxbc_section_desc sections[3]={{0x4e475349,{input.data(),input.size()*4}},{0x4e47534f,{output.data(),output.size()*4}},{0x52444853,{code,(size_t)code[1]*4}}};
- vkd3d_shader_code dxbc{},spirv{};char *messages=nullptr;
- int result=vkd3d_shader_serialize_dxbc(3,sections,&dxbc,&messages);
- if(messages){fprintf(stderr,"A830 DIRECT DXBC %s\n",messages);vkd3d_shader_free_messages(messages);messages=nullptr;}
- if(result<0){error(d,E_FAIL,"DXBC container");return false;}
+ vkd3d_shader_code dxbc{},spirv{};
+ int result=vkd3d_shader_serialize_dxbc(3,sections,&dxbc,nullptr);
+ if(result<0){error(d,E_FAIL);return false;}
  vkd3d_shader_scan_descriptor_info scan{};scan.type=VKD3D_SHADER_STRUCTURE_TYPE_SCAN_DESCRIPTOR_INFO;
- vkd3d_shader_compile_info ci{};ci.type=VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO;ci.next=&scan;ci.source=dxbc;ci.source_type=VKD3D_SHADER_SOURCE_DXBC_TPF;ci.target_type=VKD3D_SHADER_TARGET_SPIRV_BINARY;ci.log_level=VKD3D_SHADER_LOG_WARNING;
- result=vkd3d_shader_scan(&ci,&messages);
- if(messages){fprintf(stderr,"A830 DIRECT shader scan %s\n",messages);vkd3d_shader_free_messages(messages);messages=nullptr;}
+ vkd3d_shader_compile_info ci{};ci.type=VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO;ci.next=&scan;ci.source=dxbc;ci.source_type=VKD3D_SHADER_SOURCE_DXBC_TPF;ci.target_type=VKD3D_SHADER_TARGET_SPIRV_BINARY;ci.log_level=VKD3D_SHADER_LOG_NONE;
+ result=vkd3d_shader_scan(&ci,nullptr);
  std::vector<vkd3d_shader_resource_binding> bindings;
  if(result>=0)for(UINT i=0;i<scan.descriptor_count;i++) {
    const auto &r=scan.descriptors[i];
@@ -40,7 +38,7 @@ bool shader_create(Device *d,Shader *s,const UINT *code,const D3D10DDIARG_STAGE_
      if(r.type==VKD3D_SHADER_DESCRIPTOR_TYPE_CBV && reg<16){s->cb[reg]=true;binding=reg;}
      else if(r.type==VKD3D_SHADER_DESCRIPTOR_TYPE_SAMPLER && reg<16){s->samplers[reg]=true;binding=16+reg;}
      else if(r.type==VKD3D_SHADER_DESCRIPTOR_TYPE_SRV && reg<128){s->textures[reg]=true;s->texel[reg]=!image;binding=(image?32:160)+reg;}
-     else {error(d,DXGI_ERROR_UNSUPPORTED,"shader resource declaration");result=-1;break;}
+     else {error(d,DXGI_ERROR_UNSUPPORTED);result=-1;break;}
      vkd3d_shader_resource_binding b{};b.type=r.type;b.register_space=r.register_space;b.register_index=reg;b.shader_visibility=VKD3D_SHADER_VISIBILITY_ALL;
      b.flags=r.type==VKD3D_SHADER_DESCRIPTOR_TYPE_SAMPLER?(VKD3D_SHADER_BINDING_FLAG_IMAGE|VKD3D_SHADER_BINDING_FLAG_BUFFER):image?VKD3D_SHADER_BINDING_FLAG_IMAGE:VKD3D_SHADER_BINDING_FLAG_BUFFER;
      if(r.type==VKD3D_SHADER_DESCRIPTOR_TYPE_CBV)b.flags=VKD3D_SHADER_BINDING_FLAG_BUFFER;
@@ -49,12 +47,20 @@ bool shader_create(Device *d,Shader *s,const UINT *code,const D3D10DDIARG_STAGE_
  }
  vkd3d_shader_interface_info binding_info{};binding_info.type=VKD3D_SHADER_STRUCTURE_TYPE_INTERFACE_INFO;binding_info.bindings=bindings.data();binding_info.binding_count=(UINT)bindings.size();
  vkd3d_shader_spirv_target_info target{};target.type=VKD3D_SHADER_STRUCTURE_TYPE_SPIRV_TARGET_INFO;target.environment=VKD3D_SHADER_SPIRV_ENVIRONMENT_VULKAN_1_1;binding_info.next=&target;ci.next=&binding_info;
- if(result>=0)result=vkd3d_shader_compile(&ci,&spirv,&messages);
- if(messages){fprintf(stderr,"A830 DIRECT shader compile %s\n",messages);vkd3d_shader_free_messages(messages);}
- vkd3d_shader_free_scan_descriptor_info(&scan);vkd3d_shader_free_shader_code(&dxbc);
- if(result<0){error(d,DXGI_ERROR_UNSUPPORTED,"DXBC to SPIR-V");return false;}
+ if(result>=0)result=vkd3d_shader_compile(&ci,&spirv,nullptr);
+ vkd3d_shader_free_scan_descriptor_info(&scan);
+ if(result<0){vkd3d_shader_free_shader_code(&dxbc);error(d,DXGI_ERROR_UNSUPPORTED);return false;}
  VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};mi.codeSize=spirv.size;mi.pCode=(const UINT *)spirv.code;
- bool okay=check(d,d->vk.CreateShaderModule(d->device,&mi,nullptr,&s->module),"ShaderModule");vkd3d_shader_free_shader_code(&spirv);
+ bool okay=check(d,d->vk.CreateShaderModule(d->device,&mi,nullptr,&s->module));vkd3d_shader_free_shader_code(&spirv);
+ if(okay && stage==1 && io && io->NumOutputSignatureEntries==2 &&
+    std::any_of(io->pOutputSignature,io->pOutputSignature+2,[](const auto &e){return e.Register==1 && (!e.SystemValue || e.SystemValue==64);})) {
+   target.dual_source_blending=true;spirv={};
+   result=vkd3d_shader_compile(&ci,&spirv,nullptr);
+
+   if(result>=0){mi.codeSize=spirv.size;mi.pCode=(const UINT *)spirv.code;okay=check(d,d->vk.CreateShaderModule(d->device,&mi,nullptr,&s->dual_module));}
+   vkd3d_shader_free_shader_code(&spirv);
+ }
+ vkd3d_shader_free_shader_code(&dxbc);
  uint64_t id=14695981039346656037ull;const auto *bytes=(const unsigned char *)code;
  for(size_t i=0;i<(size_t)code[1]*4;i++){id^=bytes[i];id*=1099511628211ull;}
  for(uint32_t value:input){id^=value;id*=1099511628211ull;}for(uint32_t value:output){id^=value;id*=1099511628211ull;}

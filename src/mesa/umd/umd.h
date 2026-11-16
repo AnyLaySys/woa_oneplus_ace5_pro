@@ -15,17 +15,12 @@
 #include <string>
 #include <unordered_map>
 #include <new>
-#include <cstdio>
 #include <cstring>
 #include <cstdint>
-#include <cstdarg>
 #include <type_traits>
 #include "a830_host.h"
 #include "abi.h"
 #include "vkd3d_shader.h"
-#include "profile.h"
-int direct_log(FILE *,const char *,...);
-#define fprintf direct_log
 
 #define VK_FUNCTIONS(X) \
  X(DestroyInstance) X(EnumeratePhysicalDevices) X(GetPhysicalDeviceProperties) \
@@ -95,6 +90,7 @@ struct View {
 };
 struct Shader {
  VkShaderModule module = VK_NULL_HANDLE;
+ VkShaderModule dual_module = VK_NULL_HANDLE;
  uint64_t id = 0;
  unsigned stage = 0;
  std::array<bool,16> cb{};
@@ -119,8 +115,8 @@ struct Device {
  D3D10DDI_CORELAYER_DEVICECALLBACKS errors{};
  DXGI_DDI_BASE_CALLBACKS *present = nullptr;
  CRITICAL_SECTION lock{};
- void *native_commands = nullptr;
- UINT native_bytes = 0;
+ void *command_buffer = nullptr;
+ UINT command_buffer_size = 0;
  volatile A830_COMPLETION *completion = nullptr;
  UINT generation = 0;
  HMODULE module = nullptr;
@@ -174,8 +170,7 @@ struct Device {
  UINT sample_mask = ~0u, stencil_ref = 0;
  bool recording = false;
  HRESULT failure = S_OK;
- uint64_t draws = 0, clears = 0, copies = 0;
- A830FrameProfile profile{};
+ uint64_t draws = 0;
  Storage dummy_buffer;
  Resource dummy_image;
  View dummy_view;
@@ -184,20 +179,18 @@ struct Device {
  Shader rotation_vertex,rotation_pixel;
  Resource rotation_constants;
  Sampler rotation_sampler;
- uint64_t rotation_calls = 0;
 };
 
-template<class T, class H> static T *object(H h) { return static_cast<T *>(h.pDrvPrivate); }
-static Device *dev(D3D10DDI_HDEVICE h) { return object<Device>(h); }
-static Device *dev(DXGI_DDI_HDEVICE h) { return reinterpret_cast<Device *>(h); }
-static Resource *res(D3D10DDI_HRESOURCE h) { return object<Resource>(h); }
-static Resource *res(DXGI_DDI_HRESOURCE h) { return reinterpret_cast<Resource *>(h); }
-void error(Device *, HRESULT, const char *);
-bool check(Device *, VkResult, const char *);
+template<class T, class H> static inline T *object(H h) { return static_cast<T *>(h.pDrvPrivate); }
+static inline Device *dev(D3D10DDI_HDEVICE h) { return object<Device>(h); }
+static inline Device *dev(DXGI_DDI_HDEVICE h) { return reinterpret_cast<Device *>(h); }
+static inline Resource *res(D3D10DDI_HRESOURCE h) { return object<Resource>(h); }
+static inline Resource *res(DXGI_DDI_HRESOURCE h) { return reinterpret_cast<Resource *>(h); }
+void error(Device *, HRESULT);
+bool check(Device *, VkResult);
 bool flush(Device *);
 bool begin(Device *);
 void end_pass(Device *);
-void profile_record(Device *);
 void barrier(Device *);
 VkFormat format(DXGI_FORMAT);
 unsigned pixel_bytes(DXGI_FORMAT);

@@ -62,7 +62,7 @@
     <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-07'">37</SiaRevision>
     <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-08'">10</SiaRevision>
     <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-09'">2</SiaRevision>
-    <SiaRevision Condition="'$(SiaRevision)' == ''">4</SiaRevision>
+    <SiaRevision Condition="'$(SiaRevision)' == ''">5</SiaRevision>
 
     <SiaDriverDate>$([System.DateTime]::Parse('$(SiaVersionDate)').ToString('MM/dd/yyyy'))</SiaDriverDate>
 
@@ -142,6 +142,9 @@
   <ItemGroup>
 
     <ClInclude Include="..\sia9177.h" />
+    <ClInclude Include="..\charge.h" />
+    <ClInclude Include="..\charge-policy.h" />
+    <ClInclude Include="..\charge-api.h" />
     <ClInclude Include="..\usb.h" />
     <ClInclude Include="..\usb.inc" />
 
@@ -155,8 +158,7 @@
     <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\fw\adsp\adsp*.mdt;$(MSBuildThisFileDirectory)..\..\..\fw\adsp\adsp*.b??">
       <PackageRelativeDirectory>ADSP</PackageRelativeDirectory>
     </FilesToPackage>
-    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\out\qcom-charge\ARM64\Release\bin\charge.exe" />
-    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\qcom-charge\credential.bin" />
+    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\fw\charge\credential.bin" />
 
   </ItemGroup>
 

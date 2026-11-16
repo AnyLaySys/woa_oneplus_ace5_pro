@@ -60,7 +60,7 @@ static VOID Queues(GPU *g) {
     }
 }
 static NTSTATUS Send(GPU *g,ULONG id,PULONG data,ULONG words) {
-    if(id!=33)g->Step=0x100|id;
+
     if(!words || words>255)return STATUS_INVALID_PARAMETER;
     volatile HFI_TABLE *t=(PVOID)g->Hfi.Cpu;volatile HFI_QUEUE *tx=t->Queue,*rx=t->Queue+1;
     volatile ULONG *out=(PULONG)(g->Hfi.Cpu+4096),*in=(PULONG)(g->Hfi.Cpu+8192);
@@ -78,7 +78,7 @@ static NTSTATUS Send(GPU *g,ULONG id,PULONG data,ULONG words) {
             ULONG header=in[r],n=(header>>8)&255,available=(w-r)&1023;
             if(n<3 || n>20 || ((n+3)&~3u)>available)return STATUS_DEVICE_PROTOCOL_ERROR;
             ULONG original=in[(r+1)&1023],error=in[(r+2)&1023];
-            if(id!=33){g->Snapshot[16]=header;g->Snapshot[17]=original;g->Snapshot[18]=error;g->Snapshot[19]=data[0];}
+
             KeMemoryBarrier();rx->Read=(r+n+3)&~3u;rx->Read&=1023;
             Gw(g,REG_A6XX_GMU_GMU2HOST_INTR_CLR,1);
             if((header&255)==100)return STATUS_DEVICE_HARDWARE_ERROR;
@@ -157,8 +157,8 @@ static NTSTATUS Configure(GPU *g) {
 NTSTATUS GpuSetFrequency(GPU *g,ULONG index) {
     if(KeGetCurrentIrql()!=PASSIVE_LEVEL || !index || index>=g->PerfCount)return STATUS_INVALID_PARAMETER;
     ULONG message[]={0,1,index,index};NTSTATUS status=Send(g,30,message,4);
-    g->PerfStatus=(ULONG)status;
-    if(NT_SUCCESS(status)){g->PerfIndex=index;g->PerfTransitions++;}
+
+    if(NT_SUCCESS(status)){g->PerfIndex=index;}
     return status;
 }
 VOID GpuGovern(GPU *g) {
@@ -167,7 +167,7 @@ VOID GpuGovern(GPU *g) {
     if(elapsed<500000)return;
     ULONG high,low;do{high=Gr(g,0x1fca1);low=Gr(g,0x1fca0);}while(high!=Gr(g,0x1fca1));
     ULONGLONG busy=((ULONGLONG)high<<32)|low,delta=busy-g->BusyLast;
-    g->PerfResidency[g->PerfIndex]+=elapsed;g->PerfLast=now;g->BusyLast=busy;
+    g->PerfLast=now;g->BusyLast=busy;
     g->BusyPercent=(ULONG)min(delta*100/(elapsed*192/100),100);
     ULONG maximum=g->PerfCount-1;
     if(g->MaxKhz)while(maximum>1 && g->PerfKhz[maximum]>g->MaxKhz)maximum--;
@@ -178,7 +178,7 @@ VOID GpuGovern(GPU *g) {
     if(target!=g->PerfIndex)GpuSetFrequency(g,target);
 }
 NTSTATUS GpuGmuStart(GPU *g) {
-    g->Step=1;
+
     if(GpuRead(g->Registers,0x50010)&(1u<<16)) {
         Gw(g,REG_A6XX_GMU_RSCC_CONTROL_REQ,2);
         NTSTATUS status=GpuPoll(g->Registers,REG_A6XX_GMU_RSCC_CONTROL_ACK*4,2,2,10000);
@@ -188,13 +188,13 @@ NTSTATUS GpuGmuStart(GPU *g) {
     }
     Gw(g,REG_A6XX_GMU_AHB_FENCE_STATUS_CLR,7);Gw(g,REG_A6XX_GMU_AO_AHB_FENCE_CTRL,0);
     NTSTATUS status=Allocate(g,&g->Cache,1,0xFFC000,0x4000);
-    g->Step=NT_SUCCESS(status)?2:1;
+
     if(NT_SUCCESS(status))status=Allocate(g,&g->Dummy,1,0x4000,0x60000000);
     if(NT_SUCCESS(status))status=Allocate(g,&g->Debug,1,0x7000,0x60400000);
     if(NT_SUCCESS(status))status=Allocate(g,&g->Log,1,0x4000,0x60004000);
     if(NT_SUCCESS(status))status=Allocate(g,&g->Hfi,1,0x4000,0x60008000);
     if(!NT_SUCCESS(status))return status;
-    g->Step=3;Queues(g);status=Load(g);if(!NT_SUCCESS(status))return status;
+    Queues(g);status=Load(g);if(!NT_SUCCESS(status))return status;
     ULONG bw[160];status=Bandwidth(g,bw);if(!NT_SUCCESS(status))return status;
     status=GpuRscWrite(g,bw[6],bw[18]);
     for(ULONG i=0;i<3 && NT_SUCCESS(status);i++)status=GpuRscWrite(g,bw[24+i],bw[40+i]);
@@ -211,7 +211,7 @@ NTSTATUS GpuGmuStart(GPU *g) {
     Gw(g,REG_A8XX_GBIF_CX_CONFIG,0x20023000);Gw(g,REG_A6XX_GMU_MRC_GBIF_QOS_CTRL,0x33);
     Gw(g,REG_A6XX_GMU_SYS_BUS_CONFIG,1);Gw(g,REG_A6XX_GMU_ICACHE_CONFIG,1);Gw(g,REG_A6XX_GMU_DCACHE_CONFIG,1);
     Gw(g,REG_A6XX_GMU_CM3_SYSRESET,0);
-    g->Step=4;
+    g->GmuResetReleased=TRUE;
     ULONGLONG end=KeQueryInterruptTime()+1000000;
     do {
         if(g->Fault)return (NTSTATUS)g->Fault;
@@ -220,32 +220,21 @@ NTSTATUS GpuGmuStart(GPU *g) {
     } while(KeQueryInterruptTime()<end);
     status=(Gr(g,REG_A6XX_GMU_CM3_FW_INIT_RESULT)&0x1FF)==0x100?STATUS_SUCCESS:STATUS_IO_TIMEOUT;
     if(!NT_SUCCESS(status))return status;
-    g->Stage=4;g->GmuVersion=Gr(g,REG_A6XX_GMU_CORE_FW_VERSION);
+    g->Stage=4;
     Gw(g,REG_A6XX_GMU_GMU2HOST_INTR_CLR,0xFFFFFFFF);Gw(g,REG_A6XX_GMU_GMU2HOST_INTR_MASK,0xFFFFFFFC);
     Gw(g,REG_A6XX_GMU_AO_HOST_INTERRUPT_CLR,0xFFFFFFFF);Gw(g,REG_A6XX_GMU_AO_HOST_INTERRUPT_MASK,0xFFFFFFFC);
     Gw(g,REG_A6XX_GMU_HFI_CTRL_INIT,1);
-    g->Step=5;status=GpuPoll(g->Registers,REG_A6XX_GMU_HFI_CTRL_STATUS*4,1,1,100000);
-    if(NT_SUCCESS(status)){g->Step=6;status=Configure(g);}
+    status=GpuPoll(g->Registers,REG_A6XX_GMU_HFI_CTRL_STATUS*4,1,1,100000);
+    if(NT_SUCCESS(status)){status=Configure(g);}
     if(NT_SUCCESS(status))g->Stage=5;
     return status;
 }
 VOID GpuGmuStop(GPU *g) {
-    if(g->Step>=4)g->Snapshot[15]=Gr(g,REG_A6XX_GMU_CM3_FW_INIT_RESULT);
     if(g->Stage>=4) {
-        HFI_TABLE *t=(PVOID)g->Hfi.Cpu;
-        g->Snapshot[0]=t->Queue[2].Read;g->Snapshot[1]=t->Queue[2].Write;
-        RtlCopyMemory(g->Snapshot+2,g->Hfi.Cpu+12288,8*sizeof(ULONG));
-        g->Snapshot[10]=Gr(g,REG_A6XX_GMU_HFI_CTRL_STATUS);
-        g->Snapshot[11]=t->Queue[0].Read;g->Snapshot[12]=t->Queue[0].Write;
-        g->Snapshot[13]=t->Queue[1].Read;g->Snapshot[14]=t->Queue[1].Write;
         ULONG slumber[]={0,0,0};Send(g,33,slumber,3);
         Gw(g,REG_A6XX_GMU_AHB_FENCE_STATUS_CLR,7);Gw(g,REG_A6XX_GMU_AO_AHB_FENCE_CTRL,0);
-    } else {
-        for(ULONG i=0;i<3;i++)g->Snapshot[i]=GpuRead(g->Registers,0xA0020+i*4);
-        static const ULONG offsets[]={0x90000,0x90004,0x90010,0x90014,0x90018,0x9931C,0x993F0,0x990D4,0x990E8,0x97000,0x99080,0x99094};
-        for(ULONG i=0;i<RTL_NUMBER_OF(offsets);i++)g->Snapshot[3+i]=GpuRead(g->Registers,offsets[i]);
     }
-    if(g->Step>=4)Gw(g,REG_A6XX_GMU_CM3_SYSRESET,1);
+    if(g->GmuResetReleased)Gw(g,REG_A6XX_GMU_CM3_SYSRESET,1);
     if(g->Stage>=4) {
         Gw(g,REG_A6XX_GMU_GMU2HOST_INTR_MASK,0xFFFFFFFF);
         Gw(g,REG_A6XX_GMU_AO_HOST_INTERRUPT_MASK,0xFFFFFFFF);
@@ -254,4 +243,5 @@ VOID GpuGmuStop(GPU *g) {
         GpuPoll(g->Registers,0x50010,1u<<16,1u<<16,10000);
         Gw(g,REG_A6XX_GMU_RSCC_CONTROL_REQ,0);
     }
+    g->GmuResetReleased=FALSE;
 }

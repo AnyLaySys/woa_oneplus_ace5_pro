@@ -13,16 +13,17 @@ if /i "%NAME%"=="syna-s3910" (set "NAME=syna-s3910"& set "TARGET=syna_s3910")
 if /i "%NAME%"=="qcom-audio" (set "NAME=qcom-audio"& set "TARGET=sia9177")
 if /i "%NAME%"=="qcom-bluetooth" (set "NAME=qcom-bluetooth"& set "TARGET=qcom_bluetooth")
 if /i "%NAME%"=="qcom-wcn7861" (set "NAME=qcom-wcn7861"& set "TARGET=wcn7861")
-if /i "%NAME%"=="qcom-charge" (set "NAME=qcom-charge"& set "TARGET=charge")
+if /i "%NAME%"=="qcom-charge" (set "NAME=qcom-audio"& set "TARGET=sia9177")
 if /i "%NAME%"=="qcom-battery" (set "NAME=qcom-battery"& set "TARGET=qcom_battery")
 if /i "%NAME%"=="qcom-cpupower" (set "NAME=qcom-cpupower"& set "TARGET=qcom_cpupower")
-if /i "%NAME%"=="qcom-gpu" (set "NAME=qcom-gpu"& set "TARGET=a830_native")
+if /i "%NAME%"=="qcom-keys" (set "NAME=qcom-keys"& set "TARGET=qcom_keys")
+if /i "%NAME%"=="qcom-gpu" (set "NAME=qcom-gpu"& set "TARGET=qcom_gpu")
 if not defined TARGET goto invalid
 set "CREDENTIAL="
-if /i "%NAME%"=="qcom-charge" (
-  set "CREDENTIAL=%ROOT%\src\qcom-charge\credential.bin"
-  for %%F in ("%ROOT%\src\qcom-charge\credential.bin") do if not "%%~zF"=="16" (
-    echo ERROR qcom-charge credential.bin is missing or not exactly 16 bytes.
+if /i "%NAME%"=="qcom-audio" (
+  set "CREDENTIAL=%ROOT%\fw\charge\credential.bin"
+  for %%F in ("%ROOT%\fw\charge\credential.bin") do if not "%%~zF"=="16" (
+    echo ERROR fw\charge\credential.bin is missing or not exactly 16 bytes.
     exit /b 1
   )
 )
@@ -51,14 +52,10 @@ set "INF2CAT=%KITBIN%\x86\Inf2Cat.exe"
 set "CERT=FF7908A360512CF12E08C0BD99625830C1EA4E6D"
 if defined WOA_SIGN_CERT set "CERT=%WOA_SIGN_CERT%"
 if not exist "%MSB%" exit /b 1
-if /i not "%NAME%"=="qcom-charge" if not exist "%DST%" mkdir "%DST%"
+if not exist "%DST%" mkdir "%DST%"
 if not exist "%WORK%\obj" mkdir "%WORK%\obj"
 call "%VS%\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul 2>&1
 if errorlevel 1 exit /b 1
-if /i "%NAME%"=="qcom-audio" (
-  call "%~f0" qcom-charge
-  if errorlevel 1 exit /b 1
-)
 set "GPU_RENDER_PACKAGE=%ROOT%\out\mesa\umd-package"
 if defined GPU_PACKAGE call :build_gpu_renderer
 if errorlevel 1 exit /b 1
@@ -77,14 +74,7 @@ if defined GPU_PACKAGE (
 )
 "%MSB%" "%PROJECT%" /t:Rebuild /p:Configuration=Release /p:Platform=ARM64 /p:WindowsTargetPlatformVersion=10.0.26100.0 /p:OutDir="%BIN%/" /p:IntDir="%WORK%\obj/" /p:SkipPackageVerification=true /p:SignMode=Off /v:minimal
 if errorlevel 1 exit /b 1
-if /i "%NAME%"=="qcom-charge" (
-  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%BIN%\charge.exe"
-  if errorlevel 1 exit /b 1
-  copy /y "%CREDENTIAL%" "%BIN%\credential.bin" >nul
-  if errorlevel 1 exit /b 1
-  echo SERVICE=%BIN%\charge.exe
-  exit /b 0
-)
+if defined GPU_PACKAGE for %%E in (sys inf cat) do if exist "%DST%\*.%%E" del /q "%DST%\*.%%E"
 copy /y "%BIN%\%TARGET%.sys" "%DST%\%TARGET%.sys" >nul
 if errorlevel 1 exit /b 1
 copy /y "%BIN%\%TARGET%.inf" "%DST%\%TARGET%.inf" >nul
@@ -104,9 +94,8 @@ if defined GPU_PACKAGE (
 "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%TARGET%.sys"
 if errorlevel 1 exit /b 1
 if /i "%NAME%"=="qcom-audio" (
-  copy /y "%ROOT%\out\qcom-charge\ARM64\Release\bin\charge.exe" "%DST%\charge.exe" >nul
-  if errorlevel 1 exit /b 1
-  copy /y "%ROOT%\out\qcom-charge\ARM64\Release\bin\credential.bin" "%DST%\credential.bin" >nul
+  if exist "%DST%\charge.exe" del /q "%DST%\charge.exe"
+  copy /y "%CREDENTIAL%" "%DST%\credential.bin" >nul
   if errorlevel 1 exit /b 1
   if not exist "%DST%\ADSP" mkdir "%DST%\ADSP"
   copy /y "%ROOT%\fw\adsp\adsp.*" "%DST%\ADSP\" >nul
@@ -124,7 +113,7 @@ dir "%DST%" /b
 exit /b 0
 
 :build_all
-for %%D in (syna-s3910 qcom-audio qcom-bluetooth qcom-wcn7861 qcom-battery qcom-cpupower qcom-gpu) do (
+for %%D in (syna-s3910 qcom-audio qcom-bluetooth qcom-wcn7861 qcom-battery qcom-cpupower qcom-keys qcom-gpu) do (
   echo.
   echo Building %%D...
   call "%~f0" %%D
@@ -207,9 +196,11 @@ echo        build.cmd qcom-wcn7861
 echo        build.cmd qcom-charge
 echo        build.cmd qcom-battery
 echo        build.cmd qcom-cpupower
+echo        build.cmd qcom-keys
 echo        build.cmd qcom-gpu
 echo        build.cmd install-fw -WindowsDirectory "W:\Windows" [-BluetoothAddress "XX:XX:XX:XX:XX:XX"] [-WhatIf] [-Force]
-echo all builds every driver; qcom-audio also builds the charging service.
+echo all builds every driver.
+echo qcom-charge builds qcom-audio with autonomous kernel charging.
 echo qcom-gpu builds the Qualcomm Adreno 830 desktop driver, renderer and signed package.
 echo GPU builds use WSL Ubuntu-26.10 by default. Set WOA_WSL_DISTRO to override it.
 echo Firmware copy requires an explicit WindowsDirectory. Existing files require -Force.
@@ -405,7 +396,7 @@ for name in ['hlsl', 'preproc']:
 includes = [umd_build, shader_source / 'include', shader_source / 'include/private', shader,
             source / 'include', source / 'src', source / 'src/compiler/spirv', vulkan,
             local, root / 'src/qcom-gpu/wddm', umd]
-args = ['/nologo', '/O2', '/MD', '/D_CRT_SECURE_NO_WARNINGS', '/D_USE_MATH_DEFINES',
+args = ['/nologo', '/O2', '/MD', '/DNDEBUG', '/D_CRT_SECURE_NO_WARNINGS', '/D_USE_MATH_DEFINES',
         '/DLIBVKD3D_SHADER_SOURCE', '/DVKD3D_NO_TRACE_MESSAGES', '/DVKD3D_NO_DEBUG_MESSAGES', '/w']
 args += ['/I' + str(path) for path in includes]
 files = list(shader.glob('*.c'))
@@ -418,7 +409,8 @@ def compile_file(path):
     cpp = path.suffix == '.cpp'
     if cpp or not obj.exists() or obj.stat().st_mtime < path.stat().st_mtime:
         flags = ['/clang:-ferror-limit=8', '/std:c++17', '/EHsc'] if cpp else ['/std:c11']
-        result = subprocess.run(compiler + args + flags + ['/c', str(path), '/Fo' + str(obj)], capture_output=True, text=True)
+        options = [arg for arg in args if arg != '/w'] + ['/W4', '/WX', '/clang:-Wno-unused-parameter', '/clang:-Wno-missing-field-initializers'] if cpp else args
+        result = subprocess.run(compiler + options + flags + ['/c', str(path), '/Fo' + str(obj)], capture_output=True, text=True)
         if result.returncode:
             print(result.stdout + result.stderr, flush=True)
             raise RuntimeError(str(path))

@@ -1,8 +1,17 @@
 #pragma once
 #include "charge-api.h"
 #define QCH_UFCS_CAP_COUNT 7u
+enum {ChargeNone,ChargeStop,ChargeAcquire,ChargeRelease,ChargeStart,ChargeNormal,ChargeKey};
+
+typedef struct {
+    ULONG Attempts,Hold,Active,Normal;
+    ULONGLONG StableAt,OfflineAt,RetryAt,AcquireAt,PollAt;
+} QCH_POLICY;
 typedef struct {ULONGLONG Pdo[QCH_UFCS_CAP_COUNT];ULONG Count;} QCH_UFCS_CAPS;
 typedef struct _QCH_LINK {
+    QCH_POLICY Policy;
+    ULONG Command;
+    BOOLEAN Closing;
     BOOLEAN Waiting;
     ULONG Query,ExpectedOp,ExpectedProp,ExpectedValue;
     ULONG UsbOnline,UsbVoltage;
@@ -44,13 +53,11 @@ extern "C" {
 BOOLEAN QchTakeAuth(UCHAR *Key);
 BOOLEAN QchAuthAvailable(VOID);
 VOID QchDiscardAuth(VOID);
-ULONG QchTakeCommand(VOID);
 BOOLEAN QchInputSaved(VOID);
 NTSTATUS QchInputSave(BOOLEAN Suspended);
-VOID QchDeferCommand(ULONG Action);
+BOOLEAN QchLoadAuth(VOID);
 VOID QchPublish(const QCH_LINK *C);
 BOOLEAN QchBatteryGuard(QCH_LINK *C);
-ULONG QchTakeBridgeCommand(VOID);
 VOID QchRemove(VOID);
 NTSTATUS QchInit(PDRIVER_OBJECT Driver,PUNICODE_STRING RegistryPath);
 #ifdef __cplusplus

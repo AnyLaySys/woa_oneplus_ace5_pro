@@ -1,6 +1,4 @@
 #pragma once
-/* Native PM4 CP_MEMCPY row builder, shared with the host-side interpreter test.
- * Call only after the rendering fence has cleaned prior render caches. */
 static unsigned A830CopyPacket(unsigned op,unsigned count) {
     unsigned a=op,b=count;a^=a>>4;a^=a>>2;a^=a>>1;
     b^=b>>8;b^=b>>4;b^=b>>2;b^=b>>1;

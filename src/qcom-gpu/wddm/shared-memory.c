@@ -22,8 +22,7 @@ static NTSTATUS UnmapPages(A830_ADAPTER *a,SIZE_T page,SIZE_T count) {
         SIZE_T chunk=min(count,(SIZE_T)(GPU_BUFFER_LIMIT/PAGE_SIZE));
         GPU_BO b={0};b.Size=(ULONG)(chunk*PAGE_SIZE);b.Address=A830_SHARED_ADDRESS+(ULONGLONG)page*PAGE_SIZE;
         NTSTATUS status=STATUS_SUCCESS;
-        if(a->RenderOnly)status=a->Kernel.Unmap(&b);
-        else if(a->BridgeAttached)status=A830BridgeUnmap(&b);
+        if(a->BridgeAttached)status=A830BridgeUnmap(&b);
         else GpuUnmap(&a->Hardware,0,&b);
         if(!NT_SUCCESS(status))return status;
         page+=chunk;count-=chunk;
@@ -52,7 +51,7 @@ static NTSTATUS MapPages(A830_ADAPTER *a,SIZE_T page,SIZE_T count,const PFN_NUMB
 NTSTATUS A830SharedStart(A830_ADAPTER *a) {
     A830_SHARED_MEMORY *s=&a->Memory.Shared;
     if(s->Blocks)return STATUS_DEVICE_BUSY;
-    if(a->DisplayOnly)return STATUS_SUCCESS;
+
     PPHYSICAL_MEMORY_RANGE ranges=MmGetPhysicalMemoryRangesEx2(NULL,0);
     if(!ranges)return STATUS_INSUFFICIENT_RESOURCES;
     ULONGLONG total=0;NTSTATUS status=STATUS_SUCCESS;

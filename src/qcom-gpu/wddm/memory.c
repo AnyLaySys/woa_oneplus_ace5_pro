@@ -19,14 +19,11 @@ NTSTATUS A830MemoryStart(A830_ADAPTER *a) {
 }
 VOID A830MemoryStop(A830_ADAPTER *a) {
     A830ScanoutStop(a);
-    if(a->RenderOnly && a->HardwareFile) {
-        if(a->Memory.Commands.Address)a->Kernel.Unmap(&a->Memory.Commands);
-        if(a->Memory.Segment.Address)a->Kernel.Unmap(&a->Memory.Segment);
-    }
+
     A830SharedStop(a);GpuFree(&a->Memory.Commands);GpuFree(&a->Memory.Segment);
 }
 NTSTATUS APIENTRY A830CreateAllocation(HANDLE adapter,DXGKARG_CREATEALLOCATION *p) {
-    A830Count(&((A830_ADAPTER *)adapter)->Telemetry.CreateCalls,1);
+
     PULONG resource=NULL;
     if(p->Flags.Resource && !p->hResource) {
         resource=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*resource),GPU_TAG);
@@ -54,7 +51,6 @@ NTSTATUS APIENTRY A830CreateAllocation(HANDLE adapter,DXGKARG_CREATEALLOCATION *
         info->Alignment=4096;info->PreferredSegment.Value=0;info->PreferredSegment.SegmentId0=1;
         info->SupportedReadSegmentSet=1;info->SupportedWriteSegmentSet=1;info->EvictionSegmentSet=0;
         if(r.Flags&1) {
-            if(((A830_ADAPTER *)adapter)->DisplayOnly){status=STATUS_NOT_SUPPORTED;ExFreePoolWithTag(allocation,GPU_TAG);info->hAllocation=NULL;break;}
             info->PreferredSegment.SegmentId0=2;info->SupportedReadSegmentSet=info->SupportedWriteSegmentSet=2;
         }
         info->FlagsWddm2.Value&=~0x0007C3FFu;
@@ -102,16 +98,15 @@ static PVOID Segment(A830_ADAPTER *a,ULONGLONG offset,SIZE_T bytes) {
 }
 NTSTATUS APIENTRY A830Paging(HANDLE adapter,DXGKARG_BUILDPAGINGBUFFER *p) {
     A830_ADAPTER *a=adapter;
-    A830Count(&a->Telemetry.PagingCalls,1); InterlockedExchange64((volatile LONG64 *)&a->Telemetry.LastPagingOperation,p->Operation);
     if(p->DmaSize<sizeof(ULONG))return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
     if(p->DmaBufferPrivateDataSize<sizeof(A830_DMA))return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
     A830_DMA *dma=p->pDmaBufferPrivateData;RtlZeroMemory(dma,sizeof(*dma));
-    if(p->Operation==DXGK_OPERATION_MAP_APERTURE_SEGMENT && !a->DisplayOnly) {
+    if(p->Operation==DXGK_OPERATION_MAP_APERTURE_SEGMENT) {
         if(p->MapApertureSegment.SegmentId!=2)return STATUS_INVALID_PARAMETER;
         NTSTATUS status=A830SharedMap(a,p->MapApertureSegment.OffsetInPages,p->MapApertureSegment.NumberOfPages,
             p->MapApertureSegment.pMdl,p->MapApertureSegment.MdlOffset);
         if(!NT_SUCCESS(status))return status;
-    } else if(p->Operation==DXGK_OPERATION_UNMAP_APERTURE_SEGMENT && !a->DisplayOnly) {
+    } else if(p->Operation==DXGK_OPERATION_UNMAP_APERTURE_SEGMENT) {
         if(p->UnmapApertureSegment.SegmentId!=2)return STATUS_INVALID_PARAMETER;
         NTSTATUS status=A830SharedUnmap(a,p->UnmapApertureSegment.OffsetInPages,p->UnmapApertureSegment.NumberOfPages);
         if(!NT_SUCCESS(status))return status;

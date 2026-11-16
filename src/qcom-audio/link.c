@@ -651,7 +651,7 @@ SiaLinkStop (
     )
 {
     PSIA_LINK Link = Dev->Link;
-    if(Link)QchScRelease(Link);
+    if(Link){Link->Charge.Closing=TRUE;Link->Charge.Command=ChargeNone;QchScRelease(Link);}
 
     if (Link == NULL) {
         return;

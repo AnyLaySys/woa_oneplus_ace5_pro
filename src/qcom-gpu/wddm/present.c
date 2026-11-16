@@ -24,9 +24,7 @@ static NTSTATUS Surface(A830_ADAPTER *a,const DXGK_ALLOCATIONLIST *info,const RE
 
 NTSTATUS APIENTRY A830Present(HANDLE context,DXGKARG_PRESENT *p) {
     A830_CONTEXT *c=context;A830_ADAPTER *a=c->Adapter;
-    if(a->RenderOnly || a->DisplayOnly)return STATUS_NOT_SUPPORTED;
-    A830Count(p->Flags.Flip?&a->Telemetry.PresentFlip:p->Flags.Blt?&a->Telemetry.PresentBlt:&a->Telemetry.PresentOther,1);
-    if(p->Flags.Rotate)A830Count(&a->Telemetry.PresentRotate,1);
+
     if(p->Flags.Flip) {
         p->pDmaBuffer=NULL;return STATUS_SUCCESS;
     }
@@ -45,7 +43,6 @@ NTSTATUS APIENTRY A830Present(HANDLE context,DXGKARG_PRESENT *p) {
             rect.bottom>p->DstRect.bottom || rect.right<=rect.left || rect.bottom<=rect.top)return STATUS_INVALID_PARAMETER;
         rect.left-=p->DstRect.left;rect.right-=p->DstRect.left;
         rect.top-=p->DstRect.top;rect.bottom-=p->DstRect.top;dma->Payload.Rects[i]=rect;
-        dma->PresentBytes+=(ULONGLONG)(rect.right-rect.left)*(ULONG)(rect.bottom-rect.top)*4;
     }
     NTSTATUS status=Surface(a,p->pAllocationList+DXGK_PRESENT_SOURCE_INDEX,&p->SrcRect,&dma->Source,&dma->SourcePitch,&dma->SourceAllocation,&dma->SourceShared,&dma->SourceBytes,&dma->SourceSharedMap);
     if(!NT_SUCCESS(status))return status;

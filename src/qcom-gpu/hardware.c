@@ -45,7 +45,7 @@ BOOLEAN GpuInterrupt(GPU *g,ULONG index) {
     if(index==0) {
         if(g->Stage<6)return FALSE;
         value=Gr(g,REG_A8XX_RBBM_INT_0_STATUS);
-        if(value){Gw(g,REG_A8XX_RBBM_INT_CLEAR_CMD,value);g->Snapshot[0]++;g->Snapshot[5]|=value;}
+        if(value){Gw(g,REG_A8XX_RBBM_INT_CLEAR_CMD,value);}
     } else if(index==1) {
         if(g->Stage<4)return FALSE;
         value=Gr(g,REG_A6XX_GMU_GMU2HOST_INTR_INFO)&3;
@@ -62,10 +62,10 @@ BOOLEAN GpuInterrupt(GPU *g,ULONG index) {
         value=GpuRead(m,offset);
         if(index>3 && !(value&0xC00001FEu))return FALSE;
         if(value){
-            g->Snapshot[16]=index;g->Snapshot[17]=value;
+
             if(index>3) {
                 GpuWrite(m,offset-0x58,GpuRead(m,offset-0x58)&~0x40u);
-                g->Snapshot[18]=GpuRead(m,offset+8);g->Snapshot[19]=GpuRead(m,offset+12);
+
             } else GpuWrite(m,0,GpuRead(m,0)&~0x24u);
             GpuWrite(m,offset,value);g->Fault=(ULONG)STATUS_DEVICE_HARDWARE_ERROR;
             if(index>3 && (value&0x40000000))GpuWrite(m,offset-0x50,1);
@@ -75,7 +75,7 @@ BOOLEAN GpuInterrupt(GPU *g,ULONG index) {
     return TRUE;
 }
 VOID GpuDpc(GPU *g) {
-    InterlockedIncrement((volatile LONG *)&g->Snapshot[1]);
+
     KeSetEvent(&g->Event,IO_NO_INCREMENT,FALSE);
 }
 NTSTATUS GpuTimestamp(GPU *g,PULONGLONG counter) {

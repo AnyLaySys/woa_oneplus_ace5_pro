@@ -52,19 +52,25 @@ static NTSTATUS MapLocked(GPU *g,ULONG vm,GPU_BO *bo,ULONGLONG address) {
     if(bo==&g->Sqe || bo==&g->Aqe)attributes|=0x80;
     else if(address<(vm?0x60000000:0x44000000))attributes&=~0x40u;
     bo->Address=address;
-    for(ULONG i=0;i<bo->Size/4096;i++) {
-        PULONGLONG p=Entry(g->Vm+vm,address+((ULONGLONG)i<<12),TRUE);
+    for(ULONG i=0;i<bo->Size/4096;) {
+        ULONGLONG current=address+((ULONGLONG)i<<12);
+        ULONG count=min(bo->Size/4096-i,512u-(ULONG)((current>>12)&511));
+        PULONGLONG p=Entry(g->Vm+vm,current,TRUE);
         if(!p){GpuUnmap(g,vm,bo);return STATUS_INSUFFICIENT_RESOURCES;}
-        *p=((ULONGLONG)pfn[i]<<12)|attributes;
+        for(ULONG j=0;j<count;j++)p[j]=((ULONGLONG)pfn[i+j]<<12)|attributes;
+        i+=count;
     }
     return Flush(g,vm);
 }
 static VOID UnmapLocked(GPU *g,ULONG vm,GPU_BO *bo) {
     if(!bo->Address)return;
     if(vm>1 || !g->Vm[vm].Tables.Mdl || !g->Vm[vm].Tables.Cpu || !g->Registers){bo->Address=0;return;}
-    for(ULONG i=0;i<bo->Size/4096;i++) {
-        PULONGLONG p=Entry(g->Vm+vm,bo->Address+((ULONGLONG)i<<12),FALSE);
-        if(p)*p=0;
+    for(ULONG i=0;i<bo->Size/4096;) {
+        ULONGLONG current=bo->Address+((ULONGLONG)i<<12);
+        ULONG count=min(bo->Size/4096-i,512u-(ULONG)((current>>12)&511));
+        PULONGLONG p=Entry(g->Vm+vm,current,FALSE);
+        if(p)for(ULONG j=0;j<count;j++)p[j]=0;
+        i+=count;
     }
     NTSTATUS status=Flush(g,vm);bo->Address=0;
     if(!NT_SUCCESS(status)){g->Fault=(ULONG)status;GpuStop(g);}

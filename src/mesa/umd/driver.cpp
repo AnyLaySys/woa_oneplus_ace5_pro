@@ -2,7 +2,14 @@
 #include "rotation.h"
 
 void APIENTRY DestroyDevice(D3D10DDI_HDEVICE h){Device *d=dev(h);destroy(d);d->~Device();}
-void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE,D3D10DDI_DEVICEFUNCS *){}
+static void device_functions(D3D10DDI_DEVICEFUNCS *f) {
+#define DDI(slot,name) f->slot=name;
+#define DXGI(slot,name)
+#include "callbacks.inc"
+#undef DXGI
+#undef DDI
+}
+void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE,D3D10DDI_DEVICEFUNCS *f){device_functions(f);}
 void APIENTRY Flush(D3D10DDI_HDEVICE h){flush(dev(h));}
 void APIENTRY CheckFormatSupport(D3D10DDI_HDEVICE h,DXGI_FORMAT f,UINT *caps) {
  *caps=0;VkFormat vk=format(f);if(vk==VK_FORMAT_UNDEFINED){*caps=D3D10_DDI_FORMAT_SUPPORT_NOT_SUPPORTED;return;}
@@ -12,7 +19,7 @@ void APIENTRY CheckFormatSupport(D3D10DDI_HDEVICE h,DXGI_FORMAT f,UINT *caps) {
  if(properties.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)*caps|=D3D10_DDI_FORMAT_SUPPORT_SHADER_SAMPLE;
 }
 void APIENTRY CheckMultisampleQualityLevels(D3D10DDI_HDEVICE,DXGI_FORMAT,UINT count,UINT *levels){*levels=count==1?1:0;}
-void APIENTRY SetTextFilterSize(D3D10DDI_HDEVICE h,UINT w,UINT height){if(w||height)error(dev(h),DXGI_ERROR_UNSUPPORTED,"text filter");}
+void APIENTRY SetTextFilterSize(D3D10DDI_HDEVICE h,UINT w,UINT height){if(w||height)error(dev(h),DXGI_ERROR_UNSUPPORTED);}
 SIZE_T APIENTRY CalcPrivateDeviceSize(D3D10DDI_HADAPTER,const D3D10DDIARG_CALCPRIVATEDEVICESIZE *){return sizeof(Device);}
 HRESULT APIENTRY CreateDevice(D3D10DDI_HADAPTER ha,D3D10DDIARG_CREATEDEVICE *p) {
  if(p->Interface!=D3D10_0_DDI_INTERFACE_VERSION && p->Interface!=D3D10_0_x_DDI_INTERFACE_VERSION && p->Interface!=D3D10_0_7_DDI_INTERFACE_VERSION)return E_NOINTERFACE;
@@ -31,9 +38,7 @@ HRESULT APIENTRY CreateDevice(D3D10DDI_HADAPTER ha,D3D10DDIARG_CREATEDEVICE *p) 
 }
 static HRESULT APIENTRY CloseAdapter(D3D10DDI_HADAPTER h){delete object<Adapter>(h);return S_OK;}
 static HRESULT open_adapter(D3D10DDIARG_OPENADAPTER *p) {
- WCHAR executable[MAX_PATH];GetModuleFileNameW(nullptr,executable,MAX_PATH);WCHAR *name=wcsrchr(executable,L'\\');
- if(name && !_wcsicmp(name+1,L"dwm.exe") && GetFileAttributesW(L"C:\\ProgramData\\A830Direct-isolate")!=INVALID_FILE_ATTRIBUTES)return DXGI_ERROR_UNSUPPORTED;
- fprintf(stderr,"A830 DIRECT OpenAdapter pid=%lu\n",GetCurrentProcessId());
+
  A830_ADAPTER_INFO info{};D3DDDICB_QUERYADAPTERINFO query{&info,sizeof(info)};
  if(!p->pAdapterCallbacks || !p->pAdapterCallbacks->pfnQueryAdapterInfoCb)return E_INVALIDARG;
  HRESULT hr=p->pAdapterCallbacks->pfnQueryAdapterInfoCb(p->hRTAdapter.handle,&query);
@@ -54,7 +59,7 @@ HRESULT APIENTRY _Present(DXGI_DDI_ARG_PRESENT *p) {
  if(!flush(d))return FAILED(d->failure)?d->failure:E_FAIL;
  DXGIDDICB_PRESENT present{};present.hSrcAllocation=r->allocation;if(p->hDstResource)present.hDstAllocation=res(p->hDstResource)->allocation;present.hContext=d->context;present.pDXGIContext=p->pDXGIContext;
  EnterCriticalSection(&d->lock);HRESULT hr=d->present->pfnPresentCb(d->runtime,&present);LeaveCriticalSection(&d->lock);
- if(FAILED(hr))error(d,hr,"Present");return hr;
+ if(FAILED(hr))error(d,hr);return hr;
 }
 HRESULT APIENTRY _ResolveSharedResource(DXGI_DDI_ARG_RESOLVESHAREDRESOURCE *p){Device *d=dev(p->hDevice);return flush(d)?S_OK:d->failure;}
 HRESULT APIENTRY _SetDisplayMode(DXGI_DDI_ARG_SETDISPLAYMODE *p){Device *d=dev(p->hDevice);Resource *r=res(p->hResource);if(!r || !r->allocation)return E_INVALIDARG;D3DDDICB_SETDISPLAYMODE mode{};mode.hPrimaryAllocation=r->allocation;return d->callbacks.pfnSetDisplayModeCb(d->runtime,&mode);}
@@ -81,7 +86,7 @@ static HRESULT rotated_blt(Device *d,DXGI_DDI_ARG_BLT *p) {
    if(!buffer_create(d,d->rotation_constants.storage,32,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))return d->failure;
    VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};sampler.magFilter=sampler.minFilter=VK_FILTER_NEAREST;
    sampler.addressModeU=sampler.addressModeV=sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-   if(!check(d,d->vk.CreateSampler(d->device,&sampler,nullptr,&d->rotation_sampler.handle),"RotationSampler"))return d->failure;
+   if(!check(d,d->vk.CreateSampler(d->device,&sampler,nullptr,&d->rotation_sampler.handle)))return d->failure;
  }
  static const float matrices[4][8]={{1,0,0,0,0,1,0,0},{0,1,0,0,-1,0,1,0},{-1,0,1,0,0,-1,1,0},{0,-1,1,0,1,0,0,0}};
  if(!buffer_rename(d,&d->rotation_constants))return d->failure;
@@ -99,16 +104,16 @@ static HRESULT rotated_blt(Device *d,DXGI_DDI_ARG_BLT *p) {
  bool okay=draw(d,3,0,0,1,0,false);end_pass(d);view_destroy(d,&source);view_destroy(d,&target);
  d->shaders=shaders;d->cb=cb;d->samplers=samplers;d->textures=textures;d->vertices=vertices;d->targets=targets;
  d->layout=layout;d->blend=blend;d->depth=depth;d->raster=old_raster;d->depth_view=depth_view;d->target_count=target_count;d->sample_mask=sample_mask;d->topology=topology;d->viewport=viewport;
- if(++d->rotation_calls<=4)fprintf(stderr,"A830 rotation=%u source=%ux%u destination=%ux%u success=%u\n",p->Rotate,src->width,src->height,dst->width,dst->height,okay?1u:0u);
+
  return okay?S_OK:FAILED(d->failure)?d->failure:E_FAIL;
 }
 HRESULT APIENTRY _Blt(DXGI_DDI_ARG_BLT *p) {
  Device *d=dev(p->hDevice);Resource *src=res(p->hSrcResource),*dst=res(p->hDstResource);
- ProfileTimer timing(d->profile.blt_ticks);
+
  if(!src || !dst)return E_INVALIDARG;
  if(p->Rotate>=DXGI_DDI_MODE_ROTATION_ROTATE90 && p->Rotate<=DXGI_DDI_MODE_ROTATION_ROTATE270)return rotated_blt(d,p);
  if(p->Rotate!=DXGI_DDI_MODE_ROTATION_IDENTITY && p->Rotate!=DXGI_DDI_MODE_ROTATION_UNSPECIFIED)return DXGI_ERROR_UNSUPPORTED;
  UINT sl=p->SrcSubresource%src->levels,dl=p->DstSubresource%dst->levels;barrier(d);
  VkImageBlit b{};b.srcSubresource={aspects(src->format),sl,p->SrcSubresource/src->levels,1};b.dstSubresource={aspects(dst->format),dl,p->DstSubresource/dst->levels,1};b.srcOffsets[1]={(INT)std::max(1u,src->width>>sl),(INT)std::max(1u,src->height>>sl),1};b.dstOffsets[0]={(INT)p->DstLeft,(INT)p->DstTop,0};b.dstOffsets[1]={(INT)p->DstRight,(INT)p->DstBottom,1};
- d->vk.CmdBlitImage(d->cmd,src->storage.image,VK_IMAGE_LAYOUT_GENERAL,dst->storage.image,VK_IMAGE_LAYOUT_GENERAL,1,&b,VK_FILTER_NEAREST);d->copies++;return S_OK;
+ d->vk.CmdBlitImage(d->cmd,src->storage.image,VK_IMAGE_LAYOUT_GENERAL,dst->storage.image,VK_IMAGE_LAYOUT_GENERAL,1,&b,VK_FILTER_NEAREST);return S_OK;
 }

@@ -58,14 +58,6 @@ NTSTATUS GpuSubmit(GPU *g,GPU_BO *bo,ULONG offset,ULONG words) {
 NTSTATUS GpuSubmitBatch(GPU *g,const GPU_COMMAND *entries,ULONG count) {
     return GpuSubmitContextBatch(g,entries,count,0);
 }
-NTSTATUS GpuContextProtocol(GPU *g,const GPU_CONTEXT_PROTOCOL *request,GPU_CONTEXT_PROTOCOL *out) {
-    if(request && (request->Version!=1 || request->Size!=sizeof(*request) || request->Enabled>1 ||
-        request->CookieValid || request->Switches || request->LastCookie))return STATUS_INVALID_PARAMETER;
-    KIRQL old;KeAcquireSpinLock(&g->RingLock,&old);
-    if(request){g->ContextProtocolEnabled=(BOOLEAN)request->Enabled;g->LastContextValid=FALSE;g->LastContextCookie=0;}
-    *out=(GPU_CONTEXT_PROTOCOL){1,sizeof(*out),g->ContextProtocolEnabled,g->LastContextValid,g->ContextSwitchCount,g->LastContextCookie};
-    KeReleaseSpinLock(&g->RingLock,old);return STATUS_SUCCESS;
-}
 NTSTATUS GpuSubmitContextBatch(GPU *g,const GPU_COMMAND *entries,ULONG count,ULONGLONG cookie) {
     if(g->Fault)return (NTSTATUS)g->Fault;
     if(!g->Online || !count || count>GPU_MAX_COMMANDS)return STATUS_INVALID_PARAMETER;
@@ -79,14 +71,14 @@ NTSTATUS GpuSubmitContextBatch(GPU *g,const GPU_COMMAND *entries,ULONG count,ULO
     if(!g->Online || !g->Ring.Mdl || !g->Ring.Cpu || !g->Memory.Mdl || !g->Memory.Cpu){KeReleaseSpinLock(&g->RingLock,old);return STATUS_DEVICE_NOT_READY;}
     ULONG read=Gr(g,REG_A6XX_CP_RB_RPTR)&8191;
     ULONG space=(read-g->WriteIndex-1)&8191;
-    BOOLEAN switched=g->ContextProtocolEnabled && (!g->LastContextValid || cookie!=g->LastContextCookie);
+    BOOLEAN switched=(!g->LastContextValid || cookie!=g->LastContextCookie);
     GPU_U32 contextWords[GPU_CONTEXT_PREAMBLE_MAX_WORDS];
     ULONG n=switched?GpuBuildContextPreamble(contextWords,RTL_NUMBER_OF(contextWords),g->Memory.Address,(ULONG)g->Submitted):0;
     if(switched && !n){KeReleaseSpinLock(&g->RingLock,old);return STATUS_INVALID_PARAMETER;}
     if(space<4*count+48+n || g->Submitted>=MAXULONG-1){KeReleaseSpinLock(&g->RingLock,old);return STATUS_DEVICE_BUSY;}
     Emit(g,Packet(CP_THREAD_CONTROL,1));Emit(g,0x80000001);
     for(ULONG i=0;i<n;i++)Emit(g,contextWords[i]);
-    if(switched){g->LastContextCookie=cookie;g->LastContextValid=TRUE;g->ContextSwitchCount++;}
+    if(switched){g->LastContextCookie=cookie;g->LastContextValid=TRUE;}
     Emit(g,Packet(CP_THREAD_CONTROL,1));Emit(g,3);
     Emit(g,Packet(CP_SET_MARKER,1));Emit(g,0x101);
     for(ULONG i=0;i<count;i++) {
@@ -114,7 +106,7 @@ static VOID Pipe(GPU *g,ULONG pipe) {
     Gr(g,REG_A8XX_CP_APERTURE_CNTL_HOST);
 }
 static NTSTATUS Buffers(GPU *g) {
-    g->Step=0x200;
+
     NTSTATUS status=Microcode(g,&g->Sqe,L"\\SystemRoot\\System32\\drivers\\qcom-gpu\\gen80000_sqe.fw",0x40010000);
     if(NT_SUCCESS(status))status=Microcode(g,&g->Aqe,L"\\SystemRoot\\System32\\drivers\\qcom-gpu\\gen80000_aqe.fw",0x40030000);
     if(NT_SUCCESS(status))status=GpuAllocate(&g->Memory,4096);
@@ -124,12 +116,12 @@ static NTSTATUS Buffers(GPU *g) {
     return status;
 }
 static NTSTATUS Core(GPU *g) {
-    g->Step=0x201;
+
     Gw(g,REG_A6XX_GMU_HOST2GMU_INTR_SET,1u<<30);
     NTSTATUS status=GpuPoll(g->Registers,REG_A6XX_GMU_GMU2HOST_INTR_INFO*4,0x80000000,0x80000000,100000);
     Gw(g,REG_A6XX_GMU_GMU2HOST_INTR_CLR,0x80000000);
     if(!NT_SUCCESS(status))return status;
-    g->Stage=6;g->Step=0x202;
+    g->Stage=6;
     Pipe(g,0);Gw(g,REG_A6XX_GBIF_HALT,0);Gw(g,REG_A8XX_RBBM_GBIF_HALT,0);
     Gw(g,REG_A6XX_RBBM_SECVID_TSB_CNTL,0);Gw64(g,REG_A6XX_RBBM_SECVID_TSB_TRUSTED_BASE,0);Gw(g,REG_A6XX_RBBM_SECVID_TSB_TRUSTED_SIZE,0);
     Gw(g,REG_A8XX_RBBM_PERFCTR_GPU_BUSY_MASKED,MAXULONG);
@@ -160,10 +152,10 @@ static NTSTATUS Core(GPU *g) {
     Emit(g,Packet(CP_THREAD_CONTROL,1));Emit(g,1u<<27);
     Emit(g,Packet(CP_ME_INIT,7));Emit(g,0x14B);Emit(g,3);Emit(g,0x20000000);Emit(g,2);
     Emit(g,(ULONG)g->Memory.Address+256);Emit(g,(ULONG)(g->Memory.Address>>32));Emit(g,0x80000000);
-    g->Step=0x203;
+
     status=Idle(g);if(!NT_SUCCESS(status))return status;
     Emit(g,Packet(CP_SET_SECURE_MODE,1));Emit(g,0);
-    g->Step=0x204;
+
     status=Idle(g);if(!NT_SUCCESS(status))return status;
     Pipe(g,1);Gw(g,REG_A8XX_RB_GC_GMEM_PROTECT,0x0C000000);Pipe(g,0);
     Gw(g,REG_A8XX_RBBM_CGC_0_PC,0x702);
@@ -181,7 +173,7 @@ static NTSTATUS Core(GPU *g) {
 }
 static NTSTATUS StartLocked(GPU *g) {
     KIRQL contextIrql;KeAcquireSpinLock(&g->RingLock,&contextIrql);g->LastContextValid=FALSE;g->LastContextCookie=0;KeReleaseSpinLock(&g->RingLock,contextIrql);
-    g->Fault=0;g->Submitted=0;g->Sequence=0;g->Step=0;RtlZeroMemory(g->Snapshot,sizeof(g->Snapshot));
+    g->Fault=0;g->Submitted=0;g->Sequence=0;g->GmuResetReleased=FALSE;
     g->Stage=1;
     NTSTATUS status=GpuPower(g,TRUE);
     if(NT_SUCCESS(status)){g->Powered=TRUE;g->Stage=2;status=GpuMmuStart(g);}

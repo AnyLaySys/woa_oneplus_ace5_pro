@@ -13,14 +13,6 @@ NTSTATUS A830DpuStop(PVOID adapter);
 VOID A830DpuRestoreRegisters(PVOID adapter);
 BOOLEAN A830DpuEnabled(PVOID adapter);
 BOOLEAN A830DpuReferences(PVOID adapter,ULONGLONG physical);
-/* RAM snapshot of the last driver-confirmed latch, never a pending queue.
- * Caller keeps the allocation pool alive while using the returned address. */
-BOOLEAN A830DpuActive(PVOID adapter,PULONGLONG physical,PULONG pitch,PULONGLONG address,PULONG frame);
-VOID A830DpuTraceSnapshot(PVOID output);
 NTSTATUS A830DpuQueue(PVOID adapter,ULONGLONG physical,ULONG pitch,ULONGLONG wddmAddress);
 VOID A830DpuEnableVsync(PVOID adapter,BOOLEAN enabled);
-NTSTATUS A830DisplayClocks(PVOID adapter,PVOID request,PVOID output);
-NTSTATUS A830DisplayBusInfo(PVOID adapter,PVOID output);
-NTSTATUS A830DisplayActivation(PVOID adapter,PVOID request,PVOID output);
-/* Worker-only dynamic initialization; TRUE holds the display ordering barrier. */
-BOOLEAN A830DpuWork(PVOID adapter);
+VOID A830DpuWork(A830_ADAPTER *adapter);
