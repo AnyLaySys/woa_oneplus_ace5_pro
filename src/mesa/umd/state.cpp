@@ -29,7 +29,7 @@ void APIENTRY CreateSampler(D3D10DDI_HDEVICE h,const D3D10_DDI_SAMPLER_DESC *p,D
  ci.borderColor=p->BorderColor[3]==0?VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK:p->BorderColor[0]==1?VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE:VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
  check(d,d->vk.CreateSampler(d->device,&ci,nullptr,&s->handle));
 }
-void APIENTRY DestroySampler(D3D10DDI_HDEVICE h,D3D10DDI_HSAMPLER hs){Device *d=dev(h);Sampler *s=object<Sampler>(hs);if(s->handle){if(d->recording)d->retired_samplers.push_back(s->handle);else d->vk.DestroySampler(d->device,s->handle,nullptr);}s->~Sampler();}
+void APIENTRY DestroySampler(D3D10DDI_HDEVICE h,D3D10DDI_HSAMPLER hs){Device *d=dev(h);Sampler *s=object<Sampler>(hs);if(s->handle){if((d->recording || d->submitted || d->pending.submitted) && begin(d))d->retired_samplers.push_back(s->handle);else d->vk.DestroySampler(d->device,s->handle,nullptr);}s->~Sampler();}
 
 SIZE_T APIENTRY CalcPrivateElementLayoutSize(D3D10DDI_HDEVICE,const D3D10DDIARG_CREATEELEMENTLAYOUT *){return sizeof(Layout);}
 void APIENTRY CreateElementLayout(D3D10DDI_HDEVICE,const D3D10DDIARG_CREATEELEMENTLAYOUT *p,D3D10DDI_HELEMENTLAYOUT hl,D3D10DDI_HRTELEMENTLAYOUT){auto *l=new(hl.pDrvPrivate) Layout{};l->id=newid();l->elements.assign(p->pVertexElements,p->pVertexElements+p->NumElements);}
@@ -63,6 +63,6 @@ void APIENTRY GenMips(D3D10DDI_HDEVICE h,D3D10DDI_HSHADERRESOURCEVIEW hv) {
  Device *d=dev(h);View *v=object<View>(hv);Resource *r=v->resource;
  for(UINT i=v->level+1;i<v->level+v->levels;i++) {
    barrier(d);VkImageBlit b{};b.srcSubresource={aspects(v->format),i-1,v->layer,v->layers};b.dstSubresource={aspects(v->format),i,v->layer,v->layers};b.srcOffsets[1]={(INT)std::max(1u,r->width>>(i-1)),(INT)std::max(1u,r->height>>(i-1)),(INT)std::max(1u,r->depth>>(i-1))};b.dstOffsets[1]={(INT)std::max(1u,r->width>>i),(INT)std::max(1u,r->height>>i),(INT)std::max(1u,r->depth>>i)};
-   d->vk.CmdBlitImage(d->cmd,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,1,&b,VK_FILTER_LINEAR);
+   r->storage.used=d->next_submit;d->vk.CmdBlitImage(d->cmd,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,1,&b,VK_FILTER_LINEAR);
  }
 }

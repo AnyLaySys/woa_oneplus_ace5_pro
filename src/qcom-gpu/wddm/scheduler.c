@@ -249,21 +249,13 @@ static PLARGE_INTEGER WorkerTimeout(A830_ADAPTER *a,BOOLEAN dpu,ULONGLONG now,UL
         pending=a->IrqRead!=a->IrqWrite || !IsListEmpty(&a->Pending) || !IsListEmpty(&a->Inflight) || a->PreemptPending || a->CpuBarriers;
         KeReleaseSpinLock(&a->QueueLock,old);
     }
-    if(pending && a->CompletionTimer) {
-        ExSetTimer(a->CompletionTimer,-2000,0,NULL);
-        pending=FALSE;
-    }
     if(a->VsyncEnabled && !dpu) {
         timeout->QuadPart=nextVsync>now?-(LONGLONG)(nextVsync-now):0;
-        if(pending && timeout->QuadPart<-10000)timeout->QuadPart=-10000;
+        if(pending && timeout->QuadPart<-100000)timeout->QuadPart=-100000;
         return timeout;
     }
     if(!pending)return NULL;
-    timeout->QuadPart=-10000;return timeout;
-}
-VOID A830CompletionTick(PEX_TIMER timer,PVOID context) {
-    UNREFERENCED_PARAMETER(timer);A830_ADAPTER *a=context;
-    PollCompletion(a);KeSetEvent(&a->Wake,IO_NO_INCREMENT,FALSE);
+    timeout->QuadPart=-100000;return timeout;
 }
 /* Caller holds QueueLock. Ring records are single-producer, ISR consumes only
    fully published records and never takes a PASSIVE/DISPATCH spin lock. */
@@ -376,9 +368,6 @@ VOID A830Retire(A830_ADAPTER *a) {
         if(!a->Stopping && !a->Failed && (job->HardwareFence>completed || (LONG)(job->Fence-a->Completed)>0)) {
             ExInterlockedInsertHeadList(&a->Inflight,entry,&a->QueueLock);break;
         }
-        if(!a->Stopping && !a->Failed) {
-
-        }
         A830FinishJob(job,TRUE);A830RecycleJob(a,job);
     }
 }
@@ -397,7 +386,7 @@ static NTSTATUS Execute(A830_ADAPTER *a,const A830_DMA *dma) {
         NTSTATUS status=A830MapPresent(a,(A830_DMA *)dma);if(!NT_SUCCESS(status))return status;
         status=A830CopyPresent(dma);if(!NT_SUCCESS(status))return status;
 
-        if(a->Framebuffer && a->ScanoutPitch && dma->Destination==a->Memory.Segment.Cpu+(SIZE_T)a->ScanoutOffset) {
+        if(!A830DpuEnabled(a) && a->Framebuffer && a->ScanoutPitch && dma->Destination==a->Memory.Segment.Cpu+(SIZE_T)a->ScanoutOffset) {
             status=A830CopyPresentToFrame(dma,a->Framebuffer,a->DisplayInfo.Pitch,a->DisplayInfo.Width,a->DisplayInfo.Height);
             if(!NT_SUCCESS(status))return status;
 

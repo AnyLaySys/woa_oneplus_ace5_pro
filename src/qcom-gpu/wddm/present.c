@@ -98,9 +98,11 @@ static NTSTATUS CopyPresent(const A830_DMA *dma,PUCHAR destination,ULONG pitch,S
             SIZE_T last=offset+(SIZE_T)(rect->bottom-1)*pitch+(SIZE_T)rect->left*4;
             if(last>dma->DestinationBytes || rowBytes>dma->DestinationBytes-last)return STATUS_INVALID_PARAMETER;
         }
-        for(LONG y=rect->top;y<rect->bottom;y++)
-            RtlMoveMemory(destination+offset+(SIZE_T)y*pitch+(SIZE_T)rect->left*4,
-                (PUCHAR)dma->Source+dma->Offset+(SIZE_T)y*dma->SourcePitch+(SIZE_T)rect->left*4,(SIZE_T)(rect->right-rect->left)*4);
+        if(destination==dma->Source && offset==dma->Offset && pitch==dma->SourcePitch)continue;
+        PUCHAR source=(PUCHAR)dma->Source+dma->Offset+(SIZE_T)rect->top*dma->SourcePitch+(SIZE_T)rect->left*4;
+        PUCHAR target=destination+offset+(SIZE_T)rect->top*pitch+(SIZE_T)rect->left*4;
+        if(rowBytes==pitch && rowBytes==dma->SourcePitch)RtlMoveMemory(target,source,rowBytes*(rect->bottom-rect->top));
+        else for(LONG y=rect->top;y<rect->bottom;y++,target+=pitch,source+=dma->SourcePitch)RtlMoveMemory(target,source,rowBytes);
     }
     KeMemoryBarrier();return STATUS_SUCCESS;
 }

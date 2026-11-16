@@ -118,7 +118,8 @@ bool buffer_create(Device *d,Storage &s,VkDeviceSize size,VkBufferUsageFlags usa
    check(d,d->vk.MapMemory(d->device,s.memory,0,VK_WHOLE_SIZE,0,&s.map));
 }
 bool buffer_rename(Device *d,Resource *r) {
- if(!r->storage.in_use)return true;
+ if(r->storage.used<=d->completed)return true;
+ if(!begin(d))return false;
  Storage next;
  if(!buffer_create(d,next,r->width,r->storage.usage)){storage_destroy(d,next);return false;}
  d->renamed.push_back(r->storage);r->storage=next;r->generation++;return true;
@@ -132,12 +133,13 @@ void storage_destroy(Device *d,Storage &s) {
 }
 void buffer_recycle(Device *d,Storage &s) {
  if(s.buffer && s.map && s.size<=16777216 && d->buffer_cache_bytes+s.size<=67108864 && d->buffer_cache.size()<384) {
-   s.in_use=false;d->buffer_cache_bytes+=s.size;d->buffer_cache.push_back(s);s={};
+   s.used=0;d->buffer_cache_bytes+=s.size;d->buffer_cache.push_back(s);s={};
  } else storage_destroy(d,s);
 }
 void storage_recycle(Device *d,Storage &s) {
+ if(s.used>d->completed && begin(d)){d->temporary.push_back(s);s={};return;}
  if(s.image && !s.external && s.memory && s.size<=33554432 && d->image_cache_bytes+s.size<=100663296 && d->image_cache.size()<64) {
-   d->vk.DestroyImage(d->device,s.image,nullptr);s.image=VK_NULL_HANDLE;s.initialized=false;s.in_use=false;
+   d->vk.DestroyImage(d->device,s.image,nullptr);s.image=VK_NULL_HANDLE;s.initialized=false;s.used=0;
    d->image_cache_bytes+=s.size;d->image_cache.push_back(s);s={};
  } else buffer_recycle(d,s);
 }
@@ -147,9 +149,24 @@ bool sync_memory(Device *d,Storage &s,bool read) {
  VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=s.memory;range.size=VK_WHOLE_SIZE;
  return check(d,read?d->vk.InvalidateMappedMemoryRanges(d->device,1,&range):d->vk.FlushMappedMemoryRanges(d->device,1,&range));
 }
+static bool retire(Device *d,Batch &b) {
+ if(!b.submitted)return true;
+ if(!check(d,d->vk.WaitForFences(d->device,1,&b.fence,VK_TRUE,10000000000ull)))return false;
+ d->completed=std::max(d->completed,b.submitted);b.submitted=0;
+ for(auto &f:b.framebuffers)d->vk.DestroyFramebuffer(d->device,f.handle,nullptr);b.framebuffers.clear();
+ for(auto &v:b.retired_views){if(v.image)d->vk.DestroyImageView(d->device,v.image,nullptr);if(v.buffer)d->vk.DestroyBufferView(d->device,v.buffer,nullptr);}b.retired_views.clear();
+ for(auto sampler:b.retired_samplers)d->vk.DestroySampler(d->device,sampler,nullptr);b.retired_samplers.clear();
+ for(auto query:b.retired_queries)d->vk.DestroyQueryPool(d->device,query,nullptr);b.retired_queries.clear();
+ for(auto &s:b.renamed)buffer_recycle(d,s);b.renamed.clear();
+ for(auto &s:b.temporary)storage_recycle(d,s);b.temporary.clear();
+ for(auto &cache:b.descriptor_cache)cache.clear();
+ return check(d,d->vk.ResetCommandPool(d->device,b.commands,0)) && check(d,d->vk.ResetDescriptorPool(d->device,b.descriptors,0));
+}
 bool begin(Device *d) {
  if(FAILED(d->failure))return false;
  if(d->recording)return true;
+ if(!retire(d,*d))return false;
+ d->bound_pipeline=VK_NULL_HANDLE;d->bound_sets={};
  VkCommandBufferBeginInfo ci{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};ci.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
  d->recording=check(d,d->vk.BeginCommandBuffer(d->cmd,&ci));return d->recording;
 }
@@ -165,29 +182,19 @@ void barrier(Device *d) {
  VkMemoryBarrier memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER};memory.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_HOST_WRITE_BIT;memory.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_HOST_READ_BIT;
  d->vk.CmdPipelineBarrier(d->cmd,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|VK_PIPELINE_STAGE_HOST_BIT,0,1,&memory,0,nullptr,0,nullptr);
 }
-bool flush(Device *d) {
+bool flush(Device *d,bool wait) {
  if(FAILED(d->failure))return false;
- if(!d->recording)return true;
- barrier(d);
- if(!check(d,d->vk.EndCommandBuffer(d->cmd)))return false;
- d->recording=false;
- if(!check(d,d->vk.ResetFences(d->device,1,&d->fence)))return false;
-
- VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};si.commandBufferCount=1;si.pCommandBuffers=&d->cmd;
- if(!check(d,d->vk.QueueSubmit(d->queue,1,&si,d->fence)))return false;
-
- if(!check(d,d->vk.WaitForFences(d->device,1,&d->fence,VK_TRUE,10000000000ull)))return false;
-
- for(auto &f:d->framebuffers)d->vk.DestroyFramebuffer(d->device,f.handle,nullptr);d->framebuffers.clear();
- for(auto &v:d->retired_views){if(v.image)d->vk.DestroyImageView(d->device,v.image,nullptr);if(v.buffer)d->vk.DestroyBufferView(d->device,v.buffer,nullptr);}d->retired_views.clear();
- for(auto sampler:d->retired_samplers)d->vk.DestroySampler(d->device,sampler,nullptr);d->retired_samplers.clear();
- for(auto query:d->retired_queries)d->vk.DestroyQueryPool(d->device,query,nullptr);d->retired_queries.clear();
- for(auto &s:d->renamed)buffer_recycle(d,s);d->renamed.clear();
- for(auto &s:d->temporary)storage_recycle(d,s);d->temporary.clear();
- for(auto *r:d->resources)r->storage.in_use=false;
- bool okay=check(d,d->vk.ResetCommandPool(d->device,d->commands,0)) &&
-    check(d,d->vk.ResetDescriptorPool(d->device,d->descriptors,0));
- return okay;
+ if(d->recording) {
+   barrier(d);
+   if(!check(d,d->vk.EndCommandBuffer(d->cmd)))return false;
+   d->recording=false;
+   if(!check(d,d->vk.ResetFences(d->device,1,&d->fence)))return false;
+   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};si.commandBufferCount=1;si.pCommandBuffers=&d->cmd;
+   if(!check(d,d->vk.QueueSubmit(d->queue,1,&si,d->fence)))return false;
+   d->submitted=d->next_submit++;
+   std::swap(static_cast<Batch &>(*d),d->pending);
+ }
+ return !wait || (retire(d,d->pending) && retire(d,*d));
 }
 bool image_create(Device *d,Resource *r,uint64_t address,unsigned size) {
 
@@ -229,11 +236,11 @@ bool image_create(Device *d,Resource *r,uint64_t address,unsigned size) {
  b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=r->storage.image;b.subresourceRange={aspects(r->format),0,r->levels,0,r->layers};
  b.srcAccessMask=address?VK_ACCESS_HOST_WRITE_BIT:0;b.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
  d->vk.CmdPipelineBarrier(d->cmd,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&b);
- r->storage.initialized=true;return true;
+ r->storage.initialized=true;r->storage.used=d->next_submit;return true;
 }
 void view_destroy(Device *d,View *v) {
  if(v->image || v->buffer) {
-   if(d->recording)d->retired_views.push_back({v->image,v->buffer});
+   if((d->recording || d->submitted || d->pending.submitted) && begin(d))d->retired_views.push_back({v->image,v->buffer});
    else {if(v->image)d->vk.DestroyImageView(d->device,v->image,nullptr);if(v->buffer)d->vk.DestroyBufferView(d->device,v->buffer,nullptr);}
  }
  v->image=VK_NULL_HANDLE;v->buffer=VK_NULL_HANDLE;v->generation=0;
@@ -312,11 +319,6 @@ bool initialize(Device *d) {
  VK_FUNCTIONS(LOAD_DEVICE)
 #undef LOAD_DEVICE
  d->vk.GetDeviceQueue(d->device,family,0,&d->queue);
- VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pci.queueFamilyIndex=family;
- if(!check(d,d->vk.CreateCommandPool(d->device,&pci,nullptr,&d->commands)))return false;
- VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};cai.commandPool=d->commands;cai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;cai.commandBufferCount=1;
- if(!check(d,d->vk.AllocateCommandBuffers(d->device,&cai,&d->cmd)))return false;
- VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};if(!check(d,d->vk.CreateFence(d->device,&fci,nullptr,&d->fence)))return false;
  for(UINT stage=0;stage<3;stage++) {
    VkShaderStageFlags flags=stage==0?VK_SHADER_STAGE_VERTEX_BIT:stage==1?VK_SHADER_STAGE_FRAGMENT_BIT:VK_SHADER_STAGE_GEOMETRY_BIT;
    std::vector<VkDescriptorSetLayoutBinding> bindings;
@@ -331,7 +333,14 @@ bool initialize(Device *d) {
  if(!check(d,d->vk.CreatePipelineLayout(d->device,&lci,nullptr,&d->pipeline_layout)))return false;
  VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,32768},{VK_DESCRIPTOR_TYPE_SAMPLER,32768},{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,262144},{VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,262144}};
  VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};pool.maxSets=1536;pool.poolSizeCount=4;pool.pPoolSizes=sizes;
- if(!check(d,d->vk.CreateDescriptorPool(d->device,&pool,nullptr,&d->descriptors)))return false;
+ for(Batch *b:{static_cast<Batch *>(d),&d->pending}) {
+   VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pci.queueFamilyIndex=family;
+   if(!check(d,d->vk.CreateCommandPool(d->device,&pci,nullptr,&b->commands)))return false;
+   VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};cai.commandPool=b->commands;cai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;cai.commandBufferCount=1;
+   if(!check(d,d->vk.AllocateCommandBuffers(d->device,&cai,&b->cmd)))return false;
+   VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+   if(!check(d,d->vk.CreateFence(d->device,&fci,nullptr,&b->fence)) || !check(d,d->vk.CreateDescriptorPool(d->device,&pool,nullptr,&b->descriptors)))return false;
+ }
  VkPipelineCacheCreateInfo cache{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};d->vk.CreatePipelineCache(d->device,&cache,nullptr,&d->pipeline_cache);
  if(!buffer_create(d,d->dummy_buffer,65536,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT))return false;
  memset(d->dummy_buffer.map,0,65536);
@@ -342,20 +351,25 @@ bool initialize(Device *d) {
  VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};sampler.magFilter=sampler.minFilter=VK_FILTER_NEAREST;sampler.addressModeU=sampler.addressModeV=sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;sampler.maxLod=1000;
  if(!check(d,d->vk.CreateSampler(d->device,&sampler,nullptr,&d->dummy_sampler.handle)))return false;
 
- return flush(d);
+ return flush(d,true);
 }
 void destroy(Device *d) {
  if(d->device) {
-   flush(d);d->vk.DeviceWaitIdle(d->device);
+   flush(d,true);d->vk.DeviceWaitIdle(d->device);
    for(auto &p:d->pipelines){d->vk.DestroyPipeline(d->device,p.second.handle,nullptr);d->vk.DestroyRenderPass(d->device,p.second.pass,nullptr);}
-   for(auto &f:d->framebuffers)d->vk.DestroyFramebuffer(d->device,f.handle,nullptr);
-   for(auto &s:d->temporary)storage_destroy(d,s);
-   for(auto &s:d->renamed)storage_destroy(d,s);
+   for(Batch *b:{static_cast<Batch *>(d),&d->pending}) {
+     for(auto &f:b->framebuffers)d->vk.DestroyFramebuffer(d->device,f.handle,nullptr);
+     for(auto &s:b->temporary)storage_destroy(d,s);
+     for(auto &s:b->renamed)storage_destroy(d,s);
+     for(auto &v:b->retired_views){if(v.image)d->vk.DestroyImageView(d->device,v.image,nullptr);if(v.buffer)d->vk.DestroyBufferView(d->device,v.buffer,nullptr);}
+     for(auto sampler:b->retired_samplers)d->vk.DestroySampler(d->device,sampler,nullptr);
+     for(auto query:b->retired_queries)d->vk.DestroyQueryPool(d->device,query,nullptr);
+     if(b->descriptors)d->vk.DestroyDescriptorPool(d->device,b->descriptors,nullptr);
+     if(b->fence)d->vk.DestroyFence(d->device,b->fence,nullptr);
+     if(b->commands)d->vk.DestroyCommandPool(d->device,b->commands,nullptr);
+   }
    for(auto &s:d->buffer_cache)storage_destroy(d,s);
    for(auto &s:d->image_cache)storage_destroy(d,s);
-   for(auto &v:d->retired_views){if(v.image)d->vk.DestroyImageView(d->device,v.image,nullptr);if(v.buffer)d->vk.DestroyBufferView(d->device,v.buffer,nullptr);}
-   for(auto sampler:d->retired_samplers)d->vk.DestroySampler(d->device,sampler,nullptr);
-   for(auto query:d->retired_queries)d->vk.DestroyQueryPool(d->device,query,nullptr);
    view_destroy(d,&d->dummy_view);storage_destroy(d,d->dummy_buffer);storage_destroy(d,d->dummy_image.storage);
    if(d->dummy_sampler.handle)d->vk.DestroySampler(d->device,d->dummy_sampler.handle,nullptr);
    if(d->rotation_sampler.handle)d->vk.DestroySampler(d->device,d->rotation_sampler.handle,nullptr);
@@ -363,11 +377,8 @@ void destroy(Device *d) {
    if(d->rotation_pixel.module)d->vk.DestroyShaderModule(d->device,d->rotation_pixel.module,nullptr);
    storage_destroy(d,d->rotation_constants.storage);
    if(d->pipeline_cache)d->vk.DestroyPipelineCache(d->device,d->pipeline_cache,nullptr);
-   if(d->descriptors)d->vk.DestroyDescriptorPool(d->device,d->descriptors,nullptr);
    if(d->pipeline_layout)d->vk.DestroyPipelineLayout(d->device,d->pipeline_layout,nullptr);
    for(auto layout:d->sets)if(layout)d->vk.DestroyDescriptorSetLayout(d->device,layout,nullptr);
-   if(d->fence)d->vk.DestroyFence(d->device,d->fence,nullptr);
-   if(d->commands)d->vk.DestroyCommandPool(d->device,d->commands,nullptr);
    d->vk.DestroyDevice(d->device,nullptr);
  }
  if(d->instance)d->vk.DestroyInstance(d->instance,nullptr);

@@ -8,11 +8,11 @@ void APIENTRY CreateQuery(D3D10DDI_HDEVICE h,const D3D10DDIARG_CREATEQUERY *p,D3
  } else if(q->type!=D3D10DDI_QUERY_EVENT && q->type!=D3D10DDI_QUERY_TIMESTAMPDISJOINT)error(d,DXGI_ERROR_UNSUPPORTED);
  d->queries.push_back(q);
 }
-void APIENTRY DestroyQuery(D3D10DDI_HDEVICE h,D3D10DDI_HQUERY hq){Device *d=dev(h);Query *q=object<Query>(hq);if(q->pool){if(d->recording)d->retired_queries.push_back(q->pool);else d->vk.DestroyQueryPool(d->device,q->pool,nullptr);}d->queries.erase(std::remove(d->queries.begin(),d->queries.end(),q),d->queries.end());q->~Query();}
+void APIENTRY DestroyQuery(D3D10DDI_HDEVICE h,D3D10DDI_HQUERY hq){Device *d=dev(h);Query *q=object<Query>(hq);if(q->pool){if((d->recording || d->submitted || d->pending.submitted) && begin(d))d->retired_queries.push_back(q->pool);else d->vk.DestroyQueryPool(d->device,q->pool,nullptr);}d->queries.erase(std::remove(d->queries.begin(),d->queries.end(),q),d->queries.end());q->~Query();}
 void APIENTRY QueryBegin(D3D10DDI_HDEVICE h,D3D10DDI_HQUERY hq){Device *d=dev(h);Query *q=object<Query>(hq);q->ended=false;q->active=true;q->count=0;if(q->pool){barrier(d);d->vk.CmdResetQueryPool(d->cmd,q->pool,0,256);}}
 void APIENTRY QueryEnd(D3D10DDI_HDEVICE,D3D10DDI_HQUERY hq){Query *q=object<Query>(hq);q->active=false;q->ended=true;}
 void APIENTRY QueryGetData(D3D10DDI_HDEVICE h,D3D10DDI_HQUERY hq,void *data,UINT bytes,UINT) {
- Device *d=dev(h);Query *q=object<Query>(hq);if(!q->ended){d->errors.pfnSetErrorCb(d->core,DXGI_DDI_ERR_WASSTILLDRAWING);return;}if(!flush(d))return;
+ Device *d=dev(h);Query *q=object<Query>(hq);if(!q->ended){d->errors.pfnSetErrorCb(d->core,DXGI_DDI_ERR_WASSTILLDRAWING);return;}if(!flush(d,true))return;
  if(!data || !bytes)return;
  if(q->type==D3D10DDI_QUERY_EVENT){if(bytes>=sizeof(BOOL))*(BOOL *)data=TRUE;}
  else if(q->type==D3D10DDI_QUERY_TIMESTAMPDISJOINT){if(bytes>=sizeof(D3D10_DDI_QUERY_DATA_TIMESTAMP_DISJOINT)){auto *v=(D3D10_DDI_QUERY_DATA_TIMESTAMP_DISJOINT *)data;v->Frequency=(UINT64)(1000000000.0/d->properties.limits.timestampPeriod);v->Disjoint=TRUE;}}

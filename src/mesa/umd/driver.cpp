@@ -61,7 +61,7 @@ HRESULT APIENTRY _Present(DXGI_DDI_ARG_PRESENT *p) {
  EnterCriticalSection(&d->lock);HRESULT hr=d->present->pfnPresentCb(d->runtime,&present);LeaveCriticalSection(&d->lock);
  if(FAILED(hr))error(d,hr);return hr;
 }
-HRESULT APIENTRY _ResolveSharedResource(DXGI_DDI_ARG_RESOLVESHAREDRESOURCE *p){Device *d=dev(p->hDevice);return flush(d)?S_OK:d->failure;}
+HRESULT APIENTRY _ResolveSharedResource(DXGI_DDI_ARG_RESOLVESHAREDRESOURCE *p){Device *d=dev(p->hDevice);return flush(d,true)?S_OK:d->failure;}
 HRESULT APIENTRY _SetDisplayMode(DXGI_DDI_ARG_SETDISPLAYMODE *p){Device *d=dev(p->hDevice);Resource *r=res(p->hResource);if(!r || !r->allocation)return E_INVALIDARG;D3DDDICB_SETDISPLAYMODE mode{};mode.hPrimaryAllocation=r->allocation;return d->callbacks.pfnSetDisplayModeCb(d->runtime,&mode);}
 HRESULT APIENTRY _SetResourcePriority(DXGI_DDI_ARG_SETRESOURCEPRIORITY *){return S_OK;}
 HRESULT APIENTRY _QueryResourceResidency(DXGI_DDI_ARG_QUERYRESOURCERESIDENCY *p){for(UINT i=0;i<p->Resources;i++)p->pStatus[i]=DXGI_DDI_RESIDENCY_FULLY_RESIDENT;return S_OK;}
@@ -82,7 +82,7 @@ static HRESULT rotated_blt(Device *d,DXGI_DDI_ARG_BLT *p) {
     p->DstRight<=p->DstLeft || p->DstBottom<=p->DstTop)return E_INVALIDARG;
  if(!d->rotation_vertex.module) {
    if(!shader_create(d,&d->rotation_vertex,rotation_vs_code,&rotation_vs_io,0) || !shader_create(d,&d->rotation_pixel,rotation_ps_code,&rotation_ps_io,1))return d->failure;
-   d->rotation_constants.dimension=D3D10DDIRESOURCE_BUFFER;d->rotation_constants.width=32;d->resources.push_back(&d->rotation_constants);
+   d->rotation_constants.dimension=D3D10DDIRESOURCE_BUFFER;d->rotation_constants.width=32;
    if(!buffer_create(d,d->rotation_constants.storage,32,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))return d->failure;
    VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};sampler.magFilter=sampler.minFilter=VK_FILTER_NEAREST;
    sampler.addressModeU=sampler.addressModeV=sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;

@@ -188,12 +188,13 @@ typedef struct {
     volatile LONG Kick;
     volatile LONG WakeNeeded;
     ULONG TeCounter,TxFrame;
-    ULONG PendingFrame;
+    ULONG PendingFrame,PendingFence;
     ULONGLONG LastEdge,Period,PollBegin;
 } A830_DPU;
 VOID A830DpuWork(A830_ADAPTER *a) {
     KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);A830_DPU *d=a->Dpu;
-    if(d && d->Enabled && !d->Stopping && d->Timer && InterlockedExchange(&d->Kick,0))
+    if(d && d->Enabled && !d->Stopping && d->Timer &&
+        (InterlockedExchange(&d->Kick,0) || ReadAcquire64(&d->Queued)>ReadAcquire64(&d->Applied)))
         ExSetTimer(d->Timer,-2000,0,NULL);
     KeReleaseSpinLock(&a->QueueLock,old);
 }
@@ -309,7 +310,8 @@ static BOOLEAN AdvanceTransaction(PVOID context) {
     }
     if(!d->TransactionState) {
         LONG64 sequence=ReadAcquire64(&d->Queued);
-        if((sequence&1) || sequence<=ReadAcquire64(&d->Applied))return TRUE;
+        if((sequence&1) || sequence<=ReadAcquire64(&d->Applied) ||
+           A830FenceAfter(d->PendingFence,d->Adapter->Completed))return TRUE;
         InterlockedIncrement64(&d->OwnershipSequence);
         d->TransactionSequence=sequence;d->TransactionAddress=d->PendingAddress;
         d->TransactionPitch=d->PendingPitch;d->TransactionFrame=d->PendingFrame;
@@ -418,7 +420,8 @@ static VOID Poll(PEX_TIMER timer,PVOID context) {
        (d->LastEdge && now-d->LastEdge>d->Period*2) ||
        (!d->LastEdge && now-d->PollBegin>d->Period*2))wait=100000;
     if(d->TransactionState || ReadAcquire64(&d->Queued)>ReadAcquire64(&d->Applied))wait=2000;
-    if(d->TransactionState==4)wait=100000;
+    if(d->TransactionState==4 || (!d->TransactionState && A830FenceAfter(d->PendingFence,d->Adapter->Completed)))wait=100000;
+    if(!d->Vsync && !d->TransactionState && ReadAcquire64(&d->Queued)<=ReadAcquire64(&d->Applied))return;
     if(!d->Stopping)ExSetTimer(d->Timer,-(LONGLONG)wait,0,NULL);
 }
 static NTSTATUS Translation(A830_DPU *d) {
@@ -573,7 +576,7 @@ NTSTATUS A830DpuQueue(PVOID context,ULONGLONG physical,ULONG pitch,ULONGLONG add
        of the preceding sequence and the new frame's address. */
     InterlockedIncrement64(&d->OwnershipSequence);InterlockedIncrement64(&d->Queued);
     d->PendingAddress=address;d->PendingPitch=pitch;InterlockedExchange64(&d->PendingPhysical,(LONG64)physical);
-    d->PendingFrame=d->TxFrame;KeMemoryBarrier();
+    d->PendingFrame=d->TxFrame;d->PendingFence=d->Adapter->LastSubmitted;KeMemoryBarrier();
     InterlockedIncrement64(&d->Queued);InterlockedIncrement64(&d->OwnershipSequence);
     InterlockedExchange(&d->Kick,1);A830WakeDisplay(d->Adapter);return STATUS_SUCCESS;
 }

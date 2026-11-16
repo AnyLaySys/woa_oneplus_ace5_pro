@@ -55,9 +55,8 @@ static VOID StopWorker(A830_ADAPTER *a) {
     }
     KeReleaseSpinLock(&a->ContextLock,old);KeSetEvent(&a->Wake,IO_NO_INCREMENT,FALSE);
     if(a->Thread){ZwWaitForSingleObject(a->Thread,FALSE,NULL);ZwClose(a->Thread);a->Thread=NULL;}
-    if(a->CompletionTimer){ExDeleteTimer(a->CompletionTimer,TRUE,TRUE,NULL);a->CompletionTimer=NULL;}
     /* Hardware may still read pinned command BOs. Quiesce before dropping references. */
-     {
+    {
         if(a->BridgeAttached)A830BridgeStopHardware(a);
         else if(a->Hardware.Online)GpuStop(&a->Hardware);
     }
@@ -70,8 +69,6 @@ static VOID StopWorker(A830_ADAPTER *a) {
 }
 static NTSTATUS StartWorker(A830_ADAPTER *a) {
     OBJECT_ATTRIBUTES attributes;InitializeObjectAttributes(&attributes,NULL,OBJ_KERNEL_HANDLE,NULL,NULL);
-    if(!a->CompletionTimer)a->CompletionTimer=ExAllocateTimer(A830CompletionTick,a,EX_TIMER_HIGH_RESOLUTION);
-    if(!a->CompletionTimer)return STATUS_INSUFFICIENT_RESOURCES;
     InterlockedExchange(&a->Stopping,0);
     return PsCreateSystemThread(&a->Thread,SYNCHRONIZE,&attributes,NULL,NULL,A830Worker,a);
 }

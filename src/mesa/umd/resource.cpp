@@ -9,7 +9,6 @@ SIZE_T APIENTRY CalcPrivateResourceSize(D3D10DDI_HDEVICE,const D3D10DDIARG_CREAT
 SIZE_T APIENTRY CalcPrivateOpenedResourceSize(D3D10DDI_HDEVICE,const D3D10DDIARG_OPENRESOURCE *) {return sizeof(Resource);}
 void APIENTRY CreateResource(D3D10DDI_HDEVICE h,const D3D10DDIARG_CREATERESOURCE *p,D3D10DDI_HRESOURCE hr,D3D10DDI_HRTRESOURCE rt) {
  Device *d=dev(h);auto *r=new(hr.pDrvPrivate) Resource{};r->format=p->Format;r->vkformat=format(p->Format);r->dimension=p->ResourceDimension;r->bind=p->BindFlags;r->runtime=rt.handle;
- d->resources.push_back(r);
  r->levels=std::max(1u,p->MipLevels);r->layers=std::max(1u,p->ArraySize);r->width=p->pMipInfoList[0].TexelWidth;r->height=p->pMipInfoList[0].TexelHeight;r->depth=p->pMipInfoList[0].TexelDepth;
  if(p->pPrimaryDesc)p->pPrimaryDesc->DriverFlags=0;
  if(!r->width){error(d,E_INVALIDARG);return;}
@@ -43,7 +42,6 @@ void APIENTRY CreateResource(D3D10DDI_HDEVICE h,const D3D10DDIARG_CREATERESOURCE
 }
 void APIENTRY OpenResource(D3D10DDI_HDEVICE h,const D3D10DDIARG_OPENRESOURCE *p,D3D10DDI_HRESOURCE hr,D3D10DDI_HRTRESOURCE rt) {
  Device *d=dev(h);auto *r=new(hr.pDrvPrivate) Resource{};
- d->resources.push_back(r);
  if(p->NumAllocations!=1 || p->PrivateDriverDataSize!=sizeof(A830_RESOURCE) || !p->pPrivateDriverData){error(d,E_INVALIDARG);return;}
  auto *a=(const A830_RESOURCE *)p->pPrivateDriverData;
  if(a->Version!=A830_ABI_VERSION || !a->Width || !a->Height || !(a->Flags&A830_RESOURCE_OWNED)){error(d,E_INVALIDARG);return;}
@@ -52,18 +50,18 @@ void APIENTRY OpenResource(D3D10DDI_HDEVICE h,const D3D10DDIARG_OPENRESOURCE *p,
 }
 void APIENTRY DestroyResource(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hr) {
  Device *d=dev(h);Resource *r=res(hr);
- if(r->allocation)flush(d);
+ if(r->allocation)flush(d,true);
  if(d->recording){d->temporary.push_back(r->mapping.staging);d->temporary.push_back(r->storage);r->mapping.staging={};r->storage={};}
  else {buffer_recycle(d,r->mapping.staging);storage_recycle(d,r->storage);}
  if(r->allocation && !r->imported){D3DDDICB_DEALLOCATE a{};a.hResource=r->runtime;d->callbacks.pfnDeallocateCb(d->runtime,&a);}
- d->resources.erase(std::remove(d->resources.begin(),d->resources.end(),r),d->resources.end());r->~Resource();
+ r->~Resource();
 }
 void APIENTRY ResourceMap(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hr,UINT sub,D3D10_DDI_MAP mode,UINT,D3D10DDI_MAPPED_SUBRESOURCE *out) {
  Device *d=dev(h);Resource *r=res(hr);memset(out,0,sizeof(*out));
 
  if(r->storage.buffer) {
    if(mode==D3D10_DDI_MAP_WRITE_DISCARD){if(!buffer_rename(d,r))return;}
-   else if(mode!=D3D10_DDI_MAP_WRITE_NOOVERWRITE){if(!flush(d))return;}
+   else if(mode!=D3D10_DDI_MAP_WRITE_NOOVERWRITE){if(!flush(d,true))return;}
    if(mode==D3D10_DDI_MAP_READ || mode==D3D10_DDI_MAP_READWRITE)sync_memory(d,r->storage,true);
    out->pData=r->storage.map;out->RowPitch=out->DepthPitch=r->width;r->mapping.mode=mode;return;
  }
@@ -74,7 +72,7 @@ void APIENTRY ResourceMap(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hr,UINT sub,D3D1
  if(mode==D3D10_DDI_MAP_READ || mode==D3D10_DDI_MAP_READWRITE) {
    barrier(d);VkBufferImageCopy copy{};copy.imageSubresource={aspects(r->format),level,layer,1};copy.imageExtent={width,height,depth};
    d->vk.CmdCopyImageToBuffer(d->cmd,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,m.staging.buffer,1,&copy);
-   if(!flush(d) || !sync_memory(d,m.staging,true))return;
+   if(!flush(d,true) || !sync_memory(d,m.staging,true))return;
  }
  out->pData=m.staging.map;out->RowPitch=m.row;out->DepthPitch=m.slice;
 }
@@ -88,7 +86,7 @@ void APIENTRY ResourceUnmap(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hr,UINT) {
  if(m.mode!=D3D10_DDI_MAP_READ) {
    if(!sync_memory(d,m.staging,false))return;
    UINT level=m.sub%r->levels,layer=m.sub/r->levels;barrier(d);VkBufferImageCopy copy{};copy.imageSubresource={aspects(r->format),level,layer,1};copy.imageExtent={std::max(1u,r->width>>level),std::max(1u,r->height>>level),std::max(1u,r->depth>>level)};
-   d->vk.CmdCopyBufferToImage(d->cmd,m.staging.buffer,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);d->temporary.push_back(m.staging);m.staging={};
+   r->storage.used=d->next_submit;d->vk.CmdCopyBufferToImage(d->cmd,m.staging.buffer,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);d->temporary.push_back(m.staging);m.staging={};
  } else buffer_recycle(d,m.staging);
 }
 void APIENTRY ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hr,UINT sub,const D3D10_DDI_BOX *box,const void *data,UINT pitch,UINT slice) {
@@ -99,9 +97,9 @@ void APIENTRY ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE 
    if(x>r->width || size>r->width-x){error(d,E_INVALIDARG);return;}
    if(!size)return;
    if(!x && size==r->width){if(!buffer_rename(d,r))return;}
-   else if(r->storage.in_use && !((x|size)&3) && size<=65536) {
-     barrier(d);d->vk.CmdUpdateBuffer(d->cmd,r->storage.buffer,x,size,data);return;
-   } else if(r->storage.in_use){if(!flush(d))return;}
+   else if((r->storage.used>d->completed) && !((x|size)&3) && size<=65536) {
+     barrier(d);r->storage.used=d->next_submit;d->vk.CmdUpdateBuffer(d->cmd,r->storage.buffer,x,size,data);return;
+   } else if(r->storage.used>d->completed){if(!flush(d,true))return;}
    memcpy((char *)r->storage.map+x,data,size);sync_memory(d,r->storage,false);return;
  }
  UINT level=sub%r->levels,layer=sub/r->levels;
@@ -111,13 +109,12 @@ void APIENTRY ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE 
  Storage staging;if(!buffer_create(d,staging,(VkDeviceSize)row*height*depth,0))return;
  for(UINT iz=0;iz<depth;iz++)for(UINT iy=0;iy<height;iy++)memcpy((char *)staging.map+((size_t)iz*height+iy)*row,(const char *)data+(size_t)iz*slice+(size_t)iy*pitch,row);
  if(!sync_memory(d,staging,false)){storage_destroy(d,staging);return;}
- barrier(d);VkBufferImageCopy copy{};copy.imageSubresource={aspects(r->format),level,layer,1};copy.imageOffset={(INT)x,(INT)y,(INT)z};copy.imageExtent={w,height,depth};d->vk.CmdCopyBufferToImage(d->cmd,staging.buffer,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);d->temporary.push_back(staging);
+ barrier(d);VkBufferImageCopy copy{};copy.imageSubresource={aspects(r->format),level,layer,1};copy.imageOffset={(INT)x,(INT)y,(INT)z};copy.imageExtent={w,height,depth};r->storage.used=d->next_submit;d->vk.CmdCopyBufferToImage(d->cmd,staging.buffer,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);d->temporary.push_back(staging);
 }
 void APIENTRY ResourceCopyRegion(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hd,UINT ds,UINT x,UINT y,UINT z,D3D10DDI_HRESOURCE hs,UINT ss,const D3D10_DDI_BOX *box) {
- Device *d=dev(h);Resource *dst=res(hd),*src=res(hs);barrier(d);
+ Device *d=dev(h);Resource *dst=res(hd),*src=res(hs);barrier(d);dst->storage.used=src->storage.used=d->next_submit;
 
  if(dst->storage.buffer && src->storage.buffer) {
-   dst->storage.in_use=src->storage.in_use=true;
    VkBufferCopy copy{box?(VkDeviceSize)box->left:0,x,box?(VkDeviceSize)(box->right-box->left):src->width};d->vk.CmdCopyBuffer(d->cmd,src->storage.buffer,dst->storage.buffer,1,&copy);
  } else if(dst->storage.image && src->storage.image) {
    UINT level=ss%src->levels,sx=box?box->left:0,sy=box?box->top:0,sz=box?box->front:0;
@@ -158,9 +155,9 @@ void APIENTRY DestroyShaderResourceView(D3D10DDI_HDEVICE h,D3D10DDI_HSHADERRESOU
 void APIENTRY ClearRenderTargetView(D3D10DDI_HDEVICE h,D3D10DDI_HRENDERTARGETVIEW hv,FLOAT color[4]) {
  Device *d=dev(h);View *v=object<View>(hv);barrier(d);VkClearColorValue c;memcpy(c.float32,color,sizeof(c.float32));VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,v->level,1,v->layer,v->layers};
 
- d->vk.CmdClearColorImage(d->cmd,v->resource->storage.image,VK_IMAGE_LAYOUT_GENERAL,&c,1,&range);
+ v->resource->storage.used=d->next_submit;d->vk.CmdClearColorImage(d->cmd,v->resource->storage.image,VK_IMAGE_LAYOUT_GENERAL,&c,1,&range);
 }
 void APIENTRY ClearDepthStencilView(D3D10DDI_HDEVICE h,D3D10DDI_HDEPTHSTENCILVIEW hv,UINT flags,FLOAT depth,UINT8 stencil) {
  Device *d=dev(h);View *v=object<View>(hv);barrier(d);VkClearDepthStencilValue value{depth,stencil};VkImageSubresourceRange range{0,v->level,1,v->layer,v->layers};if(flags&D3D10_DDI_CLEAR_DEPTH)range.aspectMask|=VK_IMAGE_ASPECT_DEPTH_BIT;if(flags&D3D10_DDI_CLEAR_STENCIL)range.aspectMask|=VK_IMAGE_ASPECT_STENCIL_BIT;
- d->vk.CmdClearDepthStencilImage(d->cmd,v->resource->storage.image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);
+ v->resource->storage.used=d->next_submit;d->vk.CmdClearDepthStencilImage(d->cmd,v->resource->storage.image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);
 }

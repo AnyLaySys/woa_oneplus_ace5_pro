@@ -62,7 +62,7 @@ struct Storage {
  void *map = nullptr;
  bool coherent = false;
  bool initialized = false;
- bool in_use = false;
+ uint64_t used = 0;
  VkBufferUsageFlags usage = 0;
  UINT memory_type = ~0u;
  bool external = false;
@@ -108,7 +108,25 @@ struct VertexBinding { Resource *resource = nullptr; UINT stride = 0, offset = 0
 struct Pipeline { VkPipeline handle; VkRenderPass pass; };
 struct Framebuffer { VkFramebuffer handle; };
 struct RetiredView { VkImageView image; VkBufferView buffer; };
-struct Device {
+struct Batch {
+ VkCommandPool commands = VK_NULL_HANDLE;
+ VkCommandBuffer cmd = VK_NULL_HANDLE;
+ VkFence fence = VK_NULL_HANDLE;
+ VkDescriptorPool descriptors = VK_NULL_HANDLE;
+ uint64_t submitted = 0;
+ std::vector<Storage> temporary,renamed;
+ std::vector<RetiredView> retired_views;
+ std::vector<VkSampler> retired_samplers;
+ std::vector<VkQueryPool> retired_queries;
+ std::vector<Framebuffer> framebuffers;
+ std::unordered_map<std::string,VkDescriptorSet> descriptor_cache[3];
+};
+struct Device : Batch {
+ Batch pending;
+ uint64_t next_submit = 1,completed = 0;
+ VkPipeline bound_pipeline = VK_NULL_HANDLE;
+ std::array<VkDescriptorSet,3> bound_sets{};
+ std::string pipeline_key,descriptor_key;
  HANDLE runtime = nullptr, adapter = nullptr, context = nullptr;
  D3D10DDI_HRTCORELAYER core{};
  D3DDDI_DEVICECALLBACKS callbacks{};
@@ -127,24 +145,13 @@ struct Device {
  VkQueue queue = VK_NULL_HANDLE;
  VkPhysicalDeviceMemoryProperties memory{};
  VkPhysicalDeviceProperties properties{};
- VkCommandPool commands = VK_NULL_HANDLE;
- VkCommandBuffer cmd = VK_NULL_HANDLE;
- VkFence fence = VK_NULL_HANDLE;
  VkDescriptorSetLayout sets[3]{};
  VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
- VkDescriptorPool descriptors = VK_NULL_HANDLE;
  VkPipelineCache pipeline_cache = VK_NULL_HANDLE;
- std::vector<Storage> temporary;
- std::vector<Storage> renamed;
  std::vector<Storage> buffer_cache;
  VkDeviceSize buffer_cache_bytes = 0;
  std::vector<Storage> image_cache;
  VkDeviceSize image_cache_bytes = 0;
- std::vector<RetiredView> retired_views;
- std::vector<VkSampler> retired_samplers;
- std::vector<VkQueryPool> retired_queries;
- std::vector<Resource *> resources;
- std::vector<Framebuffer> framebuffers;
  std::vector<VkImageView> pass_views;
  std::array<VkFormat,9> pass_formats{};
  bool render_pass = false;
@@ -170,7 +177,6 @@ struct Device {
  UINT sample_mask = ~0u, stencil_ref = 0;
  bool recording = false;
  HRESULT failure = S_OK;
- uint64_t draws = 0;
  Storage dummy_buffer;
  Resource dummy_image;
  View dummy_view;
@@ -188,7 +194,7 @@ static inline Resource *res(D3D10DDI_HRESOURCE h) { return object<Resource>(h); 
 static inline Resource *res(DXGI_DDI_HRESOURCE h) { return reinterpret_cast<Resource *>(h); }
 void error(Device *, HRESULT);
 bool check(Device *, VkResult);
-bool flush(Device *);
+bool flush(Device *,bool = false);
 bool begin(Device *);
 void end_pass(Device *);
 void barrier(Device *);

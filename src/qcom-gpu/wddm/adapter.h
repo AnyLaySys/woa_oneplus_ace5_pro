@@ -62,7 +62,6 @@ typedef struct {
     EX_RUNDOWN_REF ScanoutAccess;
     ULONG RefreshRate;
     HANDLE Thread;
-    PEX_TIMER CompletionTimer;
     KEVENT Wake;
     KDPC DisplayWake;
     KSPIN_LOCK QueueLock;
@@ -80,7 +79,6 @@ typedef struct {
     DXGKARGCB_NOTIFY_INTERRUPT_DATA Notify;
 } A830_ADAPTER;
 BOOLEAN A830RotationSupported(D3DKMDT_VIDPN_PRESENT_PATH_ROTATION rotation);
-VOID A830CompletionTick(PEX_TIMER timer,PVOID context);
 static __forceinline ULONG A830PublishFence(volatile ULONG *field,ULONG fence) {
     LONG previous=InterlockedCompareExchange((volatile LONG *)field,0,0);
     while(A830FenceAfter(fence,(ULONG)previous)) {
