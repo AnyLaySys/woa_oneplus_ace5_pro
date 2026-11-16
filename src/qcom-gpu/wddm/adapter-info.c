@@ -48,14 +48,30 @@ NTSTATUS APIENTRY A830Query(HANDLE adapter,const DXGKARG_QUERYADAPTERINFO *q) {
         c->MaxQueuedFlipOnVSync=1;
         c->MaxAllocationListSlotId=127;c->SchedulingCaps.MultiEngineAware=1;
         c->SchedulingCaps.PreemptionAware=1;c->SchedulingCaps.CancelCommandAware=1;
-        c->GpuEngineTopology.NbAsymetricProcessingNodes=1;c->WDDMVersion=DXGKDDI_WDDMv2;
+        c->GpuEngineTopology.NbAsymetricProcessingNodes=1;c->WDDMVersion=DXGKDDI_WDDMv2_4;
         c->PreemptionCaps.GraphicsPreemptionGranularity=D3DKMDT_GRAPHICS_PREEMPTION_DMA_BUFFER_BOUNDARY;
         c->PreemptionCaps.ComputePreemptionGranularity=D3DKMDT_COMPUTE_PREEMPTION_DMA_BUFFER_BOUNDARY;
         c->SupportNonVGA=TRUE;c->SupportPerEngineTDR=TRUE;c->SupportSmoothRotation=TRUE;return STATUS_SUCCESS;
     }
     if(q->Type==DXGKQAITYPE_WDDMDEVICECAPS) {
         if(q->OutputDataSize<sizeof(DXGK_WDDMDEVICECAPS))return STATUS_BUFFER_TOO_SMALL;
-        DXGK_WDDMDEVICECAPS *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->WDDMVersion=DXGKDDI_WDDMv2;return STATUS_SUCCESS;
+        DXGK_WDDMDEVICECAPS *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->WDDMVersion=DXGKDDI_WDDMv2_4;return STATUS_SUCCESS;
+    }
+    if(q->Type==DXGKQAITYPE_ADAPTERPERFDATA_CAPS || q->Type==DXGKQAITYPE_ADAPTERPERFDATA) {
+        if(q->InputDataSize!=sizeof(UINT) || !q->pInputData || *(UINT *)q->pInputData)return STATUS_INVALID_PARAMETER;
+        if(q->Type==DXGKQAITYPE_ADAPTERPERFDATA_CAPS) {
+            if(q->OutputDataSize<sizeof(DXGK_ADAPTER_PERFDATACAPS))return STATUS_BUFFER_TOO_SMALL;
+            DXGK_ADAPTER_PERFDATACAPS *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->TemperatureMax=1250;return STATUS_SUCCESS;
+        }
+        if(q->OutputDataSize<sizeof(DXGK_ADAPTER_PERFDATA))return STATUS_BUFFER_TOO_SMALL;
+        if(!a->Hardware.Thermal)return STATUS_DEVICE_NOT_READY;
+        LONG temperature=MINLONG;
+        for(ULONG i=1;i<=8;i++) {
+            ULONG raw=GpuRead(a->Hardware.Thermal,0xA0+i*4);
+            if(raw&(1u<<21))temperature=max(temperature,((LONG)(raw<<20))>>20);
+        }
+        if(temperature==MINLONG)return STATUS_DEVICE_NOT_READY;
+        DXGK_ADAPTER_PERFDATA *d=q->pOutputData;RtlZeroMemory(d,sizeof(*d));d->Temperature=(ULONG)max(temperature,0);return STATUS_SUCCESS;
     }
     if(q->Type==DXGKQAITYPE_PHYSICALADAPTERCAPS) {
         if(q->OutputDataSize<sizeof(DXGK_PHYSICALADAPTERCAPS))return STATUS_BUFFER_TOO_SMALL;

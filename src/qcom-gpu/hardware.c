@@ -25,17 +25,19 @@ VOID GpuUnbind(GPU *g) {
     if(g->Gcc)MmUnmapIoSpace(g->Gcc,0x1F5000);
     if(g->Rsc)MmUnmapIoSpace(g->Rsc,0x10000);
     if(g->Db)MmUnmapIoSpace(g->Db,0x20000);
-    g->Registers=g->Gcc=g->Rsc=g->Db=NULL;
+    if(g->Thermal)MmUnmapIoSpace(g->Thermal,4096);
+    g->Registers=g->Gcc=g->Rsc=g->Db=g->Thermal=NULL;
 }
 NTSTATUS GpuBind(GPU *g,PHYSICAL_ADDRESS registers,ULONG length) {
-    if(!g->Synchronize || g->Registers || g->Gcc || g->Rsc || g->Db)return STATUS_INVALID_DEVICE_STATE;
+    if(!g->Synchronize || g->Registers || g->Gcc || g->Rsc || g->Db || g->Thermal)return STATUS_INVALID_DEVICE_STATE;
     if(registers.QuadPart!=0x03D00000 || length!=GPU_WINDOW)return STATUS_DEVICE_CONFIGURATION_ERROR;
     PHYSICAL_ADDRESS p;
     g->Registers=MmMapIoSpaceEx(registers,length,PAGE_READWRITE|PAGE_NOCACHE);
     p.QuadPart=0x100000;g->Gcc=MmMapIoSpaceEx(p,0x1F5000,PAGE_READWRITE|PAGE_NOCACHE);
     p.QuadPart=0x16520000;g->Rsc=MmMapIoSpaceEx(p,0x10000,PAGE_READWRITE|PAGE_NOCACHE);
     p.QuadPart=0x81C60000;g->Db=MmMapIoSpaceEx(p,0x20000,PAGE_READWRITE|PAGE_NOCACHE);
-    if(!g->Registers || !g->Gcc || !g->Rsc || !g->Db){GpuUnbind(g);return STATUS_INSUFFICIENT_RESOURCES;}
+    p.QuadPart=0x0C22A000;g->Thermal=MmMapIoSpaceEx(p,4096,PAGE_READONLY|PAGE_NOCACHE);
+    if(!g->Registers || !g->Gcc || !g->Rsc || !g->Db || !g->Thermal){GpuUnbind(g);return STATUS_INSUFFICIENT_RESOURCES;}
     g->Stage=1;return STATUS_SUCCESS;
 }
 BOOLEAN GpuInterrupt(GPU *g,ULONG index) {

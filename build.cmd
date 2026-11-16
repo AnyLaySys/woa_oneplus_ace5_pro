@@ -61,7 +61,7 @@ if defined GPU_PACKAGE call :build_gpu_renderer
 if errorlevel 1 exit /b 1
 if defined GPU_PACKAGE (
   if not exist "%BIN%" mkdir "%BIN%"
-  for %%F in (a830_umd.dll vulkan_freedreno.dll msvcp140.dll vcruntime140.dll) do (
+  for %%F in (a830_umd.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll freedreno_icd.json freedreno_icd_x64.json msvcp140.dll vcruntime140.dll) do (
     if not exist "%GPU_RENDER_PACKAGE%\%%F" (
       echo ERROR GPU renderer output is missing: %GPU_RENDER_PACKAGE%\%%F
       exit /b 1
@@ -80,16 +80,16 @@ if errorlevel 1 exit /b 1
 copy /y "%BIN%\%TARGET%.inf" "%DST%\%TARGET%.inf" >nul
 if errorlevel 1 exit /b 1
 if defined GPU_PACKAGE (
-  copy /y "%BIN%\a830_umd.dll" "%DST%\a830_umd.dll" >nul
-  if errorlevel 1 exit /b 1
-  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\a830_umd.dll"
-  if errorlevel 1 exit /b 1
-  for %%F in (vulkan_freedreno.dll msvcp140.dll vcruntime140.dll gen80000_zap.mbn) do (
+  for %%F in (a830_umd.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll) do (
+    copy /y "%BIN%\%%F" "%DST%\%%F" >nul
+    if errorlevel 1 exit /b 1
+    "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%%F"
+    if errorlevel 1 exit /b 1
+  )
+  for %%F in (freedreno_icd.json freedreno_icd_x64.json msvcp140.dll vcruntime140.dll gen80000_zap.mbn) do (
     copy /y "%BIN%\%%F" "%DST%\%%F" >nul
     if errorlevel 1 exit /b 1
   )
-  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\vulkan_freedreno.dll"
-  if errorlevel 1 exit /b 1
 )
 "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%TARGET%.sys"
 if errorlevel 1 exit /b 1
@@ -246,7 +246,7 @@ def copy(original, destination):
         if original.read_bytes() == destination.read_bytes():
             return
         destination.chmod(0o644)
-    shutil.copy2(original, destination)
+    shutil.copyfile(original, destination)
 
 
 def download(url, path, checksum):
@@ -284,10 +284,13 @@ if subprocess.run(['git', '-C', str(source), 'apply', '--ignore-whitespace', '--
     run('git', '-C', source, 'apply', '--ignore-whitespace', patch)
 vulkan = source / 'src/freedreno/vulkan'
 copy(local / 'tu_knl_windows.cc', vulkan / 'tu_knl_windows.cc')
-copy(local / 'a830_host.h', vulkan / 'a830_host.h')
-copy(root / 'src/qcom-gpu/uapi.h', vulkan / 'qcom_gpu_uapi.h')
 abi = (root / 'src/qcom-gpu/wddm/abi.h').read_text().replace('#include "../uapi.h"', '#include "qcom_gpu_uapi.h"')
-write(vulkan / 'a830_wddm_abi.h', abi)
+for backend in [vulkan, source / 'src/freedreno/drm']:
+    for name in ['a830_windows.h', 'a830_host.h']:
+        copy(local / name, backend / name)
+    copy(root / 'src/qcom-gpu/uapi.h', backend / 'qcom_gpu_uapi.h')
+    write(backend / 'a830_wddm_abi.h', abi)
+copy(local / 'fd_windows.c', source / 'src/freedreno/drm/fd_windows.c')
 
 toolchain = json.loads((output / 'toolchain.json').read_text())
 def linux_path(path):
@@ -328,23 +331,28 @@ cpp_link_args = {link!r}
 options = [
     '--buildtype=release', '--wrap-mode=nofallback', '--force-fallback-for=zlib,DirectX-Headers',
     '-Dplatforms=windows', '-Dvulkan-drivers=freedreno', '-Dfreedreno-kmds=windows',
-    '-Dgallium-drivers=[]', '-Dllvm=disabled', '-Dglx=disabled', '-Degl=disabled',
-    '-Dgbm=disabled', '-Dgles1=disabled', '-Dgles2=disabled', '-Dopengl=false',
+    '-Dgallium-drivers=freedreno', '-Dgallium-wgl-dll-name=a830_gl', '-Dllvm=disabled', '-Dglx=disabled', '-Degl=disabled',
+    '-Dgbm=disabled', '-Dgles1=disabled', '-Dgles2=disabled', '-Dopengl=true',
     '-Dshader-cache=disabled', '-Dexpat=disabled', '-Dzlib=enabled', '-Dzstd=disabled',
     '-Dbuild-tests=false', '-Dspirv-tools=disabled', '-Dtools=[]', '-Ddefault_library=static',
     '-Dtu-build-id=' + mesa_commit]
-setup = ['--reconfigure'] if (build / 'build.ninja').exists() else []
-cached = build / 'meson-private/cmd_line.txt'
-if setup and (not cached.exists() or str(cross) not in cached.read_text()):
-    setup = ['--wipe']
-run('meson', 'setup', *setup,
-    build, source, '--cross-file', cross, *options)
-run('ninja', '-C', build, '-j', min(os.cpu_count() or 1, 8), 'src/freedreno/vulkan/vulkan_freedreno.dll')
+def build_mesa(directory, cross_file, config, *targets):
+    setup = ['--reconfigure'] if (directory / 'build.ninja').exists() else []
+    cached = directory / 'meson-private/cmd_line.txt'
+    if setup and (not cached.exists() or str(cross_file) not in cached.read_text() or cross_file.stat().st_mtime > (directory / 'meson-private/coredata.dat').stat().st_mtime):
+        setup = ['--wipe']
+    run('meson', 'setup', *setup, directory, source, '--cross-file', cross_file, *config)
+    run('ninja', '-C', directory, '-j', min(os.cpu_count() or 1, 8), *targets)
+
+
+build_mesa(build, cross, options, 'src/freedreno/vulkan/vulkan_freedreno.dll', 'src/gallium/targets/wgl/a830_gl.dll')
 package.mkdir(parents=True, exist_ok=True)
 turnip = build / 'src/freedreno/vulkan/vulkan_freedreno.dll'
 copy(turnip, package / turnip.name)
+opengl = build / 'src/gallium/targets/wgl/a830_gl.dll'
+copy(opengl, package / opengl.name)
 crt = linux_path(toolchain['redist']) / 'arm64/Microsoft.VC145.CRT'
-queue, seen = [turnip], set()
+queue, seen = [turnip, opengl], set()
 while queue:
     imports = subprocess.check_output(['llvm-readobj', '--coff-imports', str(queue.pop())], text=True)
     for name in re.findall(r'^  Name: (.+)$', imports, re.M):
@@ -429,6 +437,14 @@ run('lld-link', '/DLL', '/MACHINE:ARM64', '/OUT:' + str(umd_build / 'a830_umd.dl
     'vcruntime.lib', 'msvcrt.lib', 'oldnames.lib', 'uuid.lib')
 copy(umd_build / 'a830_umd.dll', package / 'a830_umd.dll')
 copy(shader_source / 'COPYING', package / 'COPYING.vkd3d')
+cross_x64 = output / 'cross-x64.ini'
+write(cross_x64, cross.read_text().replace('aarch64', 'x86_64').replace("'arm64'", "'x86_64'").replace('/arm64', '/x64'))
+options_x64 = [option.replace('a830_gl', 'a830_gl_x64') for option in options] + ['-Db_vscrt=mt']
+build_x64 = output / 'x64'
+build_mesa(build_x64, cross_x64, options_x64, 'src/freedreno/vulkan/vulkan_freedreno.dll', 'src/gallium/targets/wgl/a830_gl_x64.dll', 'src/gallium/targets/libgl-gdi/opengl32.dll')
+copy(build_x64 / 'src/gallium/targets/wgl/a830_gl_x64.dll', package / 'a830_gl_x64.dll')
+copy(build_x64 / 'src/freedreno/vulkan/vulkan_freedreno.dll', package / 'vulkan_freedreno_x64.dll')
+write(package / 'freedreno_icd_x64.json', (package / 'freedreno_icd.json').read_text().replace('vulkan_freedreno.dll', 'vulkan_freedreno_x64.dll'))
 print('GPU_RENDERER=' + str(package))
 #</GPU-BUILD>
 

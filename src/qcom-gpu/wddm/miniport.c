@@ -173,6 +173,10 @@ static NTSTATUS ChildStatus(PVOID context,PDXGK_CHILD_STATUS status,BOOLEAN nonD
     if(status->Type!=StatusConnection)return STATUS_NOT_SUPPORTED;
     status->HotPlug.Connected=TRUE;return STATUS_SUCCESS;
 }
+static NTSTATUS APIENTRY MonitorLink(HANDLE adapter,DXGKARG_UPDATEMONITORLINKINFO *p) {
+    UNREFERENCED_PARAMETER(adapter);if(p->VideoPresentTargetId)return STATUS_INVALID_PARAMETER;
+    p->MonitorLinkInfo.Capabilities.Value=0;p->MonitorLinkInfo.DitheringSupport.Value=0;return STATUS_SUCCESS;
+}
 static NTSTATUS Descriptor(PVOID context,ULONG child,PDXGK_DEVICE_DESCRIPTOR descriptor) {
     UNREFERENCED_PARAMETER(context);UNREFERENCED_PARAMETER(child);UNREFERENCED_PARAMETER(descriptor);return STATUS_MONITOR_NO_DESCRIPTOR;
 }
@@ -183,10 +187,7 @@ static NTSTATUS Power(PVOID context,ULONG uid,DEVICE_POWER_STATE state,POWER_ACT
 }
 static VOID Unload(VOID){A830BridgeDestroy();}
 static NTSTATUS APIENTRY Collect(HANDLE adapter,const DXGKARG_COLLECTDBGINFO *p) {
-    A830_ADAPTER *a=adapter;
-    const ULONG data[]={A830_ABI_VERSION,a->Hardware.Stage,a->Hardware.Fault,a->LastSubmitted,a->Completed};
-    if(!p->pBuffer || p->BufferSize<sizeof(data))return STATUS_BUFFER_TOO_SMALL;
-    RtlCopyMemory(p->pBuffer,data,sizeof(data));return STATUS_SUCCESS;
+    UNREFERENCED_PARAMETER(adapter);UNREFERENCED_PARAMETER(p);return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY StopCapture(HANDLE adapter,const DXGKARG_STOPCAPTURE *p) {
     UNREFERENCED_PARAMETER(adapter);UNREFERENCED_PARAMETER(p);return STATUS_SUCCESS;
@@ -356,6 +357,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT object,PUNICODE_STRING path) {
     d.DxgkDdiAddDevice=Add;d.DxgkDdiStartDevice=Start;d.DxgkDdiStopDevice=A830AdapterStop;d.DxgkDdiRemoveDevice=Remove;
     d.DxgkDdiInterruptRoutine=Interrupt;d.DxgkDdiDpcRoutine=Dpc;d.DxgkDdiDispatchIoRequest=Dispatch;
     d.DxgkDdiQueryChildRelations=Children;d.DxgkDdiQueryChildStatus=ChildStatus;d.DxgkDdiQueryDeviceDescriptor=Descriptor;
+    d.DxgkDdiUpdateMonitorLinkInfo=MonitorLink;
     d.DxgkDdiSetPowerState=Power;d.DxgkDdiResetDevice=ResetDevice;d.DxgkDdiUnload=Unload;d.DxgkDdiQueryInterface=Interface;
     d.DxgkDdiCollectDbgInfo=Collect;
     d.DxgkDdiStopCapture=StopCapture;d.DxgkDdiSetStablePowerState=StablePower;

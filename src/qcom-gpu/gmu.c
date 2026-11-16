@@ -111,10 +111,35 @@ static NTSTATUS Bandwidth(GPU *g,PULONG bw) {
             ULONGLONG peak=i==2?0:((ULONGLONG)bandwidth*widths[i]*1000/((i?4:16)*units[i]));
             ULONG vote=i==2?0:(ULONG)min(max(peak,1),0x3FFF);
             bw[32+j*8+i]=commit|0x20000000|(vote<<14)|vote;
-            if(i==2 && bandwidth>=10687500)bw[32+j*8+i]|=4;
         }
     }
     return STATUS_SUCCESS;
+}
+static NTSTATUS AcdPower(VOID) {
+    PHYSICAL_ADDRESS address;address.QuadPart=0x0C300000;
+    PUCHAR qmp=MmMapIoSpaceEx(address,0x400,PAGE_READWRITE|PAGE_NOCACHE);
+    address.QuadPart=0x00406000;
+    PUCHAR ipcc=MmMapIoSpaceEx(address,4096,PAGE_READWRITE|PAGE_NOCACHE);
+    NTSTATUS status=STATUS_INSUFFICIENT_RESOURCES;
+    if(!qmp || !ipcc)goto done;
+    status=STATUS_DEVICE_CONFIGURATION_ERROR;
+    ULONG mailbox=GpuRead(qmp,0x38);
+    if(GpuRead(qmp,0)!=0x4D41494C || GpuRead(qmp,4)!=1 || GpuRead(qmp,0x34)<68 || mailbox>0x400-68)goto done;
+    GpuWrite(qmp,0x10,GpuRead(qmp,0x0C));GpuWrite(qmp,0x24,0xFFFF);GpuWrite(ipcc,0x0C,0);
+    status=GpuPoll(qmp,0x28,MAXULONG,0xFFFF,1000000);if(!NT_SUCCESS(status))goto done;
+    GpuWrite(qmp,0x2C,0xFFFF);GpuWrite(ipcc,0x0C,0);
+    status=GpuPoll(qmp,0x14,MAXULONG,0xFFFF,1000000);if(!NT_SUCCESS(status))goto done;
+    GpuWrite(qmp,0x18,0xFFFF);GpuWrite(ipcc,0x0C,0);
+    status=GpuPoll(qmp,0x30,MAXULONG,0xFFFF,1000000);if(!NT_SUCCESS(status))goto done;
+    status=GpuPoll(qmp,mailbox,MAXULONG,0,1000000);if(!NT_SUCCESS(status))goto done;
+    const CHAR message[64]="{class: gpu, res: acd, val: 1}";
+    for(ULONG i=0;i<sizeof(message)/4;i++){ULONG word;RtlCopyMemory(&word,message+i*4,4);GpuWrite(qmp,mailbox+4+i*4,word);}
+    GpuWrite(qmp,mailbox,sizeof(message));GpuRead(qmp,mailbox);GpuWrite(ipcc,0x0C,0);
+    status=GpuPoll(qmp,mailbox,MAXULONG,0,1000000);
+done:
+    if(ipcc)MmUnmapIoSpace(ipcc,4096);
+    if(qmp)MmUnmapIoSpace(qmp,0x400);
+    return status;
 }
 static NTSTATUS Configure(GPU *g) {
     PHYSICAL_ADDRESS fuseAddress;fuseAddress.QuadPart=0x221c8000;
@@ -126,7 +151,7 @@ static NTSTATUS Configure(GPU *g) {
     NTSTATUS status=GpuArc(g,"cx.lvl","mx.lvl",64,&cx);
     if(NT_SUCCESS(status))status=GpuDb(g,"mx.lvl",&addr,&aux,&n);
     if(!NT_SUCCESS(status))return status;
-    ULONG perf[64]={0,0,1,0,3,0,0xFFFFFFFF,0};g->PerfCount=1;
+    ULONG perf[64]={0,0,1,0,3,0,0xFFFFFFFF,0},acd[37]={0,1,0,1,0};g->PerfCount=1;
     for(ULONG i=0;i<RTL_NUMBER_OF(GpuOpps);i++)if(GpuOpps[i].Mask&mask) {
         const GPU_OPP *opp=GpuOpps+i;ULONG gx=0,mxindex=MAXULONG;
         status=GpuArc(g,"gfx.lvl","gmxc.lvl",opp->Level,&gx);if(!NT_SUCCESS(status))return status;
@@ -138,6 +163,7 @@ static NTSTATUS Configure(GPU *g) {
         ULONG index=g->PerfCount++,at=5+index*3;
         perf[at]=gx;perf[at+1]=0xFFFC000|(mxindex<<8)|255;perf[at+2]=opp->Khz;
         g->PerfKhz[index]=opp->Khz;g->PerfBw[index]=opp->Bandwidth;
+        if(opp->Acd){acd[2]|=1u<<index;acd[5+acd[4]++]=opp->Acd;}
     }
     g->MaxKhz=0;g->FixedKhz=0;
     perf[3]=g->PerfCount;ULONG at=5+g->PerfCount*3;
@@ -145,6 +171,11 @@ static NTSTATUS Configure(GPU *g) {
     status=Send(g,15,perf,at);if(!NT_SUCCESS(status))return status;
     ULONG bw[160];status=Bandwidth(g,bw);if(!NT_SUCCESS(status))return status;
     status=Send(g,3,bw,RTL_NUMBER_OF(bw));if(!NT_SUCCESS(status))return status;
+    if(acd[2]) {
+        status=AcdPower();if(!NT_SUCCESS(status))return status;
+        ULONG feature[]={0,12,1,0};status=Send(g,11,feature,RTL_NUMBER_OF(feature));if(!NT_SUCCESS(status))return status;
+        status=Send(g,7,acd,RTL_NUMBER_OF(acd));if(!NT_SUCCESS(status))return status;
+    }
     ULONG start[]={0,0};status=Send(g,14,start,2);
     if(NT_SUCCESS(status))status=Send(g,10,start,1);
     if(NT_SUCCESS(status))status=GpuSetFrequency(g,1);

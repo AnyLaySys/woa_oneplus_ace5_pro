@@ -12,7 +12,7 @@ typedef struct { GPU_BO Tables; ULONG Used,Bank; } GPU_VM;
 typedef struct { GPU_BO *Buffer; ULONG Offset,Words; } GPU_COMMAND;
 typedef VOID (*GPU_SYNCHRONIZE)(PVOID context);
 typedef struct {
-    PUCHAR Registers,Gcc,Rsc,Db;
+    PUCHAR Registers,Gcc,Rsc,Db,Thermal;
     GPU_VM Vm[2];
     GPU_BO Cache,Dummy,Debug,Log,Hfi,Sqe,Aqe,Ring,Memory;
     KEVENT Event;
