@@ -21,7 +21,7 @@ NTSTATUS A830DisplayStart(A830_ADAPTER *a) {
 
     a->Framebuffer=MmMapIoSpaceEx(d->PhysicAddress,a->FramebufferSize,PAGE_READWRITE|PAGE_WRITECOMBINE);
     if(!a->Framebuffer)return STATUS_INSUFFICIENT_RESOURCES;
-    a->Visible=TRUE;return STATUS_SUCCESS;
+    a->Visible=TRUE;a->PanelOn=a->AdapterOn=a->MonitorOn=TRUE;return STATUS_SUCCESS;
 }
 VOID A830DisplayStop(A830_ADAPTER *a) {
     if(!NT_SUCCESS(A830DpuStop(a)))return;

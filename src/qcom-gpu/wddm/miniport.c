@@ -37,7 +37,7 @@ static NTSTATUS Add(PDEVICE_OBJECT device,PVOID *context) {
     if(!a)return STATUS_INSUFFICIENT_RESOURCES;
     RegisterHardwareInfo(device);
 
-    GpuInitialize(&a->Hardware,Synchronize,a);KeInitializeSpinLock(&a->QueueLock);
+    GpuInitialize(&a->Hardware,Synchronize,a);KeInitializeSpinLock(&a->QueueLock);KeInitializeMutex(&a->DisplayPowerLock,0);
     KeInitializeEvent(&a->Wake,SynchronizationEvent,FALSE);InitializeListHead(&a->Pending);InitializeListHead(&a->Free);InitializeListHead(&a->Inflight);InitializeListHead(&a->Contexts);KeInitializeSpinLock(&a->ContextLock);
     KeInitializeDpc(&a->DisplayWake,DisplayWake,a);
     ExInitializeRundownProtection(&a->ScanoutAccess);
@@ -180,9 +180,9 @@ static NTSTATUS Descriptor(PVOID context,ULONG child,PDXGK_DEVICE_DESCRIPTOR des
     UNREFERENCED_PARAMETER(context);UNREFERENCED_PARAMETER(child);UNREFERENCED_PARAMETER(descriptor);return STATUS_MONITOR_NO_DESCRIPTOR;
 }
 static NTSTATUS Power(PVOID context,ULONG uid,DEVICE_POWER_STATE state,POWER_ACTION action) {
-    UNREFERENCED_PARAMETER(context);UNREFERENCED_PARAMETER(uid);UNREFERENCED_PARAMETER(action);
-
-    return state>=PowerDeviceD0 && state<=PowerDeviceD3?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;
+    UNREFERENCED_PARAMETER(action);
+    if(state<PowerDeviceD0 || state>PowerDeviceD3)return STATUS_INVALID_PARAMETER;
+    return A830DisplayPower(context,uid,state==PowerDeviceD0);
 }
 static VOID Unload(VOID){A830BridgeDestroy();}
 static NTSTATUS APIENTRY Collect(HANDLE adapter,const DXGKARG_COLLECTDBGINFO *p) {

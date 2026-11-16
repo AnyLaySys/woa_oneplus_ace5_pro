@@ -29,10 +29,9 @@ static const ULONG Bases[]={0x0c400000,0x0c42d000,0x0c440000,0x0c500000,0x0b2200
 static const ULONG Sizes[]={0x3000,0x4000,0x80000,0x400000,0x10000};
 static const UCHAR Masks[]={0xc0,1};
 static const UCHAR Descriptor[]={
-    0x05,0x01,0x09,0x80,0xa1,0x01,0x85,0x01,0x09,0x81,0x15,0x00,0x25,0x01,
-    0x75,0x01,0x95,0x01,0x81,0x02,0x95,0x07,0x81,0x03,0xc0,
-    0x05,0x0c,0x09,0x01,0xa1,0x01,0x85,0x02,0x09,0xe9,0x09,0xea,
-    0x95,0x02,0x81,0x02,0x95,0x06,0x81,0x03,0xc0
+    0x05,0x01,0x09,0x0d,0xa1,0x01,0x85,0x01,0x09,0x81,0x15,0x00,0x25,0x01,
+    0x75,0x01,0x95,0x01,0x81,0x02,0x05,0x0c,0x09,0xe9,0x09,0xea,
+    0x95,0x02,0x81,0x02,0x95,0x05,0x81,0x03,0xc0
 };
 static const HID_DESCRIPTOR Hid={9,0x21,0x0111,0,1,{0x22,sizeof(Descriptor)}};
 static const HID_DEVICE_ATTRIBUTES Attributes={sizeof(HID_DEVICE_ATTRIBUTES),0x17cb,0x8750,0x0100};
@@ -97,10 +96,8 @@ static VOID Put(KEYS *k,UCHAR id,UCHAR value) {
 }
 static VOID Update(KEYS *k,UCHAR state) {
     Flush(k);
-    if(k->Count>14)return;
-    UCHAR changed=k->State^state;
-    if(changed&1)Put(k,1,state&1);
-    if(changed&6)Put(k,2,state>>1);
+    if(k->Count==RTL_NUMBER_OF(k->Pending))return;
+    if(k->State!=state)Put(k,1,state);
     k->State=state;Flush(k);
 }
 static VOID Poll(WDFTIMER timer) {
@@ -148,11 +145,12 @@ static BOOLEAN Isr(WDFINTERRUPT interrupt,ULONG message) {
     WdfObjectReleaseLock(device);return handled;
 }
 static NTSTATUS Prepare(WDFDEVICE device,WDFCMRESLIST raw,WDFCMRESLIST resources) {
-    UNREFERENCED_PARAMETER(raw);
     KEYS *k=Context(device);
+    WDF_INTERRUPT_CONFIG irq;WDF_INTERRUPT_CONFIG_INIT(&irq,Isr,NULL);irq.PassiveHandling=TRUE;
     ULONG n=0;
     for(ULONG i=0;i<WdfCmResourceListGetCount(resources);i++) {
         PCM_PARTIAL_RESOURCE_DESCRIPTOR r=WdfCmResourceListGetDescriptor(resources,i);
+        if(r->Type==CmResourceTypeInterrupt){irq.InterruptRaw=WdfCmResourceListGetDescriptor(raw,i);irq.InterruptTranslated=r;}
         if(r->Type!=CmResourceTypeMemory)continue;
         if(n>=RTL_NUMBER_OF(Bases)||r->u.Memory.Start.QuadPart!=Bases[n]||r->u.Memory.Length!=Sizes[n])return STATUS_DEVICE_CONFIGURATION_ERROR;
         k->Base[n]=MmMapIoSpaceEx(r->u.Memory.Start,Sizes[n],PAGE_READWRITE|PAGE_NOCACHE);
@@ -170,7 +168,8 @@ static NTSTATUS Prepare(WDFDEVICE device,WDFCMRESLIST raw,WDFCMRESLIST resources
         if(!owner){k->Observe[n]=k->Base[2]+0x20*i;k->Channel[n]=k->Base[3]+0x1000*i;}
         if(map&0x1000000)k->Irq[n]=owner?NULL:k->Base[3]+0x1000*i;
     }
-    return k->Channel[0]&&k->Channel[1]&&k->Irq[0]&&k->Irq[1]?STATUS_SUCCESS:STATUS_DEVICE_CONFIGURATION_ERROR;
+    if(!k->Channel[0]||!k->Channel[1]||!k->Irq[0]||!k->Irq[1]||!irq.InterruptTranslated)return STATUS_DEVICE_CONFIGURATION_ERROR;
+    return WdfInterruptCreate(device,&irq,WDF_NO_OBJECT_ATTRIBUTES,&k->Interrupt);
 }
 static NTSTATUS Start(WDFDEVICE device,WDF_POWER_DEVICE_STATE previous) {
     UNREFERENCED_PARAMETER(previous);
@@ -202,7 +201,7 @@ static NTSTATUS Stop(WDFDEVICE device,WDF_POWER_DEVICE_STATE next) {
     WdfObjectAcquireLock(device);
     SetInterrupts(k,FALSE);
     if(k->PdcSaved){Write(k->Base[4],0x114,k->PdcConfig);if(k->PdcBank)Write(k->Base[4],0x10,k->PdcEnable);k->PdcSaved=FALSE;}
-    k->Head=0;k->Count=0;k->State=0;Put(k,1,0);Put(k,2,0);Flush(k);
+    k->Head=0;k->Count=0;k->State=0;Put(k,1,0);Flush(k);
     WdfObjectReleaseLock(device);return STATUS_SUCCESS;
 }
 static NTSTATUS Release(WDFDEVICE device,WDFCMRESLIST resources) {
@@ -227,7 +226,7 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
     case IOCTL_HID_GET_STRING: {
         WDF_REQUEST_PARAMETERS p;WDF_REQUEST_PARAMETERS_INIT(&p);WdfRequestGetParameters(request,&p);
         ULONG id=PtrToUlong(p.Parameters.DeviceIoControl.Type3InputBuffer)&0xffff;
-        static const WCHAR vendor[]=L"Qualcomm",product[]=L"OnePlus Hummer Buttons";
+        static const WCHAR vendor[]=L"Qualcomm",product[]=L"Qualcomm Buttons";
         status=id==HID_STRING_ID_IMANUFACTURER?Copy(request,vendor,sizeof(vendor)):
             id==HID_STRING_ID_IPRODUCT?Copy(request,product,sizeof(product)):STATUS_NOT_SUPPORTED;
         break;
@@ -256,9 +255,7 @@ static NTSTATUS AddDevice(WDFDRIVER driver,PWDFDEVICE_INIT init) {
     WDF_TIMER_CONFIG t;WDF_TIMER_CONFIG_INIT(&t,Poll);
     WDF_OBJECT_ATTRIBUTES_INIT(&a);a.ParentObject=device;a.ExecutionLevel=WdfExecutionLevelPassive;
     status=WdfTimerCreate(&t,&a,&k->Timer);
-    if(!NT_SUCCESS(status))return status;
-    WDF_INTERRUPT_CONFIG irq;WDF_INTERRUPT_CONFIG_INIT(&irq,Isr,NULL);irq.PassiveHandling=TRUE;irq.CanWakeDevice=TRUE;
-    return WdfInterruptCreate(device,&irq,WDF_NO_OBJECT_ATTRIBUTES,&k->Interrupt);
+    return status;
 }
 NTSTATUS DriverEntry(PDRIVER_OBJECT object,PUNICODE_STRING path) {
     WDF_DRIVER_CONFIG config;WDF_DRIVER_CONFIG_INIT(&config,AddDevice);

@@ -61,7 +61,7 @@ qcom_keys.sys
 [Strings]
 ProviderString     = "AnyLaySys"
 ManufacturerString = "Qualcomm"
-DeviceDesc         = "OnePlus Hummer Power and Volume Buttons"
-ServiceDesc        = "Qualcomm PMIC Button Driver"
+DeviceDesc         = "Qualcomm Buttons"
+ServiceDesc        = "Qualcomm Button Driver"
 mshidkmdf.SvcName  = "Pass-through HID to KMDF Filter Driver"
 DiskDesc           = "AnyLaySys Button Driver"

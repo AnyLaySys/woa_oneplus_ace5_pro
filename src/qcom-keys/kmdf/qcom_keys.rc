@@ -17,7 +17,7 @@ BEGIN
   BLOCK "040904B0"
   BEGIN
    VALUE "CompanyName", "AnyLaySys\0"
-   VALUE "FileDescription", "Qualcomm PMIC Button Driver\0"
+   VALUE "FileDescription", "Qualcomm Button Driver\0"
    VALUE "FileVersion", ALS_STRINGIFY(ALS_DRIVER_VERSION_TEXT) "\0"
    VALUE "InternalName", "qcom_keys.sys\0"
    VALUE "OriginalFilename", "qcom_keys.sys\0"

@@ -50,7 +50,8 @@ typedef struct {
     DXGK_DISPLAY_INFORMATION DisplayInfo;
     PUCHAR Framebuffer;
     SIZE_T FramebufferSize;
-    BOOLEAN Visible;
+    BOOLEAN Visible,PanelOn,AdapterOn,MonitorOn;
+    KMUTEX DisplayPowerLock;
     BOOLEAN BridgeAttached;
     volatile LONG FlipPending;
     volatile LONG VsyncEnabled;
@@ -163,3 +164,5 @@ NTSTATUS A830BridgeTimestamp(PULONGLONG counter);
 #include "scanout.h"
 #include "gpu-scanout.h"
 NTSTATUS A830BridgeReserveDisplay(PVOID adapter,GPU_BO buffers[2]);
+
+NTSTATUS A830DisplayPower(A830_ADAPTER *adapter,ULONG uid,BOOLEAN on);
