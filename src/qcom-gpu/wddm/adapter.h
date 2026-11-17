@@ -80,6 +80,7 @@ typedef struct {
     volatile LONG WorkerBusy;
     A830_JOB Jobs[A830_QUEUE_DEPTH];
     volatile LONG Stopping,Failed,PreemptPending,SchedulerDpcPending,Generation,CpuBarriers;
+    volatile LONG ResetStage,ResetStatus;
     ULONG Completed,Preemption,LastSubmitted;
     DXGKARGCB_NOTIFY_INTERRUPT_DATA Notify;
 } A830_ADAPTER;

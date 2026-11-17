@@ -462,6 +462,12 @@ static NTSTATUS Io(A830_BRIDGE *g,A830_CLIENT *c,PIRP request,ULONG code,ULONG i
         info.BusyPercent=gpu->BusyPercent;info.TemperatureDci=(ULONG)gpu->Temperature;info.CoolingBand=gpu->CoolingBand;info.Status=(ULONG)gpu->PowerStatus;
         KeReleaseMutex(&gpu->PowerLock,FALSE);
         RtlCopyMemory(out,&info,sizeof(info));bytes=sizeof(info);status=STATUS_SUCCESS;
+    } else if(code==GPU_IOCTL_FAULT_QUERY && !inLength && outLength>=sizeof(GPU_FAULT_INFO)) {
+        GPU_FAULT_INFO info={0};
+        if(g->Hardware->FaultTrace.Version){KeMemoryBarrier();info=g->Hardware->FaultTrace;}
+        info.Version=1;info.Size=sizeof(info);
+        info.ResetStage=(ULONG)g->Adapter->ResetStage;info.ResetStatus=(ULONG)g->Adapter->ResetStatus;
+        RtlCopyMemory(out,&info,sizeof(info));bytes=sizeof(info);status=STATUS_SUCCESS;
     } else if(code==GPU_IOCTL_DISPLAY_QUERY && !inLength && outLength>=sizeof(GPU_DISPLAY_INFO)) {
         GPU_DISPLAY_INFO info={0};status=A830DpuQuery(g->Adapter,&info);
         if(NT_SUCCESS(status)){RtlCopyMemory(out,&info,sizeof(info));bytes=sizeof(info);}

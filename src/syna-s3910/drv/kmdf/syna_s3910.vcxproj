@@ -20,7 +20,7 @@
   <PropertyGroup>
     <TargetName>syna_s3910</TargetName>
     <S3910VersionDate Condition="'$(S3910VersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</S3910VersionDate>
-    <S3910Revision Condition="'$(S3910Revision)' == ''">12</S3910Revision>
+    <S3910Revision Condition="'$(S3910Revision)' == ''">13</S3910Revision>
     <S3910DriverDate>$([System.DateTime]::Parse('$(S3910VersionDate)').ToString('MM/dd/yyyy'))</S3910DriverDate>
     <S3910DriverVersion>$([System.DateTime]::Parse('$(S3910VersionDate)').ToString('yy.M.d')).$(S3910Revision)</S3910DriverVersion>
     <S3910DriverVersionComma>$([System.String]::Copy('$(S3910DriverVersion)').Replace('.', ','))</S3910DriverVersionComma>

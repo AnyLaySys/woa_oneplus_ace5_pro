@@ -31,6 +31,8 @@ typedef struct {
     LONG Temperature,PowerStatus;
     BOOLEAN LastContextValid;
     ULONGLONG LastContextCookie;
+    /* First hardware fault in this device lifetime, retained across TDR. */
+    GPU_FAULT_INFO FaultTrace;
 } GPU;
 VOID GpuInitialize(GPU *gpu,GPU_SYNCHRONIZE synchronize,PVOID host);
 NTSTATUS GpuBind(GPU *gpu,PHYSICAL_ADDRESS registers,ULONG length);

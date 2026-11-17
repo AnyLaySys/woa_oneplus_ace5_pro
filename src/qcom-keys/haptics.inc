@@ -15,7 +15,7 @@ static NTSTATUS HapticOff(KEYS *k) {
     k->HapticPhase=0;return NT_SUCCESS(status)?off:status;
 }
 static VOID HapticPrepare(KEYS *k) {
-    k->HapticStatus=STATUS_DEVICE_NOT_READY;k->HapticDue=0;k->HapticPhase=k->HapticRepeat=0;
+    k->HapticDue=0;k->HapticPhase=k->HapticRepeat=0;
     for(UCHAR i=0;i<2;i++)k->HapticObserve[i]=k->HapticChannel[i]=NULL;
     for(ULONG i=0;i<k->Apids;i++) {
         ULONG map=Read(k->Base[0],0x2000+4*i),ppid=(map>>8)&0xfff;

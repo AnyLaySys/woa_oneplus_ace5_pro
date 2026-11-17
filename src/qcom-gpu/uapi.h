@@ -34,6 +34,11 @@ typedef struct { GPU_U64 Address,Size; } GPU_SHARED_IMPORT;
 #define GPU_IOCTL_VA_BIND CTL_CODE(FILE_DEVICE_UNKNOWN,0x814,METHOD_BUFFERED,FILE_READ_DATA|FILE_WRITE_DATA)
 #define GPU_IOCTL_POWER_QUERY CTL_CODE(FILE_DEVICE_UNKNOWN,0x815,METHOD_BUFFERED,FILE_READ_DATA)
 #define GPU_IOCTL_DISPLAY_QUERY CTL_CODE(FILE_DEVICE_UNKNOWN,0x816,METHOD_BUFFERED,FILE_READ_DATA)
+#define GPU_IOCTL_FAULT_QUERY CTL_CODE(FILE_DEVICE_UNKNOWN,0x817,METHOD_BUFFERED,FILE_READ_DATA)
+typedef struct {
+    GPU_U32 Version,Size,Source,Bits,Syndrome0,Syndrome1,AddressLow,AddressHigh;
+    GPU_U32 Submitted,Completed,WriteIndex,ReadIndex,GmuStatus,PowerStatus,ResetStage,ResetStatus;
+} GPU_FAULT_INFO;
 typedef struct {
     GPU_U32 Version,Size,Flags,Status,State,Queued,Applied,PendingFence,Completed,Submitted;
     GPU_U32 Line,Event,Done,Frame,InitialFrame,Flushed;

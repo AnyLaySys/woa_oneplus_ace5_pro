@@ -19,7 +19,7 @@
   <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.props" />
   <PropertyGroup>
     <TargetName>qcom_gpu</TargetName>
-    <A830Revision>9</A830Revision>
+    <A830Revision>10</A830Revision>
     <A830Version>26.11.17.$(A830Revision)</A830Version>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
     <OutDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-gpu\ARM64\Release\bin\</OutDir>
