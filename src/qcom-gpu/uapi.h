@@ -27,3 +27,21 @@ typedef struct { GPU_U32 Handle,Size; GPU_U64 Address,Map; } GPU_ALLOCATION;
 typedef struct { GPU_U32 Handle,Offset,Words,Reserved; } GPU_SUBMIT;
 typedef struct { GPU_U32 Handle,Offset,Size,Readback; } GPU_CACHE;
 typedef struct { GPU_U64 Address,Size; } GPU_SHARED_IMPORT;
+
+#define GPU_IOCTL_SPARSE_CAPS CTL_CODE(FILE_DEVICE_UNKNOWN,0x811,METHOD_BUFFERED,FILE_READ_DATA)
+#define GPU_IOCTL_VA_RESERVE CTL_CODE(FILE_DEVICE_UNKNOWN,0x812,METHOD_BUFFERED,FILE_READ_DATA|FILE_WRITE_DATA)
+#define GPU_IOCTL_VA_RELEASE CTL_CODE(FILE_DEVICE_UNKNOWN,0x813,METHOD_BUFFERED,FILE_WRITE_DATA)
+#define GPU_IOCTL_VA_BIND CTL_CODE(FILE_DEVICE_UNKNOWN,0x814,METHOD_BUFFERED,FILE_READ_DATA|FILE_WRITE_DATA)
+#define GPU_IOCTL_POWER_QUERY CTL_CODE(FILE_DEVICE_UNKNOWN,0x815,METHOD_BUFFERED,FILE_READ_DATA)
+#define GPU_IOCTL_DISPLAY_QUERY CTL_CODE(FILE_DEVICE_UNKNOWN,0x816,METHOD_BUFFERED,FILE_READ_DATA)
+typedef struct {
+    GPU_U32 Version,Size,Flags,Status,State,Queued,Applied,PendingFence,Completed,Submitted;
+    GPU_U32 Line,Event,Done,Frame,InitialFrame,Flushed;
+    GPU_U32 FailureState,FailureLine,FailureEvent,FailureDone,FailureFrame,FailureFlushed,Pitch,Period;
+} GPU_DISPLAY_INFO;
+typedef struct {
+    GPU_U32 Version,Size,Flags,CurrentKhz,CeilingKhz,BusyPercent,TemperatureDci,CoolingBand,Status;
+} GPU_POWER_INFO;
+typedef struct { GPU_U64 Address,Size; GPU_U32 Flags,Reserved; } GPU_VA_RESERVE;
+typedef struct { GPU_U64 Address,Size; GPU_U32 Handle,Reserved; } GPU_VA_ALLOCATION;
+typedef struct { GPU_U32 Handle,Buffer; GPU_U64 Offset,BufferOffset,Size; } GPU_VA_BIND;

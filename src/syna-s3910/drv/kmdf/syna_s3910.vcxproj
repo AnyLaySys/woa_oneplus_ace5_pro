@@ -20,7 +20,7 @@
   <PropertyGroup>
     <TargetName>syna_s3910</TargetName>
     <S3910VersionDate Condition="'$(S3910VersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</S3910VersionDate>
-    <S3910Revision Condition="'$(S3910Revision)' == ''">5</S3910Revision>
+    <S3910Revision Condition="'$(S3910Revision)' == ''">12</S3910Revision>
     <S3910DriverDate>$([System.DateTime]::Parse('$(S3910VersionDate)').ToString('MM/dd/yyyy'))</S3910DriverDate>
     <S3910DriverVersion>$([System.DateTime]::Parse('$(S3910VersionDate)').ToString('yy.M.d')).$(S3910Revision)</S3910DriverVersion>
     <S3910DriverVersionComma>$([System.String]::Copy('$(S3910DriverVersion)').Replace('.', ','))</S3910DriverVersionComma>
@@ -29,13 +29,15 @@
     <IntDir>$(MSBuildThisFileDirectory)..\..\..\..\out\syna-s3910\ARM64\Release\obj\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
-    <ClCompile><PreprocessorDefinitions>_UNICODE;UNICODE;POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MinSpace</Optimization></ClCompile>
+    <ClCompile><PreprocessorDefinitions>_UNICODE;UNICODE;POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MinSpace</Optimization><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
+    <Link><GenerateDebugInformation>false</GenerateDebugInformation><Profile>false</Profile></Link>
     <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>$(S3910DriverDate)</DateStamp><TimeStamp>$(S3910DriverVersion)</TimeStamp></Inf>
     <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=$(S3910DriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(S3910DriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\vhidmini.c" /><ClCompile Include="..\hummer_spi.c" /><ClCompile Include="..\hummer_rpmh.c" />
     <ClInclude Include="..\vhidmini.h" /><ClInclude Include="..\hummer_spi.h" /><ClInclude Include="..\hummer_rpmh.h" />
+    <ClInclude Include="..\tap.h" /><ClInclude Include="..\..\..\qcom-keys\haptics.h" />
     <ResourceCompile Include="syna_s3910.rc" /><Inf Include="syna_s3910.inx" /><FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

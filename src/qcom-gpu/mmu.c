@@ -44,23 +44,43 @@ static NTSTATUS Flush(GPU *g,ULONG vm) {
     GpuWrite(cb,0x610,0);GpuWrite(cb,0x7F0,0);
     return GpuPoll(cb,0x7F4,1,0,10000);
 }
-static NTSTATUS MapLocked(GPU *g,ULONG vm,GPU_BO *bo,ULONGLONG address) {
-    if(vm>1 || !bo->Mdl || !address || (address&4095) || address>=GPU_VA_END || bo->Size>GPU_VA_END-address)return STATUS_INVALID_PARAMETER;
+static NTSTATUS MapRangeLocked(GPU *g,ULONG vm,ULONGLONG address,ULONGLONG size,GPU_BO *bo,ULONGLONG offset,BOOLEAN zero,BOOLEAN flush) {
+    if(vm>1 || !size || ((address|size|offset)&4095) || !address || address>=GPU_VA_END || size>GPU_VA_END-address ||
+       (bo && (!bo->Mdl || offset>bo->Size || size>bo->Size-offset)))return STATUS_INVALID_PARAMETER;
     if(!g->Vm[vm].Tables.Mdl || !g->Vm[vm].Tables.Cpu || !g->Registers)return STATUS_DEVICE_NOT_READY;
-    PPFN_NUMBER pfn=MmGetMdlPfnArray(bo->Mdl);
+    if(!bo && zero) {
+        PUCHAR m=g->Registers+0xA0000;
+        if(!g->Prr.Mdl) {
+            NTSTATUS status=GpuAllocate(&g->Prr,4096);if(!NT_SUCCESS(status))return status;
+            GpuWrite(m,0x6008,(ULONG)g->Prr.Physical);GpuWrite(m,0x600C,(ULONG)(g->Prr.Physical>>32));
+        }
+        PUCHAR cb=m+g->CbBase+g->Vm[vm].Bank*4096;
+        ULONG actlr=GpuRead(cb,4);if(!(actlr&32))GpuWrite(cb,4,actlr|32);
+    }
+    BOOLEAN present=bo || zero;
+    for(ULONGLONG at=0;present && at<size;) {
+        ULONGLONG current=address+at;
+        if(!Entry(g->Vm+vm,current,TRUE))return STATUS_INSUFFICIENT_RESOURCES;
+        at+=min(size-at,0x200000-(current&0x1fffff));
+    }
+    PPFN_NUMBER pfn=bo?MmGetMdlPfnArray(bo->Mdl):NULL;
     ULONG attributes=0xE43;
     if(bo==&g->Sqe || bo==&g->Aqe)attributes|=0x80;
     else if(address<(vm?0x60000000:0x44000000))attributes&=~0x40u;
-    bo->Address=address;
-    for(ULONG i=0;i<bo->Size/4096;) {
-        ULONGLONG current=address+((ULONGLONG)i<<12);
-        ULONG count=min(bo->Size/4096-i,512u-(ULONG)((current>>12)&511));
-        PULONGLONG p=Entry(g->Vm+vm,current,TRUE);
-        if(!p){GpuUnmap(g,vm,bo);return STATUS_INSUFFICIENT_RESOURCES;}
-        for(ULONG j=0;j<count;j++)p[j]=((ULONGLONG)pfn[i+j]<<12)|attributes;
-        i+=count;
+    for(ULONGLONG at=0;at<size;) {
+        ULONGLONG current=address+at;
+        ULONG count=(ULONG)(min(size-at,0x200000-(current&0x1fffff))>>12);
+        PULONGLONG p=Entry(g->Vm+vm,current,FALSE);
+        if(p)for(ULONG i=0;i<count;i++)p[i]=bo?((ULONGLONG)pfn[((offset+at)>>12)+i]<<12)|attributes:zero?g->Prr.Physical|attributes:0;
+        at+=(ULONGLONG)count<<12;
     }
-    return Flush(g,vm);
+    return flush?Flush(g,vm):STATUS_SUCCESS;
+}
+static NTSTATUS MapLocked(GPU *g,ULONG vm,GPU_BO *bo,ULONGLONG address) {
+    if(!bo || !bo->Mdl)return STATUS_INVALID_PARAMETER;
+    NTSTATUS status=MapRangeLocked(g,vm,address,bo->Size,bo,0,FALSE,TRUE);
+    if(NT_SUCCESS(status))bo->Address=address;
+    return status;
 }
 static VOID UnmapLocked(GPU *g,ULONG vm,GPU_BO *bo) {
     if(!bo->Address)return;
@@ -113,6 +133,7 @@ static VOID MmuStopLocked(GPU *g) {
     GpuWrite(m,0x800,0);GpuWrite(m,0x804,0);GpuWrite(m,0x814,0);
     GpuWrite(m,g->CbBase,0);GpuWrite(m,g->CbBase+4096,0);
     for(ULONG i=0;i<2;i++)GpuFree(&g->Vm[i].Tables);
+    GpuFree(&g->Prr);
 }
 
 /* MappingLock is a recursive dispatcher mutex. GPU start/stop hold it for
@@ -120,6 +141,18 @@ static VOID MmuStopLocked(GPU *g) {
    Core initialization can map while Online=false once Tables exist. All
    callers are PASSIVE/APC paths; ISR/DPC and Submit never acquire this mutex.
    No function entered under MappingLock acquires the outer Bridge.Lock. */
+NTSTATUS GpuMapRange(GPU *g,ULONG vm,ULONGLONG address,ULONGLONG size,GPU_BO *bo,ULONGLONG offset,BOOLEAN zero,BOOLEAN flush) {
+    if(KeGetCurrentIrql()>APC_LEVEL)return STATUS_INVALID_DEVICE_STATE;
+    KeWaitForSingleObject(&g->MappingLock,Executive,KernelMode,FALSE,NULL);
+    NTSTATUS status=MapRangeLocked(g,vm,address,size,bo,offset,zero,flush);
+    KeReleaseMutex(&g->MappingLock,FALSE);return status;
+}
+NTSTATUS GpuFlushMappings(GPU *g,ULONG vm) {
+    if(vm>1 || KeGetCurrentIrql()>APC_LEVEL)return STATUS_INVALID_PARAMETER;
+    KeWaitForSingleObject(&g->MappingLock,Executive,KernelMode,FALSE,NULL);
+    NTSTATUS status=g->Registers && g->Vm[vm].Tables.Mdl?Flush(g,vm):STATUS_DEVICE_NOT_READY;
+    KeReleaseMutex(&g->MappingLock,FALSE);return status;
+}
 NTSTATUS GpuMap(GPU *g,ULONG vm,GPU_BO *bo,ULONGLONG address) {
     if(KeGetCurrentIrql()>APC_LEVEL)return STATUS_INVALID_DEVICE_STATE;
     KeWaitForSingleObject(&g->MappingLock,Executive,KernelMode,FALSE,NULL);

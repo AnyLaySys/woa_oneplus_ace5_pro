@@ -1071,7 +1071,28 @@ diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.
  #endif
  #ifdef VK_USE_PLATFORM_WAYLAND_KHR
     .KHR_wayland_surface                 = true,
-@@ -1761,6 +1768,11 @@
+@@ -366,6 +373,9 @@
+       .EXT_provoking_vertex = true,
+       .EXT_queue_family_foreign = true,
+       .EXT_rasterization_order_attachment_access = true,
++#ifdef _WIN32
++      .EXT_fragment_shader_interlock = device->info->chip >= 7,
++#endif
+       .EXT_robustness2 = true,
+       .EXT_sample_locations = device->info->props.has_sample_locations,
+       .EXT_sampler_filter_minmax = device->info->props.has_sampler_minmax,
+@@ -819,6 +829,10 @@
+    features->rasterizationOrderColorAttachmentAccess = true;
+    features->rasterizationOrderDepthAttachmentAccess = true;
+    features->rasterizationOrderStencilAttachmentAccess = true;
++#ifdef _WIN32
++   features->fragmentShaderPixelInterlock = pdevice->info->chip >= 7;
++   features->fragmentShaderSampleInterlock = pdevice->info->chip >= 7;
++#endif
+
+    /* VK_KHR_ray_query */
+    features->rayQuery = true;
+@@ -1761,6 +1775,11 @@
     device->level1_dcache_size = util_cache_granularity();
     device->has_cached_non_coherent_memory =
        device->level1_dcache_size > 0 && !DETECT_ARCH_ARM;
@@ -1083,7 +1104,7 @@ diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.
     device->preferred_uncached_as_cached_index = -1;
 
     device->memory.type_count = 1;
-@@ -1896,6 +1908,9 @@
+@@ -1896,6 +1915,9 @@
     tu_wsi_finish(device);
  #endif
 
@@ -1093,7 +1114,7 @@ diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.
     close(device->local_fd);
     if (device->master_fd != -1)
        close(device->master_fd);
-@@ -1903,6 +1918,7 @@
+@@ -1903,6 +1925,7 @@
     if (device->kgsl_dma_fd != -1)
        close(device->kgsl_dma_fd);
 
@@ -1101,7 +1122,7 @@ diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.
     disk_cache_destroy(device->vk.disk_cache);
     vk_free(&device->instance->vk.alloc, (void *)device->name);
 
-@@ -2785,7 +2801,7 @@
+@@ -2785,7 +2808,7 @@
 
     u_rwlock_destroy(&device->dma_bo_lock);
     u_rwlock_destroy(&device->vm_bind_fence_lock);
@@ -1110,7 +1131,7 @@ diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.
 
     if (device->physical_device->has_set_iova) {
        mtx_destroy(&device->vma_mutex);
-@@ -2902,7 +2918,7 @@
+@@ -2902,7 +2925,7 @@
 
     u_rwlock_init(&device->dma_bo_lock);
     u_rwlock_init(&device->vm_bind_fence_lock);
@@ -1119,7 +1140,7 @@ diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.
     device->vm_bind_fence_fd = -1;
 
     if (physical_device->has_set_iova) {
-@@ -3031,12 +3047,12 @@
+@@ -3031,12 +3054,12 @@
     }
 
     tu_bo_suballocator_init(&device->event_suballoc, device,
@@ -1134,7 +1155,7 @@ diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.
        (enum tu_bo_alloc_flags)(TU_BO_ALLOC_INTERNAL_RESOURCE |
                                 TU_BO_ALLOC_ALLOW_DUMP),
        "vis_stream_suballoc");
-@@ -3167,28 +3183,10 @@
+@@ -3167,28 +3190,10 @@
     tu_init_dbg_reg_stomper(device);
 
     /* Initialize a condition variable for timeline semaphore */
@@ -1165,7 +1186,7 @@ diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.
 
     device->use_z24uint_s8uint =
        physical_device->info->props.has_z24uint_s8uint &&
-@@ -3405,7 +3403,7 @@
+@@ -3405,7 +3410,7 @@
 
     u_vector_finish(&device->zombie_vmas);
 
@@ -1418,7 +1439,43 @@ diff --git a/src/freedreno/vulkan/tu_shader.cc b/src/freedreno/vulkan/tu_shader.
        return result;
     }
 
-@@ -3809,10 +3809,10 @@
+@@ -3352,6 +3352,20 @@
+       lower_alpha_to_coverage(nir);
+ }
+
++static bool
++lower_interlock(nir_builder *b, nir_intrinsic_instr *intr, void *)
++{
++   bool begin = intr->intrinsic == nir_intrinsic_begin_invocation_interlock;
++   if (!begin && intr->intrinsic != nir_intrinsic_end_invocation_interlock)
++      return false;
++   b->cursor = nir_before_instr(&intr->instr);
++   nir_barrier(b, SCOPE_NONE, SCOPE_DEVICE,
++      begin ? NIR_MEMORY_ACQUIRE : NIR_MEMORY_RELEASE,
++      nir_var_mem_ssbo | nir_var_image | nir_var_mem_global);
++   nir_instr_remove(&intr->instr);
++   return true;
++}
++
+ VkResult
+ tu_shader_create(struct tu_device *dev,
+                  struct tu_shader **shader_out,
+@@ -3370,6 +3384,14 @@
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+    shader->per_layer_viewport = info->per_layer_viewport;
++   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
++      shader->fs.interlock = nir->info.fs.pixel_interlock_ordered ||
++         nir->info.fs.pixel_interlock_unordered ||
++         nir->info.fs.sample_interlock_ordered ||
++         nir->info.fs.sample_interlock_unordered;
++      if (shader->fs.interlock)
++         NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_interlock, nir_metadata_none, NULL);
++   }
+
+    if (nir->info.stage == MESA_SHADER_FRAGMENT &&
+        key->fdm_per_layer) {
+@@ -3809,10 +3831,10 @@
     if (!shader)
        return VK_ERROR_OUT_OF_HOST_MEMORY;
 
@@ -1431,7 +1488,7 @@ diff --git a/src/freedreno/vulkan/tu_shader.cc b/src/freedreno/vulkan/tu_shader.
 
     if (result != VK_SUCCESS) {
        vk_free(&dev->vk.alloc, shader);
-@@ -3923,9 +3923,9 @@
+@@ -3923,9 +3945,9 @@
     tu_cs_finish(&shader->cs);
     TU_RMV(resource_destroy, dev, &shader->bo);
 
@@ -2134,3 +2191,54 @@ diff --git a/src/vulkan/util/vk_entrypoints_gen.py b/src/vulkan/util/vk_entrypoi
  #ifdef _M_IX86
        % for args_size in [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 60, 104]:
      #pragma comment(linker, "/alternatename:_${p}_${e.name}@${args_size}=_vk_entrypoint_stub@0")
+diff --git a/src/freedreno/vulkan/tu_shader.h b/src/freedreno/vulkan/tu_shader.h
+--- a/src/freedreno/vulkan/tu_shader.h
++++ b/src/freedreno/vulkan/tu_shader.h
+@@ -104,6 +104,7 @@
+           * VkPipelineMultisampleStateCreateInfo->sampleShadingEnable.
+           */
+          bool sample_shading;
++         bool interlock;
+          bool has_fdm;
+
+          uint16_t dynamic_input_attachments_used;
+diff --git a/src/freedreno/vulkan/tu_pipeline.cc b/src/freedreno/vulkan/tu_pipeline.cc
+--- a/src/freedreno/vulkan/tu_pipeline.cc
++++ b/src/freedreno/vulkan/tu_pipeline.cc
+@@ -3780,7 +3780,7 @@
+     */
+    enum a6xx_single_prim_mode sysmem_prim_mode =
+       (raster_order_attachment_access || feedback_loops ||
+-       fs->fs.dynamic_input_attachments_used) ?
++       (fs && (fs->fs.interlock || fs->fs.dynamic_input_attachments_used))) ?
+       FLUSH_PER_OVERLAP_AND_OVERWRITE : NO_FLUSH;
+
+    if (sysmem_prim_mode == FLUSH_PER_OVERLAP_AND_OVERWRITE)
+@@ -4066,7 +4066,7 @@
+          (lib->state &
+           VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT);
+    }
+-   if (!builder->device->physical_device->info->props.has_coherent_ubwc_flag_caches) {
++   {
+       DRAW_STATE_COND(prim_mode_sysmem,
+                       TU_DYNAMIC_STATE_PRIM_MODE_SYSMEM,
+                       has_raster_order_state,
+@@ -4329,7 +4329,7 @@
+                    cmd->state.shaders[MESA_SHADER_TESS_EVAL],
+                    &cmd->state.program,
+                    cmd->vk.dynamic_graphics_state.ts.patch_control_points);
+-   if (!cmd->device->physical_device->info->props.has_coherent_ubwc_flag_caches) {
++   {
+       DRAW_STATE_COND(prim_mode_sysmem,
+                       TU_DYNAMIC_STATE_PRIM_MODE_SYSMEM,
+                       cmd->state.dirty & (TU_CMD_DIRTY_RAST_ORDER |
+@@ -4426,7 +4426,8 @@
+
+    enum a6xx_single_prim_mode gmem_prim_mode = NO_FLUSH;
+
+-   if (raster_order_attachment_access) {
++   struct tu_shader *fs = pipeline->shaders[MESA_SHADER_FRAGMENT];
++   if (raster_order_attachment_access || (fs && fs->fs.interlock)) {
+       /* VK_EXT_rasterization_order_attachment_access:
+        *
+        * This extension allow access to framebuffer attachments when used as

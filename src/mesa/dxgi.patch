@@ -1,0 +1,131 @@
+--- a/subprojects/libdisplay-info/meson.build
++++ b/subprojects/libdisplay-info/meson.build
+@@ -23,7 +23,7 @@
+ 
+ math = cc.find_library('m', required: false)
+ 
+-if cc.get_id() != 'msvc'
++if cc.get_argument_syntax() != 'msvc'
+ 	add_project_arguments(['-D_POSIX_C_SOURCE=200809L'], language: 'c')
+ 	add_project_arguments(['-Dstatic_array=static'], language: 'c')
+ else
+--- a/meson.build
++++ b/meson.build
+@@ -94,12 +94,8 @@
+   else
+     # setup file alignment + enable PDB output for MSVC builds
+     # PDBs are useful for Windows consumers of DXVK 
+-    compiler_args += [
+-      '/Z7'
+-    ]
+     link_args += [
+-      '/FILEALIGN:4096',
+-      '/DEBUG:FULL'
++      '/FILEALIGN:4096'
+     ]
+   endif
+ 
+--- a/src/util/log/log_debug.h
++++ b/src/util/log/log_debug.h
+@@ -10,7 +10,9 @@
+ #define METHOD_NAME __PRETTY_FUNCTION__
+ #endif
+ 
++#ifndef DXVK_NO_LOG
+ #define TRACE_ENABLED
++#endif
+ 
+ #ifdef TRACE_ENABLED
+ #define TRACE(...) \
+--- a/src/util/log/log.h
++++ b/src/util/log/log.h
+@@ -28,6 +28,21 @@
+    * Logger for one DLL. Creates a text file and
+    * writes all log messages to that file.
+    */
++#ifdef DXVK_NO_LOG
++  class Logger {
++  public:
++    Logger(const std::string&) { }
++    static void trace(const std::string&) { }
++    static void debug(const std::string&) { }
++    static void info(const std::string&) { }
++    static void warn(const std::string&) { }
++    static void err(const std::string&) { }
++    static void log(LogLevel, const std::string&) { }
++    static LogLevel logLevel() { return LogLevel::None; }
++  private:
++    static Logger s_instance;
++  };
++#else
+   class Logger {
+     
+   public:
+@@ -69,5 +84,6 @@
+     static LogLevel getMinLogLevel();
+ 
+   };
++#endif
+   
+ }
+--- a/src/util/log/log.cpp
++++ b/src/util/log/log.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "../util_env.h"
+ 
++#ifndef DXVK_NO_LOG
+ namespace dxvk {
+   
+   Logger::Logger(const std::string& fileName)
+@@ -163,3 +164,5 @@
+   }
+   
+ }
++
++#endif
+diff --git a/src/vulkan/meson.build b/src/vulkan/meson.build
+index b9d586f..61deea7 100644
+--- a/src/vulkan/meson.build
++++ b/src/vulkan/meson.build
+@@ -4,6 +4,9 @@ vkcommon_src = files([
+ ])
+ 
+ thread_dep = dependency('threads')
++if platform == 'windows'
++  thread_dep = [ thread_dep, cpp.find_library('advapi32') ]
++endif
+ 
+ vkcommon_lib = static_library('vkcommon', vkcommon_src,
+   dependencies        : [ thread_dep ],
+diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+index f9d1e98..9aadaad 100644
+--- a/src/vulkan/vulkan_loader.cpp
++++ b/src/vulkan/vulkan_loader.cpp
+@@ -7,9 +7,18 @@
+ #include "../util/util_string.h"
+ #include "../util/util_win32_compat.h"
+ 
++#ifdef _WIN32
++#include "qcom_vulkan.h"
++#endif
++
+ namespace dxvk::vk {
+ 
+   static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadVulkanLibrary() {
++#ifdef _WIN32
++    HMODULE library = qcom_load_vulkan();
++    auto proc = library ? GetProcAddress(library, "vk_icdGetInstanceProcAddr") : nullptr;
++    return std::make_pair(library, reinterpret_cast<PFN_vkGetInstanceProcAddr>(proc));
++#else
+     static const std::array<const char*, 2> dllNames = {{
+ #ifdef _WIN32
+       "winevulkan.dll",
+@@ -39,6 +48,7 @@ namespace dxvk::vk {
+ 
+     Logger::err("Vulkan: vkGetInstanceProcAddr not found");
+     return { };
++#endif
+   }
+ 
+   LibraryLoader::LibraryLoader() {

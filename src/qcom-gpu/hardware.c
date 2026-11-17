@@ -5,6 +5,7 @@ VOID GpuInitialize(GPU *g,GPU_SYNCHRONIZE synchronize,PVOID host) {
     RtlZeroMemory(g,sizeof(*g));g->Synchronize=synchronize;g->Host=host;
     KeInitializeEvent(&g->Event,SynchronizationEvent,FALSE);KeInitializeSpinLock(&g->RingLock);
     KeInitializeMutex(&g->MappingLock,0);
+    KeInitializeMutex(&g->PowerLock,0);g->Temperature=MINLONG;
 }
 ULONG GpuRead(PUCHAR base,ULONG offset) {
     return READ_REGISTER_ULONG((PULONG)(base+offset));

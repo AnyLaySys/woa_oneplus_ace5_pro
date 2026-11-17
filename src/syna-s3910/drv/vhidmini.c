@@ -73,7 +73,8 @@ NTSTATUS EvtDeviceAdd(WDFDRIVER driver,PWDFDEVICE_INIT init) {
     status=WdfIoQueueCreate(device,&queue,WDF_NO_OBJECT_ATTRIBUTES,WDF_NO_HANDLE);
     if(!NT_SUCCESS(status))return status;
     WDF_IO_QUEUE_CONFIG_INIT(&queue,WdfIoQueueDispatchManual);
-    return WdfIoQueueCreate(device,&queue,WDF_NO_OBJECT_ATTRIBUTES,&d->Reports);
+    status=WdfIoQueueCreate(device,&queue,WDF_NO_OBJECT_ATTRIBUTES,&d->Reports);
+    return NT_SUCCESS(status)?WdfIoTargetCreate(device,WDF_NO_OBJECT_ATTRIBUTES,&d->Haptics):status;
 }
 NTSTATUS OnPrepareHardware(WDFDEVICE device,WDFCMRESLIST raw,WDFCMRESLIST resources) {
     UNREFERENCED_PARAMETER(raw);
@@ -95,6 +96,7 @@ static NTSTATUS Stop(PDEVICE_CONTEXT d) {
     InterlockedExchange(&d->Stopping,1);
     if(d->InitTimer)WdfTimerStop(d->InitTimer,TRUE);
     if(d->PollTimer)WdfTimerStop(d->PollTimer,TRUE);
+    RtlZeroMemory(&d->Tap,sizeof(d->Tap));
     d->Ready=FALSE;
     if(d->Spi) {
         NTSTATUS status=HspDeinit(d->Spi);
@@ -117,6 +119,7 @@ NTSTATUS OnD0Exit(WDFDEVICE device,WDF_POWER_DEVICE_STATE state) {
 }
 static NTSTATUS CreateTimer(PDEVICE_CONTEXT d,PFN_WDF_TIMER callback,BOOLEAN serialized,WDFTIMER *timer) {
     WDF_TIMER_CONFIG config;WDF_TIMER_CONFIG_INIT(&config,callback);config.AutomaticSerialization=serialized;
+    config.UseHighResolutionTimer=callback==PollTimer;
     WDF_OBJECT_ATTRIBUTES attributes;WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
     attributes.ParentObject=d->Device;attributes.ExecutionLevel=WdfExecutionLevelPassive;
     return WdfTimerCreate(&config,&attributes,timer);
@@ -189,10 +192,22 @@ static VOID InitializeTimer(WDFTIMER timer) {
         (status==STATUS_INSUFFICIENT_RESOURCES || status==STATUS_IO_TIMEOUT || status==STATUS_DEVICE_BUSY) &&
         !InterlockedCompareExchange(&d->Stopping,0,0))WdfTimerStart(timer,WDF_REL_TIMEOUT_IN_MS(1000));
 }
+static VOID Pulse(PDEVICE_CONTEXT d,ULONG voltage) {
+    UNICODE_STRING name=RTL_CONSTANT_STRING(L"\\Device\\QcomHaptics");WDF_IO_TARGET_OPEN_PARAMS p;
+    WDF_IO_TARGET_OPEN_PARAMS_INIT_OPEN_BY_NAME(&p,&name,GENERIC_WRITE);p.ShareAccess=FILE_SHARE_READ|FILE_SHARE_WRITE;
+    if(!NT_SUCCESS(WdfIoTargetOpen(d->Haptics,&p)))return;
+    WDF_REQUEST_SEND_OPTIONS options;WDF_REQUEST_SEND_OPTIONS_INIT(&options,WDF_REQUEST_SEND_OPTION_TIMEOUT);
+    WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&options,WDF_REL_TIMEOUT_IN_MS(10));
+    WDF_MEMORY_DESCRIPTOR input;WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&input,&voltage,sizeof(voltage));
+    WdfIoTargetSendIoctlSynchronously(d->Haptics,NULL,QH_PULSE,&input,NULL,&options,NULL);
+    WdfIoTargetClose(d->Haptics);
+}
 static VOID PollTimer(WDFTIMER timer) {
     PDEVICE_CONTEXT d=GetDeviceContext(WdfTimerGetParentObject(timer));
     if(!d->Ready || InterlockedCompareExchange(&d->Stopping,0,0))return;
-    if(NT_SUCCESS(Transfer(d,NULL,d->Reply,S3910_TOUCH_BYTES)) && d->Reply[1]==0x11) {
+    ULONG pressed=0;
+    NTSTATUS transfer=Transfer(d,NULL,d->Reply,S3910_TOUCH_BYTES);
+    if(NT_SUCCESS(transfer) && d->Reply[1]==0x11) {
         UCHAR count=d->Reply[2];
         if(count>=0x1f && (count-0x1f)%12==0) {
             count=(count-0x1f)/12;
@@ -208,12 +223,18 @@ static VOID PollTimer(WDFTIMER timer) {
                     report.Points[i][2]=(UCHAR)x;report.Points[i][3]=(UCHAR)(x>>8);
                     report.Points[i][4]=(UCHAR)y;report.Points[i][5]=(UCHAR)(y>>8);
                 }
+                pressed=TapUpdate(&d->Tap,KeQueryInterruptTime(),count,report.Points);
                 WDFREQUEST request;
                 if(NT_SUCCESS(WdfIoQueueRetrieveNextRequest(d->Reports,&request))) {
                     NTSTATUS status=CopyReport(request,&report,sizeof(report));WdfRequestComplete(request,status);
                 }
             }
         }
+    } else if(!NT_SUCCESS(transfer))d->Tap.Pending=0;
+    ULONG held=TapHold(&d->Tap,KeQueryInterruptTime());
+    for(UCHAR i=0;i<16 && !InterlockedCompareExchange(&d->Stopping,0,0);i++) {
+        if(pressed&(1u<<i))Pulse(d,800);
+        if(held&(1u<<i))Pulse(d,1200);
     }
     if(d->Ready && !InterlockedCompareExchange(&d->Stopping,0,0))WdfTimerStart(timer,WDF_REL_TIMEOUT_IN_MS(8));
 }

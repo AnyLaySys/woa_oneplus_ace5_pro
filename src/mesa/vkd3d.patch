@@ -1,0 +1,228 @@
+--- a/include/private/vkd3d_common.h
++++ b/include/private/vkd3d_common.h
+@@ -332,13 +332,13 @@
+ #endif
+ }
+ 
+-#ifdef _MSC_VER
++#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+ #pragma intrinsic(__rdtsc)
+ #endif
+ 
+ static inline uint64_t vkd3d_get_current_time_ticks(void)
+ {
+-#ifdef _MSC_VER
++#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+     return __rdtsc();
+ #elif defined(__i386__) || (defined(__x86_64__) && !defined(__arm64ec__))
+     return __builtin_ia32_rdtsc();
+--- a/include/private/vkd3d_debug.h
++++ b/include/private/vkd3d_debug.h
+@@ -111,14 +111,19 @@
+ #define FIXME VKD3D_DBG_LOG(FIXME)
+ #endif
+ 
++#ifdef VKD3D_NO_DEBUG_MESSAGES
++#define ERR(...) do { } while (0)
++#define INFO(...) do { } while (0)
++#define FIXME_ONCE(...) do { } while (0)
++#else
+ #define ERR   VKD3D_DBG_LOG(ERR)
+ #define INFO  VKD3D_DBG_LOG(INFO)
++#define FIXME_ONCE VKD3D_DBG_LOG_ONCE(FIXME, TRACE)
++#endif
+ 
+ #ifndef TRACE_ON
+ #define TRACE_ON() (vkd3d_dbg_get_level(VKD3D_DBG_CHANNEL) == VKD3D_DBG_LEVEL_TRACE)
+ #endif
+-
+-#define FIXME_ONCE VKD3D_DBG_LOG_ONCE(FIXME, TRACE)
+ 
+ static inline const char *debugstr_guid(const GUID *guid)
+ {
+--- a/subprojects/dxil-spirv/debug/logging.hpp
++++ b/subprojects/dxil-spirv/debug/logging.hpp
+@@ -102,6 +102,11 @@
+ void *get_thread_log_callback_userdata();
+ }
+ 
++#ifdef VKD3D_NO_DEBUG_MESSAGES
++#define LOGI(...) do { } while (0)
++#define LOGW(...) do { } while (0)
++#define LOGE(...) do { } while (0)
++#else
+ #define LOGI(...) do {                                                                           \
+ 	if (auto *cb = ::dxil_spv::get_thread_log_callback())                                        \
+ 	{                                                                                            \
+@@ -142,3 +147,5 @@
+ } while(0)
+ 
+ 
++
++#endif
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index 14ed4f8..8185fa4 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -3205,6 +3205,14 @@ static HRESULT vkd3d_create_vk_device(struct d3d12_device *device,
+             user_extension_supported);
+ 
+     vkd3d_physical_device_info_init(&device->device_info, device);
++
++#ifdef _WIN32
++    if (device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_MESA_TURNIP)
++    {
++        device->vk_info.KHR_present_wait = device->vk_info.KHR_present_wait2 = false;
++        device->device_info.present_wait_features.presentWait = device->device_info.present_wait2_features.presentWait2 = false;
++    }
++#endif
+     vkd3d_physical_device_info_apply_workarounds(&device->device_info, device);
+ 
+     if (FAILED(hr = vkd3d_init_device_caps(device, create_info, &device->device_info)))
+@@ -10967,6 +10975,12 @@ HRESULT d3d12_device_create(struct vkd3d_instance *instance,
+                 return DXGI_ERROR_ALREADY_EXISTS;
+             }
+ 
++            if (!d3d12_device_supports_feature_level(object, create_info->minimum_feature_level))
++            {
++                pthread_mutex_unlock(&d3d12_device_map_mutex);
++                return E_INVALIDARG;
++            }
++
+             d3d12_device_add_ref(*device = object);
+             pthread_mutex_unlock(&d3d12_device_map_mutex);
+             return S_OK;
+diff --git a/libs/d3d12/main.c b/libs/d3d12/main.c
+index 6bc2455..6613829 100644
+--- a/libs/d3d12/main.c
++++ b/libs/d3d12/main.c
+@@ -49,6 +49,10 @@
+ 
+ #include <inttypes.h>
+ 
++#ifdef _WIN32
++#include "d3d12_dxgi.h"
++#endif
++
+ static pthread_once_t library_once = PTHREAD_ONCE_INIT;
+ 
+ static vkd3d_module_t d3d12core_module = NULL;
+@@ -74,7 +78,12 @@ static bool load_d3d12core_module(const char *module_name)
+         /* We link directly to d3d12core, however we still need to dlopen + dlsym
+          * as both shared libraries export D3D12GetInterface, so we need to do this
+          * to avoid confusing the linker. */
+-        if ((d3d12core_module = vkd3d_dlopen(module_name)))
++#ifdef _WIN32
++        d3d12core_module = load_d3d12_sibling(module_name);
++#else
++        d3d12core_module = vkd3d_dlopen(module_name);
++#endif
++        if (d3d12core_module)
+             d3d12core_D3D12GetInterface = (PFN_D3D12_GET_INTERFACE)vkd3d_dlsym(d3d12core_module, "D3D12GetInterface");
+ 
+         if (!d3d12core_D3D12GetInterface)
+@@ -113,19 +122,15 @@ static void load_d3d12core_once(void)
+ {
+     bool ret;
+ 
+-    ret = load_d3d12core_module(SONAME_D3D12CORE);
+ #ifdef _WIN32
+-    if (!ret)
+-    {
+-        /* Fallback to loading directly from the system32 dir, to handle
+-         * the case where a game ships a D3D12Core.dll next to
+-         * their executable. */
+-        char buf[VKD3D_PATH_MAX];
+-        GetSystemDirectoryA(buf, sizeof(buf));
+-        vkd3d_strlcat(buf, sizeof(buf), "\\" SONAME_D3D12CORE);
+-
+-        ret = load_d3d12core_module(buf);
+-    }
++    install_dxgi();
++#endif
++#ifdef _M_ARM64
++    ret = load_d3d12core_module("qcom_d3d12core_arm64.dll");
++#elif defined(_WIN32)
++    ret = load_d3d12core_module("qcom_d3d12core_x64.dll");
++#else
++    ret = load_d3d12core_module(SONAME_D3D12CORE);
+ #endif
+ 
+     if (!ret)
+@@ -146,6 +151,13 @@ HRESULT WINAPI DLLEXPORT D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL
+     TRACE("adapter %p, minimum_feature_level %#x, iid %s, device %p.\n",
+             adapter, minimum_feature_level, debugstr_guid(iid), device);
+ 
++#ifdef _WIN32
++    if (d3d12_software_adapter(adapter))
++    {
++        pthread_once(&d3d12_system_once, load_d3d12_system);
++        return d3d12_system_create ? d3d12_system_create(adapter, minimum_feature_level, iid, device) : E_NOINTERFACE;
++    }
++#endif
+     if (!load_d3d12core())
+         return E_NOINTERFACE;
+     return IVKD3DCoreInterface_CreateDevice(core, adapter, minimum_feature_level, iid, device);
+diff --git a/libs/d3d12core/main.c b/libs/d3d12core/main.c
+index fa299e3..4250915 100644
+--- a/libs/d3d12core/main.c
++++ b/libs/d3d12core/main.c
+@@ -316,6 +316,10 @@ static void passthrough_unix_environment(const char *env_name)
+ }
+ #endif
+ 
++#ifdef _WIN32
++#include "qcom_vulkan.h"
++#endif
++
+ static void load_modules_once(void)
+ {
+ #ifdef _WIN32
+@@ -332,31 +336,9 @@ static void load_modules_once(void)
+     if (!vulkan_module)
+     {
+ #ifdef _WIN32
+-        /* If possible, load winevulkan directly in order to bypass
+-         * issues with third-party overlays hooking the Vulkan loader */
+-        static const char *vulkan_dllnames[] =
+-        {
+-            "winevulkan.dll",
+-            "vulkan-1.dll",
+-        };
+-
+-        unsigned int i;
+-
+-        for (i = 0; i < ARRAY_SIZE(vulkan_dllnames); i++)
+-        {
+-            vulkan_module = LoadLibraryA(vulkan_dllnames[i]);
+-
+-            if (vulkan_module)
+-            {
+-                vulkan_vkGetInstanceProcAddr = (void*)GetProcAddress(vulkan_module, "vkGetInstanceProcAddr");
+-
+-                if (vulkan_vkGetInstanceProcAddr)
+-                    break;
+-
+-                FreeLibrary(vulkan_module);
+-                vulkan_module = NULL;
+-            }
+-        }
++        vulkan_module = qcom_load_vulkan();
++        if (vulkan_module)
++            vulkan_vkGetInstanceProcAddr = (void *)GetProcAddress(vulkan_module, "vk_icdGetInstanceProcAddr");
+ #else
+         vulkan_module = dlopen(SONAME_LIBVULKAN, RTLD_LAZY);
+         vulkan_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(vulkan_module, "vkGetInstanceProcAddr");
+diff --git a/libs/d3d12core/meson.build b/libs/d3d12core/meson.build
+index dd1f779..a3d2b58 100644
+--- a/libs/d3d12core/meson.build
++++ b/libs/d3d12core/meson.build
+@@ -5,7 +5,7 @@ d3d12core_src = [
+ 
+ if vkd3d_platform == 'windows'
+   d3d12core_name_prefix = ''
+-  d3d12core_dependencies = [ vkd3d_dep, lib_gdi32, lib_dxgi ]
++  d3d12core_dependencies = [ vkd3d_dep, lib_gdi32, lib_dxgi, vkd3d_compiler.find_library('advapi32') ]
+ else
+   d3d12core_name_prefix = 'libvkd3d-proton-'
+   d3d12core_dependencies = [ vkd3d_dep, lib_dl ]

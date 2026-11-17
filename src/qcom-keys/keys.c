@@ -1,6 +1,8 @@
 #include <ntddk.h>
 #include <wdf.h>
 #include <hidport.h>
+#include "haptics.h"
+#include "feedback.h"
 
 DRIVER_INITIALIZE DriverEntry;
 static EVT_WDF_DRIVER_DEVICE_ADD AddDevice;
@@ -23,6 +25,14 @@ typedef struct {
     volatile LONG Online;
     UCHAR State,Candidate,Debounce[3],Failures,Head,Count;
     REPORT Pending[16];
+    PUCHAR HapticObserve[2],HapticChannel[2];
+    WDFDEVICE HapticDevice;
+    WDFTIMER HapticTimer;
+    NTSTATUS HapticStatus;
+    ULONGLONG HapticDue;
+    UCHAR HapticVoltage,HapticRepeat,HapticPhase;
+    WDFIOTARGET Audio;
+    KEY_FEEDBACK Feedback;
 } KEYS;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(KEYS,Context);
 static const ULONG Bases[]={0x0c400000,0x0c42d000,0x0c440000,0x0c500000,0x0b220000};
@@ -52,6 +62,7 @@ static NTSTATUS Transfer(PUCHAR base,UCHAR reg,UCHAR *value,BOOLEAN write) {
     }
     return STATUS_IO_TIMEOUT;
 }
+#include "haptics.inc"
 static NTSTATUS SetInterrupts(KEYS *k,BOOLEAN on) {
     NTSTATUS result=STATUS_SUCCESS;
     for(ULONG i=0;i<2;i++) {
@@ -94,11 +105,21 @@ static VOID Put(KEYS *k,UCHAR id,UCHAR value) {
     REPORT *r=&k->Pending[(k->Head+k->Count)&15];
     r->Id=id;r->Value=value;k->Count++;
 }
-static VOID Update(KEYS *k,UCHAR state) {
+static VOID Update(KEYS *k,UCHAR state,BOOLEAN repeat) {
     Flush(k);
-    if(k->Count==RTL_NUMBER_OF(k->Pending))return;
-    if(k->State!=state)Put(k,1,state);
+    if(k->Count>RTL_NUMBER_OF(k->Pending)-2)return;
+    if(k->State!=state || repeat){Put(k,1,state);if(state==2 || state==4)Put(k,1,0);}
     k->State=state;Flush(k);
+}
+static ULONG VolumeLimits(KEYS *k) {
+    ULONG limits=0;UNICODE_STRING name=RTL_CONSTANT_STRING(L"\\Device\\AlsCharge");WDF_IO_TARGET_OPEN_PARAMS p;
+    WDF_IO_TARGET_OPEN_PARAMS_INIT_OPEN_BY_NAME(&p,&name,GENERIC_READ);p.ShareAccess=FILE_SHARE_READ|FILE_SHARE_WRITE;
+    if(!NT_SUCCESS(WdfIoTargetOpen(k->Audio,&p)))return 0;
+    WDF_MEMORY_DESCRIPTOR output;WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&output,&limits,sizeof(limits));
+    WDF_REQUEST_SEND_OPTIONS options;WDF_REQUEST_SEND_OPTIONS_INIT(&options,WDF_REQUEST_SEND_OPTION_TIMEOUT);
+    WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&options,WDF_REL_TIMEOUT_IN_MS(10));
+    NTSTATUS status=WdfIoTargetSendIoctlSynchronously(k->Audio,NULL,QH_VOLUME,NULL,&output,&options,NULL);
+    WdfIoTargetClose(k->Audio);return NT_SUCCESS(status)?limits:0;
 }
 static VOID Poll(WDFTIMER timer) {
     KEYS *k=Context(WdfTimerGetParentObject(timer));
@@ -113,14 +134,24 @@ static VOID Poll(WDFTIMER timer) {
             if(k->Debounce[i]<4)k->Debounce[i]++;
             if(k->Debounce[i]==4)state=(state&~bit)|(sample&bit);
         }
-        k->Candidate=sample;Update(k,state);
+        k->Candidate=sample;Update(k,state,FALSE);
     } else {
         RtlZeroMemory(k->Debounce,sizeof(k->Debounce));
         if(k->Failures<4)k->Failures++;
-        if(k->Failures==4)Update(k,0);
+        if(k->Failures==4)Update(k,0,FALSE);
     }
-    if(k->Online&&(k->Failures||k->State!=k->Candidate||k->Debounce[0]<4||k->Debounce[1]<4||k->Debounce[2]<4))
-        WdfTimerStart(timer,WDF_REL_TIMEOUT_IN_MS(k->Failures?100:10));
+    if(k->Failures)RtlZeroMemory(&k->Feedback,sizeof(k->Feedback));
+    ULONGLONG now=KeQueryInterruptTime();ULONG limits=0;
+    if(k->Feedback.Volume && now>=k->Feedback.VolumeAt && now-k->Feedback.VolumeAt>=2700000)limits=VolumeLimits(k);
+    ULONG action=k->Failures?0:KeyFeedback(&k->Feedback,k->State,now,limits);
+    if(action&4)Update(k,k->State,TRUE);
+    if(action&2){if(NT_SUCCESS(HapticPulse(k,1200,2)))k->Feedback.Limited=2;}
+    else if(action&1)HapticPulse(k,800,1);
+    if(k->Online&&(k->State||k->Failures||k->State!=k->Candidate||k->Debounce[0]<4||k->Debounce[1]<4||k->Debounce[2]<4)) {
+        ULONG delay=k->Failures?100:10;now=KeQueryInterruptTime();
+        if(k->Feedback.Volume && !k->Feedback.Limited && now<k->Feedback.RepeatDue)delay=min(delay,(ULONG)((k->Feedback.RepeatDue-now+9999)/10000));
+        WdfTimerStart(timer,WDF_REL_TIMEOUT_IN_MS(delay));
+    }
 }
 static BOOLEAN Isr(WDFINTERRUPT interrupt,ULONG message) {
     UNREFERENCED_PARAMETER(message);
@@ -191,6 +222,8 @@ static NTSTATUS Start(WDFDEVICE device,WDF_POWER_DEVICE_STATE previous) {
     Write(k->Base[4],0x114,(k->PdcConfig&~7u)|4|(k->PdcBank?0:8));
     if(k->PdcBank){k->PdcEnable=Read(k->Base[4],0x10);Write(k->Base[4],0x10,k->PdcEnable|2);}
     k->Candidate=0;k->Failures=0;RtlZeroMemory(k->Debounce,sizeof(k->Debounce));
+    RtlZeroMemory(&k->Feedback,sizeof(k->Feedback));
+    HapticPrepare(k);
     InterlockedExchange(&k->Online,1);
     WdfTimerStart(k->Timer,WDF_REL_TIMEOUT_IN_MS(10));return STATUS_SUCCESS;
 }
@@ -198,10 +231,13 @@ static NTSTATUS Stop(WDFDEVICE device,WDF_POWER_DEVICE_STATE next) {
     UNREFERENCED_PARAMETER(next);
     KEYS *k=Context(device);
     InterlockedExchange(&k->Online,0);WdfTimerStop(k->Timer,TRUE);
+    WdfTimerStop(k->HapticTimer,TRUE);
     WdfObjectAcquireLock(device);
+    if(k->HapticPhase)HapticOff(k);
     SetInterrupts(k,FALSE);
     if(k->PdcSaved){Write(k->Base[4],0x114,k->PdcConfig);if(k->PdcBank)Write(k->Base[4],0x10,k->PdcEnable);k->PdcSaved=FALSE;}
     k->Head=0;k->Count=0;k->State=0;Put(k,1,0);Flush(k);
+    RtlZeroMemory(&k->Feedback,sizeof(k->Feedback));k->HapticRepeat=0;
     WdfObjectReleaseLock(device);return STATUS_SUCCESS;
 }
 static NTSTATUS Release(WDFDEVICE device,WDFCMRESLIST resources) {
@@ -241,6 +277,7 @@ static NTSTATUS AddDevice(WDFDRIVER driver,PWDFDEVICE_INIT init) {
     p.EvtDevicePrepareHardware=Prepare;p.EvtDeviceReleaseHardware=Release;p.EvtDeviceD0Entry=Start;p.EvtDeviceD0Exit=Stop;
     WdfFdoInitSetFilter(init);WdfDeviceInitSetPnpPowerEventCallbacks(init,&p);
     WDF_OBJECT_ATTRIBUTES a;WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&a,KEYS);
+    a.EvtCleanupCallback=HapticCleanup;
     a.SynchronizationScope=WdfSynchronizationScopeDevice;a.ExecutionLevel=WdfExecutionLevelPassive;
     WDFDEVICE device;NTSTATUS status=WdfDeviceCreate(&init,&a,&device);
     if(!NT_SUCCESS(status))return status;
@@ -253,9 +290,11 @@ static NTSTATUS AddDevice(WDFDRIVER driver,PWDFDEVICE_INIT init) {
     status=WdfIoQueueCreate(device,&q,WDF_NO_OBJECT_ATTRIBUTES,&k->Reads);
     if(!NT_SUCCESS(status))return status;
     WDF_TIMER_CONFIG t;WDF_TIMER_CONFIG_INIT(&t,Poll);
+    t.UseHighResolutionTimer=TRUE;
     WDF_OBJECT_ATTRIBUTES_INIT(&a);a.ParentObject=device;a.ExecutionLevel=WdfExecutionLevelPassive;
     status=WdfTimerCreate(&t,&a,&k->Timer);
-    return status;
+    if(NT_SUCCESS(status))status=WdfIoTargetCreate(device,WDF_NO_OBJECT_ATTRIBUTES,&k->Audio);
+    return NT_SUCCESS(status)?HapticCreate(device):status;
 }
 NTSTATUS DriverEntry(PDRIVER_OBJECT object,PUNICODE_STRING path) {
     WDF_DRIVER_CONFIG config;WDF_DRIVER_CONFIG_INIT(&config,AddDevice);

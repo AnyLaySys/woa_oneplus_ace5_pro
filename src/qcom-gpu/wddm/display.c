@@ -192,6 +192,51 @@ static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDR
     InterlockedExchange(&a->FlipPending,1);A830WakeDisplay(a);
     return STATUS_SUCCESS;
 }
+static NTSTATUS APIENTRY OverlayAddress(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDRESSWITHMULTIPLANEOVERLAY *p) {
+    if(p->VidPnSourceId || p->PlaneCount>1 || (p->PlaneCount && (!p->pPlanes || p->pPlanes[0].LayerIndex)))return STATUS_INVALID_PARAMETER;
+    if(!p->PlaneCount || !p->pPlanes[0].Enabled)return STATUS_SUCCESS;
+    const DXGK_MULTIPLANE_OVERLAY_PLANE *plane=p->pPlanes;
+    DXGKARG_SETVIDPNSOURCEADDRESS address={0};address.PrimarySegment=plane->AllocationSegment;
+    address.PrimaryAddress=plane->AllocationAddress;address.hAllocation=plane->hAllocation;
+    return Address(adapter,&address);
+}
+static NTSTATUS APIENTRY OverlayAddress2(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDRESSWITHMULTIPLANEOVERLAY2 *p) {
+    if(p->VidPnSourceId || p->PlaneCount>1 || (p->PlaneCount && (!p->pPlanes || p->pPlanes[0].LayerIndex)))return STATUS_INVALID_PARAMETER;
+    if(!p->PlaneCount || !p->pPlanes[0].Enabled)return STATUS_SUCCESS;
+    const DXGK_MULTIPLANE_OVERLAY_PLANE2 *plane=p->pPlanes;
+    DXGKARG_SETVIDPNSOURCEADDRESS address={0};address.PrimarySegment=plane->AllocationSegment;
+    address.PrimaryAddress=plane->AllocationAddress;address.hAllocation=plane->hAllocation;address.Flags=p->Flags;
+    return Address(adapter,&address);
+}
+static NTSTATUS APIENTRY OverlayAddress3(HANDLE adapter,DXGKARG_SETVIDPNSOURCEADDRESSWITHMULTIPLANEOVERLAY3 *p) {
+    p->OutputFlags.Value=0;
+    if(p->VidPnSourceId || p->PlaneCount>1 || p->pPostComposition ||
+        (p->PlaneCount && (!p->ppPlanes || !p->ppPlanes[0] || p->ppPlanes[0]->LayerIndex)))return STATUS_INVALID_PARAMETER;
+    if(!p->PlaneCount)return STATUS_SUCCESS;
+    DXGK_MULTIPLANE_OVERLAY_PLANE3 *plane=p->ppPlanes[0];plane->OutputFlags.Value=0;
+    if(!plane->InputFlags.Enabled)return STATUS_SUCCESS;
+    if(!plane->ContextCount || !plane->ppContextData || !plane->ppContextData[0])return STATUS_INVALID_PARAMETER;
+    const DXGK_PRIMARYCONTEXTDATA *primary=plane->ppContextData[0];
+    DXGKARG_SETVIDPNSOURCEADDRESS address={0};address.PrimarySegment=primary->SegmentId;
+    address.PrimaryAddress=primary->SegmentAddress;address.hAllocation=primary->hAllocation;
+    address.Flags.FlipImmediate=plane->InputFlags.FlipImmediate;address.Flags.FlipOnNextVSync=plane->InputFlags.FlipOnNextVSync;
+    return Address(adapter,&address);
+}
+static NTSTATUS APIENTRY OverlayCaps(HANDLE adapter,DXGKARG_GETMULTIPLANEOVERLAYCAPS *p) {
+    UNREFERENCED_PARAMETER(adapter);if(p->VidPnSourceId)return STATUS_INVALID_PARAMETER;
+    p->MaxPlanes=p->MaxRGBPlanes=1;p->MaxYUVPlanes=0;p->OverlayCaps.Value=0;
+    ULONG one=0x3f800000u;RtlCopyMemory(&p->MaxStretchFactor,&one,sizeof(one));
+    RtlCopyMemory(&p->MaxShrinkFactor,&one,sizeof(one));return STATUS_SUCCESS;
+}
+static NTSTATUS APIENTRY OverlaySupport(HANDLE adapter,DXGKARG_CHECKMULTIPLANEOVERLAYSUPPORT *p) {
+    UNREFERENCED_PARAMETER(adapter);p->Supported=FALSE;p->ReturnInfo.Value=0;return STATUS_SUCCESS;
+}
+static NTSTATUS APIENTRY OverlaySupport2(HANDLE adapter,DXGKARG_CHECKMULTIPLANEOVERLAYSUPPORT2 *p) {
+    UNREFERENCED_PARAMETER(adapter);p->Supported=FALSE;p->ReturnInfo.Value=0;return STATUS_SUCCESS;
+}
+static NTSTATUS APIENTRY OverlaySupport3(HANDLE adapter,DXGKARG_CHECKMULTIPLANEOVERLAYSUPPORT3 *p) {
+    UNREFERENCED_PARAMETER(adapter);p->Supported=FALSE;p->ReturnInfo.Value=0;return STATUS_SUCCESS;
+}
 static NTSTATUS APIENTRY Visible(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEVISIBILITY *p) {
     A830_ADAPTER *a=adapter;if(p->VidPnSourceId && p->VidPnSourceId!=D3DDDI_ID_ALL)return STATUS_INVALID_PARAMETER;
     a->Visible=p->Visible;return STATUS_SUCCESS;
@@ -253,7 +298,10 @@ VOID A830DisplayDdi(DRIVER_INITIALIZATION_DATA *d) {
     d->DxgkDdiGetScanLine=ScanLine;
     d->DxgkDdiIsSupportedVidPn=Supported;d->DxgkDdiRecommendFunctionalVidPn=Recommend;
     d->DxgkDdiEnumVidPnCofuncModality=Cofunc;d->DxgkDdiCommitVidPn=Commit;
-    d->DxgkDdiSetVidPnSourceAddress=Address;d->DxgkDdiSetVidPnSourceVisibility=Visible;
+    d->DxgkDdiSetVidPnSourceAddress=Address;d->DxgkDdiSetVidPnSourceAddressWithMultiPlaneOverlay=OverlayAddress;d->DxgkDdiSetVidPnSourceVisibility=Visible;
+    d->DxgkDdiSetVidPnSourceAddressWithMultiPlaneOverlay2=OverlayAddress2;d->DxgkDdiSetVidPnSourceAddressWithMultiPlaneOverlay3=OverlayAddress3;
+    d->DxgkDdiGetMultiPlaneOverlayCaps=OverlayCaps;d->DxgkDdiCheckMultiPlaneOverlaySupport=OverlaySupport;
+    d->DxgkDdiCheckMultiPlaneOverlaySupport2=OverlaySupport2;d->DxgkDdiCheckMultiPlaneOverlaySupport3=OverlaySupport3;
     d->DxgkDdiUpdateActiveVidPnPresentPath=Update;d->DxgkDdiRecommendMonitorModes=MonitorModes;
     d->DxgkDdiQueryVidPnHWCapability=HardwareCaps;d->DxgkDdiStopDeviceAndReleasePostDisplayOwnership=StopOwnership;
     d->DxgkDdiSystemDisplayEnable=SystemEnable;d->DxgkDdiSystemDisplayWrite=SystemWrite;

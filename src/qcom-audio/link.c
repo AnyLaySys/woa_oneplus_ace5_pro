@@ -1,3 +1,4 @@
+#include <ntifs.h>
 #include "sia9177.h"
 
 #define SMEM_PHYS               0x81D00000ull
@@ -339,6 +340,8 @@ SiaQueuePush (
 #include "ufcs-core.inc"
 #include "charge-usb.inc"
 #include "usb.inc"
+#include "..\qcom-sensors\see.inc"
+#include "..\qcom-sensors\rpc.inc"
 
 VOID
 SiaLinkPoll (
@@ -369,7 +372,7 @@ SiaLinkPoll (
         }
     }
 
-    if (!Dev->Stopping && Link->VersionReady) SiaUsbPoll (Link);
+    if (!Dev->Stopping && Link->VersionReady) {SiaUsbPoll (Link);SeePoll(Link);RpcPoll(Link);}
     for (Messages = 0; Messages < 128; Messages++) {
         Head = SiaRead32 (Link->Desc, 12);
         Tail = SiaRead32 (Link->Desc, 8);
@@ -397,8 +400,10 @@ SiaLinkPoll (
             Size = (16 + Frame[0] + 7) & ~7u;
         }
         if (Avail < Size) return;
-        if (SiaUsbHandle (Link, Cmd, Param1, Param2, Tail, Frame)) {
+        ULONG Cid=RpcHandle(Link,Cmd,Param1,Param2,Tail,Frame)?RPC_CID:SeeHandle(Link,Cmd,Param1,Param2,Tail,Frame)?SEE_CID:0;
+        if (Cid || SiaUsbHandle (Link, Cmd, Param1, Param2, Tail, Frame)) {
             SiaWrite32 (Link->Desc, 8, (Tail + Size) % Link->RxLength);
+            if(Cid && (Cmd==GLINK_CMD_TX_DATA || Cmd==GLINK_CMD_TX_DATA_CONT) && !Frame[1])SiaGlinkCmd(Link,GLINK_CMD_RX_DONE_REUSE,(USHORT)Cid,Param2);
             continue;
         }
         switch (Cmd) {
@@ -465,6 +470,9 @@ SiaLinkPoll (
             }
             break;
         case GLINK_CMD_READ_NOTIF:
+            SiaWrite32 (Link->Desc, 8, (Tail + Size) % Link->RxLength);
+            SiaKick (Link, IPCC_SIGNAL_GLINK);
+            continue;
         case GLINK_CMD_SIGNALS:
         case GLINK_CMD_INTENT_REQ_ACK:
             break;
@@ -556,7 +564,7 @@ SiaLinkStart (
     if (Link == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    Dev->Link = Link;
+    Dev->Link = Link;RpcStart(Dev);
     Physical.QuadPart = SMEM_PHYS;
     Link->Smem = (PUCHAR)MmMapIoSpaceEx (Physical, SMEM_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
     Physical.QuadPart = TCSR_MUTEX_PHYS;
@@ -656,6 +664,9 @@ SiaLinkStop (
     if (Link == NULL) {
         return;
     }
+    RpcStop(Dev);
+    if(Link->See.Rcid)SiaGlinkCmd(Link,GLINK_CMD_CLOSE,SEE_CID,0);
+    SeeReset(STATUS_DEVICE_NOT_CONNECTED);
     if (Link->Charge.Bridge==2 && (Link->Charge.Running || Link->Charge.UfcsStarted || Link->Charge.OffMask)) {
         QchOff(Link);
         for(ULONG Tick=0;Tick<12000 && Link->Charge.Phase!=91 && Link->Charge.Phase!=92;Tick++){

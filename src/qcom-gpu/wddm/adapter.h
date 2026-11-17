@@ -51,6 +51,11 @@ typedef struct {
     PUCHAR Framebuffer;
     SIZE_T FramebufferSize;
     BOOLEAN Visible,PanelOn,AdapterOn,MonitorOn;
+    UCHAR Brightness;
+    USHORT PanelBrightness;
+    BOOLEAN BrightnessQueued;
+    PIO_WORKITEM BrightnessWork;
+    KEVENT BrightnessIdle;
     KMUTEX DisplayPowerLock;
     BOOLEAN BridgeAttached;
     volatile LONG FlipPending;
@@ -164,3 +169,5 @@ NTSTATUS A830BridgeTimestamp(PULONGLONG counter);
 NTSTATUS A830BridgeReserveDisplay(PVOID adapter,GPU_BO buffers[2]);
 
 NTSTATUS A830DisplayPower(A830_ADAPTER *adapter,ULONG uid,BOOLEAN on);
+NTSTATUS A830BrightnessInterface(PVOID context,PQUERY_INTERFACE query);
+VOID A830BrightnessStop(A830_ADAPTER *adapter);

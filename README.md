@@ -17,6 +17,7 @@ Windows 驱动配合本设备的 UEFI/ACPI 使用。Linux 适配由 `linux_onepl
 | `src/qcom-battery` | Qualcomm 电量计（bq27xxx，hub I2C）剩余电量显示驱动 |
 | `src/qcom-charge` | 随音频包部署的充电与 USB 角色管理服务 |
 | `src/qcom-cpupower` | SM8750 原生 CPU 调频驱动 |
+| `src/qcom-keys` | Qualcomm 物理按键及 PMIH010x 振动控制 |
 | `src/qcom-gpu` | Adreno 830 Windows 硬件执行驱动 |
 | `src/mesa/umd` | D3D DDI → Vulkan / Turnip 用户态后端 |
 | `fw/gpu` | Adreno 830 GMU、SQE、AQE 固件及来源、许可 |
@@ -59,6 +60,7 @@ build.cmd qcom-wcn7861
 build.cmd qcom-battery
 build.cmd qcom-charge
 build.cmd qcom-cpupower
+build.cmd qcom-keys
 build.cmd qcom-gpu
 build.cmd --help
 ```
@@ -82,6 +84,7 @@ PowerShell 中对应使用 `.\build.cmd`，例如：
 | `qcom-battery` | `out/drv/qcom-battery` | qcom_battery.inf / qcom_battery.sys / qcom_battery.cat |
 | `qcom-charge` | `out/qcom-charge/ARM64/Release/bin` | charge.exe / credential.bin |
 | `qcom-cpupower` | `out/drv/qcom-cpupower` | qcom_cpupower.inf / qcom_cpupower.sys / qcom_cpupower.cat |
+| `qcom-keys` | `out/drv/qcom-keys` | qcom_keys.inf / qcom_keys.sys / qcom_keys.cat |
 | `qcom-gpu` | `out/drv/qcom-gpu` | a830_native.inf / a830_native.sys / a830_native.cat / a830_umd.dll / vulkan_freedreno.dll / msvcp140.dll / vcruntime140.dll / gen80000_zap.mbn |
 
 编译中间文件位于 `out/<目标>/ARM64/Release`。驱动包中的 SYS 和 CAT、GPU 用户态驱动 DLL 及充电服务 EXE 均由构建脚本签名，安装时使用 `out/drv` 下的完整包。
@@ -89,6 +92,14 @@ PowerShell 中对应使用 `.\build.cmd`，例如：
 `qcom-audio` 会自动构建 `qcom-charge`，将 `charge.exe`、`credential.bin` 和 58 个 ADSP 文件纳入音频包及 CAT。其余运行数据由 `install-fw` 复制。
 
 `qcom-gpu` 会自动构建直接 DDI 后端、Turnip 和 WDDM 内核。Mesa、vkd3d 源码及编译缓存位于 `out/mesa`，Meson 子依赖位于 `out/mesa/source/subprojects`。
+
+同一次构建还会生成 `out/drv/qcom-d3d12`。把整个目录复制到设备后，在管理员 PowerShell 中运行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-d3d12.ps1
+```
+
+安装脚本备份系统 `d3d12.dll`，安装 ARM64/x64 共用入口和各自的 VKD3D-Proton、DXGI 运行库。重启应用后可直接使用 VKD3D-Proton → Turnip，无须在应用 EXE 目录复制 DLL；不使用 Zink。VKD3D-Proton 和 DXGI 直接加载显示驱动注册的对应架构 Turnip ICD，避免 Vulkan 全局枚举进入 Dozen 后递归调用 D3D12。原生 D3D11 保持现有 DDI 路径，显式软件适配器仍使用系统 WARP。实机已通过 FL12_0/FL12_1 设备创建、GPU 计算、三角形显示、稀疏缓冲及纹理回读，以及像素／四重采样 ROV 排序测试；TiledResourcesTier 为 2，ROVsSupported 为 1。这些测试验证图形接口，不代表所有游戏均已通过实测。需要恢复系统入口时运行同一脚本并加 `-Uninstall`，随后重启应用。
 
 ### 名称与版本
 
@@ -147,6 +158,8 @@ pnputil /add-driver ".\out\drv\qcom-gpu\a830_native.inf" /install
 
 GPU 原生桌面路径为 DWM / D3D DDI → Vulkan 后端 → Turnip → WDDM → Qualcomm Adreno 830。DWM 硬件绘制、翻转和窗口拖动正常。设备名称为 `Qualcomm Adreno 830`，构建入口为 `build.cmd qcom-gpu`。下载、版本与工具链配置、编译和签名逻辑统一保存在 [build.cmd](build.cmd)，运行时生成的脚本和配置位于 `out/mesa`，最终驱动包位于 `out/drv/qcom-gpu`。`src/mesa` 仅保存驱动源码和 Mesa 源码补丁。
 
+GPU 调频按实际忙碌比例选择原厂档位，空闲立即降到 160 MHz；活动时每 20 ms 采样，空闲时每 100 ms 检查，普通降频需要连续两次低负载采样。温控读取 GPU TSENS 有效通道的最高温度，达到 87°C 时将上限限制到 660 MHz，降至 78°C 后恢复正常调频；达到 99°C 时限制到最低的 160 MHz，降至 81°C 后退回限频状态，再降至 78°C 后恢复正常调频；温控上限也约束固定频率请求，温度不可读时保持最低频率。调频与提交队列分开同步，持续 GPU 工作不会阻塞温控。可用 `src/qcom-gpu/tools/state.ps1` 查看当前频率、温控上限、负载及温度。显示提交注册 MPO1/2/3 的主平面回调，能力只报告一个 RGB 主平面，不启用额外叠加平面。持续游戏时的温度表现需在设备上验证。
+
 GPU 固定显存池为 64 MB。共享显存容量按 Windows 可见内存预算计算，并受剩余 GPU 地址空间约束，当前最大为 4 GB；物理页和页记录按需映射、分配与释放。
 
 SM8750 CPU 两组核心均开放原厂 16 档：六核组 384–3532.8 MHz，两核组 1017.6–4320 MHz。驱动按实际负载升降频，空闲立即降至最低档并支持 PSCI 保留上下文休眠；构建入口为 `build.cmd qcom-cpupower`。详见 [CPU 说明](src/qcom-cpupower/README.md)。
@@ -162,6 +175,10 @@ USB 2.0 Host/OTG 支持自动插拔与充电器输入切换，主控和集线器
 `qcom-battery` 读取 BQ 电量计，并向 Windows 提供电池电量。`qcom-audio` 提供 PMIC GLINK、普通充电和 UFCS 充电通道，`qcom-charge` 的 `ALSCharge` 服务随音频包安装并自动启动，管理充电策略和 USB 角色。
 
 UFCS 认证文件 `credential.bin` 随音频包进入 DriverStore，与 `charge.exe` 位于同一目录，由服务读取。
+
+## 触屏反馈
+
+触控及按键反馈由 `qcom-keys` 控制 PMIH010x 马达，每次播放 18 ms，使用高精度定时器，实际电压为 800 mV 和 1200 mV，振幅均为 `0xFF`。`syna-s3910` 按接触 ID 分别记录每根手指：新增手指按下请求一次 800 mV 短振，在原有移动阈值内按住超过 495 ms 后请求一次 1200 mV 短振，抬起不振；移动超限或读取失败取消对应长按反馈。音量键单独按下上报一次音量按下／释放并请求一次 800 mV；按住 270 ms 后由按键驱动按 27 ms 节奏重复上报音量按下／释放，同时请求 800 mV 振动，系统音量连调与振动请求共用计时，播放和停机期间及停止后 27 ms 内的新触发忽略、不补振。电源键单独短按在抬起时请求一次 800 mV，单独按住 2.4 s 时请求一次 800 mV，之后抬起不再振。音量加／电源、音量减／电源组合成立时各请求一次 800 mV，并取消该次电源抬起反馈。`qcom-audio` 的扬声器音量和静音节点实际执行 24 位 PCM 增益处理，并通过已有内核控制设备提供当前音量上下限；音量键按住时到达相应极限播放两次 1200 mV，每次 18 ms，两次之间仍等待停止后 27 ms，随后停止重复反馈。极限模式在马达空闲后开始，开始前松开按键或离开极限会取消。触控、按键及音量协作不需要常驻用户态程序。版本沿用 `yy.M.d.revision`，日期和修订号由各驱动现有项目属性控制。
 
 ## 许可
 

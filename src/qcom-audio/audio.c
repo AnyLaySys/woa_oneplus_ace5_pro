@@ -87,11 +87,7 @@ typedef struct _SIA_FLOW {
 } SIA_FLOW, *PSIA_FLOW;
 
 typedef struct _SIA_AUDIO {
-    PUCHAR Smmu;
-    ULONG SmmuSlot[SMMU_STREAMS];
-    ULONG SmmuSmr[SMMU_STREAMS];
-    BOOLEAN SmmuNewSlot[SMMU_STREAMS];
-    ULONG SmmuActiveS2cr;
+    BOOLEAN MappingHeld;
     PUCHAR Shm;
     PHYSICAL_ADDRESS ShmPhys;
     ULONGLONG DspAddress;
@@ -107,7 +103,19 @@ typedef struct _SIA_AUDIO {
     PSIA_MIC Mic;
     SIA_FLOW Flow[2];
     SIA_GPR_PACKET Rx;
+    UCHAR Pcm[SIA_PCM_BYTES];
 } SIA_AUDIO, *PSIA_AUDIO;
+
+typedef struct {
+    PUCHAR Smmu;
+    ULONG SmmuSlot[SMMU_STREAMS];
+    ULONG SmmuSmr[SMMU_STREAMS];
+    BOOLEAN SmmuNewSlot[SMMU_STREAMS];
+    ULONG SmmuActiveS2cr;
+} SIA_MAPPING, *PSIA_MAPPING;
+static SIA_MAPPING DspMapping;
+static FAST_MUTEX DspMappingLock;
+static ULONG DspMappingUsers;
 
 static const ULONG SiaStreamMatches[SMMU_STREAMS] = { 0x80801001u, 0x80201041u };
 
@@ -342,7 +350,7 @@ AuSmrOverlap (
 static
 NTSTATUS
 AuSmmuSetup (
-    _In_ PSIA_AUDIO Au
+    _In_ PSIA_MAPPING Au
     )
 {
     PHYSICAL_ADDRESS Physical;
@@ -442,7 +450,7 @@ AuSmmuSetup (
 static
 VOID
 AuSmmuRestore (
-    _In_ PSIA_AUDIO Au
+    _In_ PSIA_MAPPING Au
     )
 {
     ULONG Index;
@@ -453,9 +461,6 @@ AuSmmuRestore (
         if (!Au->SmmuNewSlot[Index]) {
             continue;
         }
-        if (Au->Handle || Au->MapPending) {
-            continue;
-        }
         if (SiaRead32 (Au->Smmu, SMMU_SMR (Slot)) != SiaStreamMatches[Index] ||
             SiaRead32 (Au->Smmu, SMMU_S2CR (Slot)) != Au->SmmuActiveS2cr) {
             continue;
@@ -464,6 +469,21 @@ AuSmmuRestore (
     }
     MmUnmapIoSpace (Au->Smmu, SMMU_MAP_SIZE);
     Au->Smmu = NULL;
+}
+
+VOID SiaDspMemoryInit(VOID) { ExInitializeFastMutex(&DspMappingLock); }
+NTSTATUS SiaDspMemoryAcquire(VOID) {
+    ExAcquireFastMutex(&DspMappingLock);NTSTATUS status=STATUS_SUCCESS;
+    if(!DspMappingUsers) {
+        RtlZeroMemory(&DspMapping,sizeof(DspMapping));status=AuSmmuSetup(&DspMapping);
+        if(!NT_SUCCESS(status) && DspMapping.Smmu)AuSmmuRestore(&DspMapping);
+    }
+    if(NT_SUCCESS(status))++DspMappingUsers;ExReleaseFastMutex(&DspMappingLock);return status;
+}
+VOID SiaDspMemoryRelease(BOOLEAN retain) {
+    ExAcquireFastMutex(&DspMappingLock);
+    if(!retain && DspMappingUsers && !--DspMappingUsers)AuSmmuRestore(&DspMapping);
+    ExReleaseFastMutex(&DspMappingLock);
 }
 
 static
@@ -641,8 +661,12 @@ AuSubmit (PSIA_DEVICE Dev, PSIA_AUDIO Au, ULONG Direction, ULONG Index)
     if (!Direction) {
         ULONG First = min(Flow->Bytes, Pcm->PcmSize - Pcm->ReadOffset);
         KeMemoryBarrier();
-        AuShmWrite(Au, Index * PCM_STRIDE, Pcm->Pcm + Pcm->ReadOffset, First);
-        if (First < Flow->Bytes) AuShmWrite(Au, Index * PCM_STRIDE + First, Pcm->Pcm, Flow->Bytes - First);
+        RtlCopyMemory(Au->Pcm,Pcm->Pcm+Pcm->ReadOffset,First);
+        if(First<Flow->Bytes)RtlCopyMemory(Au->Pcm+First,Pcm->Pcm,Flow->Bytes-First);
+        LONG gains[2];
+        for(ULONG i=0;i<2;i++)gains[i]=InterlockedCompareExchange(&Dev->Muted[i],0,0)?0:InterlockedCompareExchange(&Dev->Gain[i],0,0);
+        SiaScale(Au->Pcm,Flow->Bytes,gains);
+        AuShmWrite(Au,Index*PCM_STRIDE,Au->Pcm,Flow->Bytes);
         Pcm->ReadOffset = (Pcm->ReadOffset + Flow->Bytes) % Pcm->PcmSize;
     }
     SiaGprHeader(Packet, Length, Flow->Port, Flow->Endpoint, Index, Direction ? 0x0400100Bu : DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2);
@@ -858,7 +882,7 @@ SiaAudioRun(PSIA_DEVICE Dev)
     PSIA_AUDIO Au=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*Au),SIA_AUDIO_TAG);
     NTSTATUS Status=STATUS_INSUFFICIENT_RESOURCES;
     if(!Au) goto failed;
-    Status=AuSmmuSetup(Au);
+    Status=SiaDspMemoryAcquire();Au->MappingHeld=NT_SUCCESS(Status);
     if(!NT_SUCCESS(Status)) goto done;
     PHYSICAL_ADDRESS Low={0}, High, Boundary={0}; High.QuadPart=0xffffffffLL;
     Au->Shm=MmAllocateContiguousMemorySpecifyCache(SHM_SIZE,Low,High,Boundary,MmNonCached);
@@ -917,7 +941,7 @@ done:
             if(!Au->Handle&&!Au->MapPending) MmFreeContiguousMemorySpecifyCache(Au->Shm,SHM_SIZE,MmNonCached);
             else Dev->RetainedDma=TRUE;
         }
-        if(Au->Smmu) AuSmmuRestore(Au);
+        if(Au->MappingHeld)SiaDspMemoryRelease(Au->Handle || Au->MapPending);
         ExFreePoolWithTag(Au,SIA_AUDIO_TAG);
     }
 failed:

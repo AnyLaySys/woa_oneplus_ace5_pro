@@ -7,6 +7,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\gmu.c" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\gpu.c" />
     <ClInclude Include="$(MSBuildThisFileDirectory)..\gpu.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)..\policy.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)..\regs.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)..\tables.h" />
     <MARMASM Include="$(MSBuildThisFileDirectory)..\smc.asm" />

@@ -1,6 +1,7 @@
 #include "gpu.h"
 #include "regs.h"
 #include "perf-table.h"
+#include "policy.h"
 
 typedef struct { ULONG Status,Address,Type,Size,MessageSize,Dropped,RxWatermark,TxWatermark,RxRequest,TxRequest,Read,Write; } HFI_QUEUE;
 typedef struct { ULONG Version,Size,Offset,Stride,Count,Active; HFI_QUEUE Queue[3]; } HFI_TABLE;
@@ -165,7 +166,7 @@ static NTSTATUS Configure(GPU *g) {
         g->PerfKhz[index]=opp->Khz;g->PerfBw[index]=opp->Bandwidth;
         if(opp->Acd){acd[2]|=1u<<index;acd[5+acd[4]++]=opp->Acd;}
     }
-    g->MaxKhz=0;g->FixedKhz=0;
+    g->MaxKhz=0;g->FixedKhz=0;g->DownSamples=0;g->CoolingBand=0;g->CeilingIndex=1;g->BusyPercent=0;
     perf[3]=g->PerfCount;ULONG at=5+g->PerfCount*3;
     perf[at++]=2;perf[at++]=2;perf[at++]=0;perf[at++]=0;perf[at++]=cx;perf[at++]=500000;
     status=Send(g,15,perf,at);if(!NT_SUCCESS(status))return status;
@@ -189,24 +190,44 @@ NTSTATUS GpuSetFrequency(GPU *g,ULONG index) {
     if(KeGetCurrentIrql()!=PASSIVE_LEVEL || !index || index>=g->PerfCount)return STATUS_INVALID_PARAMETER;
     ULONG message[]={0,1,index,index};NTSTATUS status=Send(g,30,message,4);
 
+    g->PowerStatus=status;
     if(NT_SUCCESS(status)){g->PerfIndex=index;}
     return status;
 }
-VOID GpuGovern(GPU *g) {
+LONG GpuTemperature(GPU *g) {
+    LONG temperature=MINLONG;
+    if(g->Thermal)for(ULONG i=1;i<=8;i++) {
+        ULONG raw=GpuRead(g->Thermal,0xA0+i*4);LONG value=((LONG)(raw<<20))>>20;
+        if((raw&(1u<<21)) && value>=-400)temperature=max(temperature,value);
+    }
+    return temperature;
+}
+static VOID GovernLocked(GPU *g) {
     if(!g->Online || !g->PerfCount || g->Fault)return;
     ULONGLONG now=KeQueryInterruptTime(),elapsed=now-g->PerfLast;
-    if(elapsed<500000)return;
+    if(elapsed<200000)return;
     ULONG high,low;do{high=Gr(g,0x1fca1);low=Gr(g,0x1fca0);}while(high!=Gr(g,0x1fca1));
-    ULONGLONG busy=((ULONGLONG)high<<32)|low,delta=busy-g->BusyLast;
+    ULONGLONG busy=((ULONGLONG)high<<32)|low,delta=busy>=g->BusyLast?busy-g->BusyLast:0,ticks=elapsed*192/100;
     g->PerfLast=now;g->BusyLast=busy;
-    g->BusyPercent=(ULONG)min(delta*100/(elapsed*192/100),100);
+    g->BusyPercent=delta>=ticks?100:(ULONG)(delta*100/ticks);
+    g->Temperature=GpuTemperature(g);
+    if(g->Temperature!=MINLONG)g->CoolingBand=GpuCoolingBand(g->CoolingBand,g->Temperature);
     ULONG maximum=g->PerfCount-1;
     if(g->MaxKhz)while(maximum>1 && g->PerfKhz[maximum]>g->MaxKhz)maximum--;
-    ULONG target=min(g->PerfIndex,maximum);
+    ULONG limit=GpuCoolingKhz(g->CoolingBand);
+    if(limit)while(maximum>1 && g->PerfKhz[maximum]>limit)maximum--;
+    if(g->Temperature==MINLONG)maximum=1;
+    g->CeilingIndex=maximum;
+    ULONG target;
     if(g->FixedKhz){target=1;while(target<maximum && g->PerfKhz[target]<g->FixedKhz)target++;}
-    else if(g->BusyPercent>=40)target=maximum;
-    else if(g->BusyPercent<15 && target>1)target--;
-    if(target!=g->PerfIndex)GpuSetFrequency(g,target);
+    else target=GpuDemand(g->PerfKhz,g->PerfIndex,g->BusyPercent,maximum);
+    target=GpuDelayDown(target,g->PerfIndex,g->BusyPercent,maximum,&g->DownSamples);
+    if(target!=g->PerfIndex && !NT_SUCCESS(GpuSetFrequency(g,target)))g->Fault=(ULONG)g->PowerStatus;
+}
+VOID GpuGovern(GPU *g) {
+    KeWaitForSingleObject(&g->PowerLock,Executive,KernelMode,FALSE,NULL);
+    GovernLocked(g);
+    KeReleaseMutex(&g->PowerLock,FALSE);
 }
 NTSTATUS GpuGmuStart(GPU *g) {
 

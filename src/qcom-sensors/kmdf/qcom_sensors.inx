@@ -1,0 +1,78 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=HIDClass
+ClassGuid={745A17A0-74D3-11D0-B6FE-00A0C90F57DA}
+Provider=%ProviderString%
+DriverVer=11/16/2026,26.11.16.0
+CatalogFile=qcom_sensors.cat
+PnpLockdown=1
+
+[DestinationDirs]
+KMDriverCopy=13
+
+[SourceDisksNames]
+1=%DiskDesc%,,,
+
+[SourceDisksFiles]
+qcom_sensors.sys=1
+qcom_sensors_service.exe=1
+
+[Manufacturer]
+%ManufacturerString%=Qualcomm,NT$ARCH$.10.0...22000
+
+[Qualcomm.NT$ARCH$.10.0...22000]
+%DeviceDesc%=qcom_sensors, ROOT\QCOMALS
+
+[qcom_sensors.NT]
+CopyFiles=KMDriverCopy
+
+[qcom_sensors.NT.Filters]
+AddFilter=qcom_sensors,,qcom_sensors_Filter_Install
+
+[qcom_sensors_Filter_Install]
+FilterPosition=Lower
+
+[qcom_sensors.NT.Services]
+AddService=qcom_sensors,0,qcom_sensors_Service_Inst
+AddService=mshidkmdf,0x2,mshidkmdf_Service_Inst
+AddService=qcom_sensors_service,0,qcom_sensors_Daemon_Inst
+
+[mshidkmdf_Service_Inst]
+DisplayName    = %mshidkmdf.SvcName%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\mshidkmdf.sys
+
+[qcom_sensors_Service_Inst]
+DisplayName    = %ServiceDesc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %13%\qcom_sensors.sys
+
+[qcom_sensors_Daemon_Inst]
+DisplayName    = %SensorServiceDesc%
+ServiceType    = 16
+StartType      = 2
+ErrorControl   = 1
+ServiceBinary  = %13%\qcom_sensors_service.exe
+
+[qcom_sensors.NT.Wdf]
+KmdfService=qcom_sensors, qcom_sensors_wdfsect
+
+[qcom_sensors_wdfsect]
+KmdfLibraryVersion=$KMDFVERSION$
+
+[KMDriverCopy]
+qcom_sensors.sys
+qcom_sensors_service.exe
+
+[Strings]
+ProviderString     = "AnyLaySys"
+ManufacturerString = "Qualcomm"
+DeviceDesc         = "Qualcomm Sensors"
+ServiceDesc        = "Qualcomm Sensor Driver"
+SensorServiceDesc  = "Qualcomm Sensor Service"
+mshidkmdf.SvcName  = "Pass-through HID to KMDF Filter Driver"
+DiskDesc           = "AnyLaySys Sensor Driver"

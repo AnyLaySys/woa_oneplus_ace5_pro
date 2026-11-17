@@ -5,6 +5,8 @@
 #include <hidport.h>
 #include "hummer_spi.h"
 #include "hummer_rpmh.h"
+#include "tap.h"
+#include "..\..\qcom-keys\haptics.h"
 
 #define S3910_REPORT_ID 0x54
 #define S3910_CONTACTS 10
@@ -30,5 +32,7 @@ typedef struct {
     ULONG PanelMaxX,PanelMaxY,MappedCount,MappedSize[7];
     PVOID MappedBase[7];
     UCHAR Reply[HSP_DATA_BYTES];
+    WDFIOTARGET Haptics;
+    TAP Tap;
 } DEVICE_CONTEXT,*PDEVICE_CONTEXT;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT,GetDeviceContext);

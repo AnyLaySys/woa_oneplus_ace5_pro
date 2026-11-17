@@ -1,6 +1,6 @@
 #include <ntifs.h>
 #include <wdmsec.h>
-#include "charge.h"
+#include "sia9177.h"
 #include "..\qcom-battery\power.h"
 static HANDLE InputKey;
 static BOOLEAN InputSaved;
@@ -82,6 +82,7 @@ static NTSTATUS Dispatch(PDEVICE_OBJECT Device,PIRP Irp)
 {
     PIO_STACK_LOCATION S=IoGetCurrentIrpStackLocation(Irp);
     if(Device!=Control)return Prev[S->MajorFunction](Device,Irp);
+    if(S->MajorFunction==IRP_MJ_CLEANUP)QcomRpcDetach(S->FileObject);
     NTSTATUS Status=STATUS_INVALID_DEVICE_REQUEST;ULONG Bytes=0;
     if(S->MajorFunction==IRP_MJ_CREATE||S->MajorFunction==IRP_MJ_CLOSE||S->MajorFunction==IRP_MJ_CLEANUP)Status=STATUS_SUCCESS;
     else if(S->MajorFunction==IRP_MJ_DEVICE_CONTROL && S->Parameters.DeviceIoControl.IoControlCode==ALS_CHARGE_STATUS){
@@ -95,6 +96,17 @@ static NTSTATUS Dispatch(PDEVICE_OBJECT Device,PIRP Irp)
             RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer,&V,Bytes);Status=STATUS_SUCCESS;
         }
     }
+    if(S->MajorFunction==IRP_MJ_DEVICE_CONTROL && (S->Parameters.DeviceIoControl.IoControlCode==QCOM_LIGHT_READ || S->Parameters.DeviceIoControl.IoControlCode==QCOM_ORIENTATION_READ)){
+        if(S->Parameters.DeviceIoControl.InputBufferLength)Status=STATUS_INVALID_PARAMETER;
+        else if(S->Parameters.DeviceIoControl.OutputBufferLength<sizeof(QCOM_LIGHT))Status=STATUS_BUFFER_TOO_SMALL;
+        else {if(S->Parameters.DeviceIoControl.IoControlCode==QCOM_LIGHT_READ)QcomLightQuery(Irp->AssociatedIrp.SystemBuffer);else QcomOrientationQuery(Irp->AssociatedIrp.SystemBuffer);Bytes=sizeof(QCOM_LIGHT);Status=STATUS_SUCCESS;}
+    }
+    if(S->MajorFunction==IRP_MJ_DEVICE_CONTROL && S->Parameters.DeviceIoControl.IoControlCode==QH_VOLUME) {
+        if(S->Parameters.DeviceIoControl.InputBufferLength)Status=STATUS_INVALID_PARAMETER;
+        else if(S->Parameters.DeviceIoControl.OutputBufferLength<sizeof(ULONG))Status=STATUS_BUFFER_TOO_SMALL;
+        else {*(ULONG*)Irp->AssociatedIrp.SystemBuffer=SiaVolumeLimits();Bytes=sizeof(ULONG);Status=STATUS_SUCCESS;}
+    }
+    if(S->MajorFunction==IRP_MJ_DEVICE_CONTROL && S->Parameters.DeviceIoControl.IoControlCode==QCOM_RPC_INVOKE)Status=QcomRpcInvoke(Irp,&Bytes);
     Irp->IoStatus.Status=Status;Irp->IoStatus.Information=Bytes;IoCompleteRequest(Irp,IO_NO_INCREMENT);return Status;
 }
 VOID QchRemove(VOID)

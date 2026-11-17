@@ -40,7 +40,7 @@ SiaWorker (PVOID Context)
     NTSTATUS Status;
     LARGE_INTEGER Wait;
     for (;;) {
-        BOOLEAN Fast=Dev->Link && QCH_FAST_POLL(&Dev->Link->Charge);
+        BOOLEAN Fast=Dev->Link && (QCH_FAST_POLL(&Dev->Link->Charge) || QcomRpcFast());
         if(Fast && !TimerHeld){ExSetTimerResolution(10000,TRUE);TimerHeld=TRUE;}
         if(!Fast && TimerHeld){ExSetTimerResolution(0,FALSE);TimerHeld=FALSE;}
         Wait.QuadPart = Fast?-10000LL:-200000LL;
@@ -79,6 +79,7 @@ SiaHardwareStart (PSIA_DEVICE Dev, PCM_PARTIAL_RESOURCE_DESCRIPTOR Resource)
     PHYSICAL_ADDRESS Physical;
     OBJECT_ATTRIBUTES Attributes;
     RtlZeroMemory (Dev, sizeof (*Dev));
+    Dev->Gain[0]=Dev->Gain[1]=SIA_GAIN_ONE;
     KeInitializeEvent (&Dev->WorkEvent, SynchronizationEvent, FALSE);
     for (ULONG Index = 0; Index < 2; Index++) {
         KeInitializeEvent (&Dev->Stream[Index].IdleEvent, NotificationEvent, TRUE);

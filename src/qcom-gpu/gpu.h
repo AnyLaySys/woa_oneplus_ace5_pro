@@ -14,19 +14,21 @@ typedef VOID (*GPU_SYNCHRONIZE)(PVOID context);
 typedef struct {
     PUCHAR Registers,Gcc,Rsc,Db,Thermal;
     GPU_VM Vm[2];
-    GPU_BO Cache,Dummy,Debug,Log,Hfi,Sqe,Aqe,Ring,Memory;
+    GPU_BO Cache,Dummy,Debug,Log,Hfi,Sqe,Aqe,Ring,Memory,Prr;
     KEVENT Event;
     GPU_SYNCHRONIZE Synchronize;
     PVOID Host;
     ULONG Stage,Fault,Sequence,WriteIndex,ClockMask,Gdscr;
     ULONGLONG Submitted;
     KSPIN_LOCK RingLock;
-    KMUTEX MappingLock;
+    KMUTEX MappingLock,PowerLock;
     BOOLEAN Online,Powered,GmuResetReleased;
     ULONG CbBase;
     ULONG SpeedBin,PerfCount,PerfIndex,FixedKhz,MaxKhz,BusyPercent;
     ULONG PerfKhz[GPU_PERF_LEVELS],PerfBw[GPU_PERF_LEVELS];
     ULONGLONG PerfLast,BusyLast;
+    ULONG CoolingBand,CeilingIndex,DownSamples;
+    LONG Temperature,PowerStatus;
     BOOLEAN LastContextValid;
     ULONGLONG LastContextCookie;
 } GPU;
@@ -44,6 +46,8 @@ NTSTATUS GpuAllocateCached(GPU_BO *bo,ULONG size);
 VOID GpuFree(GPU_BO *bo);
 NTSTATUS GpuMap(GPU *gpu,ULONG vm,GPU_BO *bo,ULONGLONG address);
 VOID GpuUnmap(GPU *gpu,ULONG vm,GPU_BO *bo);
+NTSTATUS GpuMapRange(GPU *gpu,ULONG vm,ULONGLONG address,ULONGLONG size,GPU_BO *bo,ULONGLONG offset,BOOLEAN zero,BOOLEAN flush);
+NTSTATUS GpuFlushMappings(GPU *gpu,ULONG vm);
 NTSTATUS GpuMmuStart(GPU *gpu);
 VOID GpuMmuStop(GPU *gpu);
 NTSTATUS GpuPower(GPU *gpu,BOOLEAN enable);
@@ -62,6 +66,7 @@ NTSTATUS GpuGmuStart(GPU *gpu);
 VOID GpuGmuStop(GPU *gpu);
 NTSTATUS GpuSetFrequency(GPU *gpu,ULONG index);
 VOID GpuGovern(GPU *gpu);
+LONG GpuTemperature(GPU *gpu);
 static __forceinline ULONG Gr(GPU *g,ULONG word) { return GpuRead(g->Registers,word*4); }
 static __forceinline VOID Gw(GPU *g,ULONG word,ULONG value) { GpuWrite(g->Registers,word*4,value); }
 static __forceinline VOID Gw64(GPU *g,ULONG word,ULONGLONG value) { Gw(g,word,(ULONG)value);Gw(g,word+1,(ULONG)(value>>32)); }

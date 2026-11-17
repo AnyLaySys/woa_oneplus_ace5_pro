@@ -94,6 +94,15 @@ static NTSTATUS Jack(PPCPROPERTY_REQUEST Request, ULONG Pin)
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS VolumeProperty(PPCPROPERTY_REQUEST Request);
+static volatile LONG AudioLimits;
+extern "C" ULONG SiaVolumeLimits(VOID) { return (ULONG)InterlockedCompareExchange(&AudioLimits,0,0); }
+static constexpr ULONG VolumeAccess=KSPROPERTY_TYPE_GET|KSPROPERTY_TYPE_SET|KSPROPERTY_TYPE_BASICSUPPORT;
+static PCPROPERTY_ITEM VolumeItems[]={{&KSPROPSETID_Audio,KSPROPERTY_AUDIO_VOLUMELEVEL,VolumeAccess,VolumeProperty}};
+static PCPROPERTY_ITEM MuteItems[]={{&KSPROPSETID_Audio,KSPROPERTY_AUDIO_MUTE,VolumeAccess,VolumeProperty}};
+DEFINE_PCAUTOMATION_TABLE_PROP(VolumeAutomation,VolumeItems);
+DEFINE_PCAUTOMATION_TABLE_PROP(MuteAutomation,MuteItems);
+static PCNODE_DESCRIPTOR TopologyNodes[]={{0,&VolumeAutomation,&KSNODETYPE_VOLUME,nullptr},{0,&MuteAutomation,&KSNODETYPE_MUTE,nullptr}};
 static NTSTATUS JackProperty(PPCPROPERTY_REQUEST Request) { return Jack(Request, 1); }
 static NTSTATUS MicJackProperty(PPCPROPERTY_REQUEST Request) { return Jack(Request, 0); }
 static PCPROPERTY_ITEM MicJackItems[] = {
@@ -126,10 +135,11 @@ static PCPIN_DESCRIPTOR TopologyPins[] = {
     {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, AnalogRanges,
         KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_NONE, &KSNODETYPE_SPEAKER, nullptr, 0}}
 };
-static PCCONNECTION_DESCRIPTOR TopologyConnections[] = {{PCFILTER_NODE, 0, PCFILTER_NODE, 1}};
+static PCCONNECTION_DESCRIPTOR TopologyConnections[]={{PCFILTER_NODE,0,0,1},{0,0,1,1},{1,0,PCFILTER_NODE,1}};
+static PCCONNECTION_DESCRIPTOR MicConnections[]={{PCFILTER_NODE,0,PCFILTER_NODE,1}};
 static PCFILTER_DESCRIPTOR TopologyFilter = {
-    0, &JackAutomation, sizeof(PCPIN_DESCRIPTOR), 2, TopologyPins, 0, 0, nullptr,
-    1, TopologyConnections, 0, nullptr
+    0, &JackAutomation, sizeof(PCPIN_DESCRIPTOR), 2, TopologyPins, sizeof(PCNODE_DESCRIPTOR), 2, TopologyNodes,
+    3, TopologyConnections, 0, nullptr
 };
 
 static PCPIN_DESCRIPTOR CapturePins[] = {
@@ -154,7 +164,7 @@ static PCPIN_DESCRIPTOR MicPins[] = {
 };
 static PCFILTER_DESCRIPTOR MicFilter = {
     0, &MicJackAutomation, sizeof(PCPIN_DESCRIPTOR), 2, MicPins, 0, 0, nullptr,
-    1, TopologyConnections, 0, nullptr
+    1, MicConnections, 0, nullptr
 };
 
 class Stream final : public IMiniportWaveRTStreamNotification {
@@ -309,7 +319,8 @@ class Topology final : public IMiniportTopology {
     LONG References = 1;
     BOOLEAN Capture;
 public:
-    explicit Topology(BOOLEAN Input) : Capture(Input) {}
+    PSIA_DEVICE Dev;
+    explicit Topology(PSIA_DEVICE Device,BOOLEAN Input) : Capture(Input),Dev(Device) {}
     STDMETHODIMP QueryInterface(REFIID Id, PVOID *Object) override {
         return ::QueryInterface(this, Id, IID_IMiniportTopology, IID_IMiniport, Object);
     }
@@ -325,6 +336,46 @@ public:
         UNREFERENCED_PARAMETER(Size); UNREFERENCED_PARAMETER(Result); UNREFERENCED_PARAMETER(Length); return STATUS_NOT_IMPLEMENTED;
     }
 };
+
+static NTSTATUS VolumeProperty(PPCPROPERTY_REQUEST Request)
+{
+    BOOLEAN Mute=Request->PropertyItem->Id==KSPROPERTY_AUDIO_MUTE;
+    ULONG Access=VolumeAccess,Full=sizeof(KSPROPERTY_DESCRIPTION)+sizeof(KSPROPERTY_MEMBERSHEADER)+2*sizeof(KSPROPERTY_STEPPING_LONG);
+    if(Request->Verb&KSPROPERTY_TYPE_BASICSUPPORT) {
+        if(Request->ValueSize<sizeof(ULONG))return STATUS_BUFFER_TOO_SMALL;
+        if(Request->ValueSize<sizeof(KSPROPERTY_DESCRIPTION)){*(ULONG*)Request->Value=Access;Request->ValueSize=sizeof(ULONG);return STATUS_SUCCESS;}
+        auto Desc=(PKSPROPERTY_DESCRIPTION)Request->Value;RtlZeroMemory(Desc,sizeof(*Desc));
+        Desc->AccessFlags=Access;Desc->DescriptionSize=Full;Desc->PropTypeSet.Set=KSPROPTYPESETID_General;Desc->PropTypeSet.Id=Mute?VT_BOOL:VT_I4;Desc->MembersListCount=1;
+        if(Request->ValueSize>=Full) {
+            auto Members=(PKSPROPERTY_MEMBERSHEADER)(Desc+1);*Members={KSPROPERTY_MEMBER_STEPPEDRANGES,sizeof(KSPROPERTY_STEPPING_LONG),2,KSPROPERTY_MEMBER_FLAG_BASICSUPPORT_MULTICHANNEL};
+            auto Range=(PKSPROPERTY_STEPPING_LONG)(Members+1);
+            for(ULONG i=0;i<2;i++){Range[i].SteppingDelta=Mute?1:SIA_VOLUME_STEP;Range[i].Reserved=0;Range[i].Bounds.SignedMinimum=Mute?0:SIA_VOLUME_MIN;Range[i].Bounds.SignedMaximum=Mute?1:0;}
+            Request->ValueSize=Full;
+        }else Request->ValueSize=sizeof(*Desc);
+        return STATUS_SUCCESS;
+    }
+    if(Request->InstanceSize<sizeof(ULONG))return STATUS_INVALID_PARAMETER;
+    ULONG Channel=*(ULONG*)Request->Instance;if(Channel>1 && Channel!=ULONG(-1))return STATUS_INVALID_PARAMETER;
+    if(!Request->ValueSize){Request->ValueSize=sizeof(LONG);return STATUS_BUFFER_OVERFLOW;}
+    if(Request->ValueSize<sizeof(LONG))return STATUS_BUFFER_TOO_SMALL;
+    auto Dev=static_cast<Topology*>(Request->MajorTarget)->Dev;auto Value=(LONG*)Request->Value;auto Levels=Mute?Dev->Muted:Dev->Volume;
+    if(Request->Verb&KSPROPERTY_TYPE_GET)*Value=InterlockedCompareExchange(&Levels[Channel==ULONG(-1)?0:Channel],0,0);
+    else if(Request->Verb&KSPROPERTY_TYPE_SET) {
+        LONG Level=Mute?!!*Value:*Value;
+        if(!Mute && (Level<SIA_VOLUME_MIN || Level>0))return STATUS_INVALID_PARAMETER;
+        if(!Mute)Level=-((-Level+SIA_VOLUME_STEP/2)/SIA_VOLUME_STEP)*SIA_VOLUME_STEP;
+        LONG Gain=Mute?0:SiaGain(Level);
+        for(ULONG i=0;i<2;i++)if(Channel==i || Channel==ULONG(-1)) {
+            if(!Mute)InterlockedExchange(&Dev->Gain[i],Gain);
+            InterlockedExchange(&Levels[i],Level);
+        }
+        if(!Mute) {
+            LONG Master=max(InterlockedCompareExchange(&Dev->Volume[0],0,0),InterlockedCompareExchange(&Dev->Volume[1],0,0));
+            InterlockedExchange(&AudioLimits,QH_VOLUME_READY|(Master==0?QH_VOLUME_MAX:0)|(Master==SIA_VOLUME_MIN?QH_VOLUME_MIN:0));
+        }
+    }else return STATUS_INVALID_DEVICE_REQUEST;
+    Request->ValueSize=sizeof(LONG);return STATUS_SUCCESS;
+}
 
 struct Extension { UCHAR PortData[PORT_CLASS_DEVICE_EXTENSION_SIZE]; SIA_DEVICE Dev; };
 static PSIA_DEVICE DeviceContext(PDEVICE_OBJECT Device) { return &((Extension *)Device->DeviceExtension)->Dev; }
@@ -347,8 +398,9 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT Device, PIRP Irp, PRESOURCELIST Resou
     auto Dev = DeviceContext(Device);
     NTSTATUS Status = SiaHardwareStart(Dev, Memory);
     if (!NT_SUCCESS(Status)) { SiaHardwareStop(Dev); return Status; }
+    InterlockedExchange(&AudioLimits,QH_VOLUME_READY|QH_VOLUME_MAX);
     for (ULONG Index = 0; Index < 2 && NT_SUCCESS(Status); Index++) {
-        auto Top = new Topology((BOOLEAN)Index);
+        auto Top = new Topology(Dev,(BOOLEAN)Index);
         auto Audio = new Wave(Dev, (BOOLEAN)Index);
         if (!Top || !Audio) { if (Top) Top->Release(); if (Audio) Audio->Release(); Status = STATUS_INSUFFICIENT_RESOURCES; break; }
         PPORT TopPort = nullptr, WavePort = nullptr;
@@ -374,13 +426,14 @@ static NTSTATUS DispatchPnp(PDEVICE_OBJECT Device, PIRP Irp)
     auto Stack = IoGetCurrentIrpStackLocation(Irp);
     if (Stack->MinorFunction == IRP_MN_REMOVE_DEVICE) QchRemove();
     if (Stack->MinorFunction == IRP_MN_STOP_DEVICE || Stack->MinorFunction == IRP_MN_REMOVE_DEVICE ||
-        Stack->MinorFunction == IRP_MN_SURPRISE_REMOVAL) SiaHardwareStop(DeviceContext(Device));
+        Stack->MinorFunction == IRP_MN_SURPRISE_REMOVAL) { InterlockedExchange(&AudioLimits,0);SiaHardwareStop(DeviceContext(Device)); }
     return PcDispatchIrp(Device, Irp);
 }
 
 extern "C" DRIVER_INITIALIZE DriverEntry;
 extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT Driver, PUNICODE_STRING RegistryPath)
 {
+    SiaDspMemoryInit();QcomRpcInit();
     NTSTATUS Status = PcInitializeAdapterDriver(Driver, RegistryPath, AddDevice);
     if (NT_SUCCESS(Status)) Driver->MajorFunction[IRP_MJ_PNP] = DispatchPnp;
     if (NT_SUCCESS(Status)) Status=QchInit(Driver,RegistryPath);

@@ -117,22 +117,37 @@ static int bo_export(tu_device *,tu_bo *) { return -1; }
 static VkResult bo_lazy(tu_device *,tu_bo *) { return VK_ERROR_FEATURE_NOT_PRESENT; }
 static int metadata_get(tu_device *,tu_bo *,void *,uint32_t) { return -1; }
 
+struct windows_submit { util_dynarray entries,binds; };
 static void *submit_create(tu_device *) {
-   auto array=new(std::nothrow) util_dynarray;
-   if(array)util_dynarray_init(array,nullptr);
-   return array;
+   auto data=new(std::nothrow) windows_submit;
+   if(data){util_dynarray_init(&data->entries,nullptr);util_dynarray_init(&data->binds,nullptr);}
+   return data;
 }
 static void submit_finish(tu_device *,void *data) {
-   auto array=(util_dynarray *)data;util_dynarray_fini(array);delete array;
+   auto submit=(windows_submit *)data;util_dynarray_fini(&submit->entries);util_dynarray_fini(&submit->binds);delete submit;
 }
 static void submit_entries(tu_device *,void *data,tu_cs_entry *entries,unsigned count) {
    for(unsigned i=0;i<count;i++) {
       GPU_SUBMIT entry={entries[i].bo->gem_handle,entries[i].offset,entries[i].size/4,0};
-      util_dynarray_append((util_dynarray *)data,entry);
+      util_dynarray_append(&((windows_submit *)data)->entries,entry);
    }
 }
-static void submit_bind(tu_device *,void *,tu_sparse_vma *,uint64_t,tu_bo *,uint64_t,uint64_t) { UNREACHABLE("Sparse unsupported"); }
-static VkResult sparse_init(tu_device *,vk_object_base *,tu_sparse_vma *,uint64_t *,tu_sparse_vma_flags,uint64_t,uint64_t) { return VK_ERROR_FEATURE_NOT_PRESENT; }
+static void submit_bind(tu_device *,void *data,tu_sparse_vma *vma,uint64_t offset,tu_bo *bo,uint64_t bo_offset,uint64_t size) {
+   GPU_VA_BIND bind={vma->kgsl.virtual_bo->gem_handle,bo?bo->gem_handle:0,offset,bo_offset,size};
+   util_dynarray_append(&((windows_submit *)data)->binds,bind);
+}
+static VkResult sparse_init(tu_device *dev,vk_object_base *base,tu_sparse_vma *vma,uint64_t *iova,tu_sparse_vma_flags flags,uint64_t size,uint64_t address) {
+   auto bo=(tu_bo *)vk_zalloc(&dev->vk.alloc,sizeof(tu_bo),8,VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);if(!bo)return VK_ERROR_OUT_OF_HOST_MEMORY;
+   GPU_VA_RESERVE request={address,size,(flags&TU_SPARSE_VMA_MAP_ZERO)?1u:0u,0};GPU_VA_ALLOCATION allocation;
+   if(!a830_ioctl(dev->windows_handle,GPU_IOCTL_VA_RESERVE,&request,sizeof(request),&allocation,sizeof(allocation))){vk_free(&dev->vk.alloc,bo);return VK_ERROR_OUT_OF_DEVICE_MEMORY;}
+   bo->gem_handle=allocation.Handle;bo->size=allocation.Size;bo->iova=allocation.Address;bo->refcnt=1;bo->base=base;
+   vma->kgsl.virtual_bo=bo;*iova=bo->iova;return VK_SUCCESS;
+}
+static void sparse_finish(tu_device *dev,tu_sparse_vma *vma) {
+   auto bo=vma->kgsl.virtual_bo;
+   a830_ioctl(dev->windows_handle,GPU_IOCTL_VA_RELEASE,&bo->gem_handle,sizeof(bo->gem_handle),nullptr,0);
+   vk_free(&dev->vk.alloc,bo);
+}
 
 static VkResult queue_wait(tu_queue *queue,uint32_t fence,uint64_t timeout) {
    if(fence==UINT32_MAX)return VK_SUCCESS;
@@ -141,9 +156,10 @@ static VkResult queue_wait(tu_queue *queue,uint32_t fence,uint64_t timeout) {
 }
 static VkResult queue_submit(tu_queue *queue,void *data,struct vk_sync_wait *waits,uint32_t wait_count,struct vk_sync_signal *signals,uint32_t signal_count,tu_u_trace_submission_data *) {
    auto dev=queue->device;auto ctx=(windows_context *)dev->windows_context;
+   auto submit=(windows_submit *)data;unsigned bind_count=util_dynarray_num_elements(&submit->binds,GPU_VA_BIND);
    for(unsigned i=0;i<wait_count;i++) {
       bool ordered=false;
-      if(ctx && waits[i].sync->type==&windows_sync_type) {
+      if(!bind_count && ctx && waits[i].sync->type==&windows_sync_type) {
          auto sync=(windows_sync *)waits[i].sync;
          AcquireSRWLockShared(&sync->lock);ordered=sync->ctx==ctx;ReleaseSRWLockShared(&sync->lock);
       }
@@ -152,8 +168,16 @@ static VkResult queue_submit(tu_queue *queue,void *data,struct vk_sync_wait *wai
          if(result!=VK_SUCCESS)return result;
       }
    }
-   auto array=(util_dynarray *)data;auto entries=(GPU_SUBMIT *)array->data;
-   unsigned count=util_dynarray_num_elements(array,GPU_SUBMIT);
+   if(bind_count) {
+      if(!ctx)return VK_ERROR_DEVICE_LOST;
+      AcquireSRWLockExclusive(&ctx->submit_lock);
+      VkResult result=(VkResult)a830_context_wait(ctx,ctx->submitted,UINT64_MAX);
+      if(result==VK_SUCCESS && !a830_ioctl(dev->windows_handle,GPU_IOCTL_VA_BIND,submit->binds.data,(DWORD)submit->binds.size,nullptr,0))result=VK_ERROR_DEVICE_LOST;
+      ReleaseSRWLockExclusive(&ctx->submit_lock);
+      if(result!=VK_SUCCESS)return result;
+   }
+   auto entries=(GPU_SUBMIT *)submit->entries.data;
+   unsigned count=util_dynarray_num_elements(&submit->entries,GPU_SUBMIT);
    if(!ctx || !ctx->page)return vk_device_set_lost(&dev->vk,"Missing WDDM completion state");
    uint64_t fence;
    VkResult result=(VkResult)a830_context_submit(ctx,entries,count,&fence);queue->fence=(uint32_t)fence;
@@ -170,7 +194,7 @@ static const tu_knl windows_knl={
    .bo_init_dmabuf=bo_import,.bo_export_dmabuf=bo_export,.bo_alloc_lazy=bo_lazy,.bo_map=bo_map,
    .bo_finish=bo_finish,.bo_get_metadata=metadata_get,
    .submit_create=submit_create,.submit_finish=submit_finish,.submit_add_entries=submit_entries,.submit_add_bind=submit_bind,
-   .queue_submit=queue_submit,.queue_wait_fence=queue_wait,.sparse_vma_init=sparse_init,
+   .queue_submit=queue_submit,.queue_wait_fence=queue_wait,.sparse_vma_init=sparse_init,.sparse_vma_finish=sparse_finish,
 };
 
 VkResult tu_knl_windows_load(tu_instance *instance) {
@@ -199,6 +223,8 @@ VkResult tu_knl_windows_load(tu_instance *instance) {
    device->uche_trap_base=0x1FFFFFFFFF000ull;
    device->va_start=GPU_CLIENT_VA_BASE;device->va_size=GPU_CLIENT_VA_SIZE;
    device->ubwc_config.highest_bank_bit=16;device->ubwc_config.bank_swizzle_levels=6;device->ubwc_config.macrotile_mode=FDL_MACROTILE_8_CHANNEL;
+   ULONG sparse=0;
+   device->has_sparse=device->has_sparse_prr=a830_ioctl(handle,GPU_IOCTL_SPARSE_CAPS,nullptr,0,&sparse,sizeof(sparse)) && sparse==1;
    device->submitqueue_priority_count=1;
    device->heap.size=device->va_size;device->heap.flags=VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
    device->sync_types[0]=&windows_sync_type;

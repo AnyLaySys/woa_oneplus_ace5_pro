@@ -35,6 +35,9 @@ static VOID RegisterHardwareInfo(PDEVICE_OBJECT device) {
 static NTSTATUS Add(PDEVICE_OBJECT device,PVOID *context) {
     A830_ADAPTER *a=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*a),GPU_TAG);
     if(!a)return STATUS_INSUFFICIENT_RESOURCES;
+    a->BrightnessWork=IoAllocateWorkItem(device);
+    if(!a->BrightnessWork){ExFreePoolWithTag(a,GPU_TAG);return STATUS_INSUFFICIENT_RESOURCES;}
+    KeInitializeEvent(&a->BrightnessIdle,NotificationEvent,TRUE);
     RegisterHardwareInfo(device);
 
     GpuInitialize(&a->Hardware,Synchronize,a);KeInitializeSpinLock(&a->QueueLock);KeInitializeMutex(&a->DisplayPowerLock,0);
@@ -42,11 +45,12 @@ static NTSTATUS Add(PDEVICE_OBJECT device,PVOID *context) {
     KeInitializeDpc(&a->DisplayWake,DisplayWake,a);
     ExInitializeRundownProtection(&a->ScanoutAccess);
     for(ULONG i=0;i<A830_QUEUE_DEPTH;i++)InsertTailList(&a->Free,&a->Jobs[i].Entry);
-    *context=a;return STATUS_SUCCESS;
+    a->Brightness=47;a->PanelBrightness=(47*0xDBB+50)/100;*context=a;return STATUS_SUCCESS;
 }
 static VOID StopWorker(A830_ADAPTER *a) {
     InterlockedIncrement(&a->Generation);InterlockedExchange(&a->Failed,STATUS_DEVICE_NOT_READY);
     InterlockedExchange(&a->Stopping,1);
+    A830BrightnessStop(a);
     KIRQL old;KeAcquireSpinLock(&a->ContextLock,&old);
     for(PLIST_ENTRY e=a->Contexts.Flink;e!=&a->Contexts;e=e->Flink) {
         A830_CONTEXT *c=CONTAINING_RECORD(e,A830_CONTEXT,Entry);A830_COMPLETION *page=(PVOID)c->CompletionBuffer.Cpu;
@@ -124,6 +128,7 @@ static NTSTATUS Start(PVOID context,PDXGK_START_INFO start,PDXGKRNL_INTERFACE dx
 static NTSTATUS Remove(PVOID context){
     A830_ADAPTER *a=context;KeRemoveQueueDpc(&a->DisplayWake);KeFlushQueuedDpcs();
     A830BridgeRemove();
+    IoFreeWorkItem(a->BrightnessWork);
     ExFreePoolWithTag(a,GPU_TAG);return STATUS_SUCCESS;
 }
 static BOOLEAN Interrupt(PVOID context,ULONG message) {
@@ -187,7 +192,25 @@ static NTSTATUS Power(PVOID context,ULONG uid,DEVICE_POWER_STATE state,POWER_ACT
 }
 static VOID Unload(VOID){A830BridgeDestroy();}
 static NTSTATUS APIENTRY Collect(HANDLE adapter,const DXGKARG_COLLECTDBGINFO *p) {
-    UNREFERENCED_PARAMETER(adapter);UNREFERENCED_PARAMETER(p);return STATUS_SUCCESS;
+    A830_ADAPTER *a=adapter;GPU *g=&a->Hardware;ULONG w[28]={0x38524454,2,p->Reason};
+    if(!p->pBuffer || p->BufferSize<sizeof(w))return STATUS_BUFFER_TOO_SMALL;
+    KIRQL old;KeAcquireSpinLock(&g->RingLock,&old);
+    w[3]=g->Stage;w[4]=g->Fault;w[5]=(ULONG)g->Temperature;
+    w[6]=g->PerfIndex<g->PerfCount?g->PerfKhz[g->PerfIndex]:0;w[7]=(ULONG)g->Submitted;
+    if(g->Online && g->Powered && g->Memory.Cpu) {
+        w[8]=*(volatile ULONG *)g->Memory.Cpu;
+        w[9]=Gr(g,REG_A6XX_CP_RB_RPTR);w[10]=Gr(g,REG_A6XX_CP_RB_WPTR);
+    }
+    KeReleaseSpinLock(&g->RingLock,old);
+    GPU_DISPLAY_INFO display={0};A830DpuQuery(a,&display);
+    w[11]=(ULONG)a->Failed;w[12]=a->Completed;w[13]=a->LastSubmitted;
+    w[14]=display.Flags;w[15]=display.State;w[16]=display.Queued;w[17]=display.Applied;
+    w[18]=display.FailureState;w[19]=display.FailureLine;w[20]=display.FailureEvent;
+    w[21]=display.FailureDone;w[22]=display.FailureFrame;w[23]=display.FailureFlushed;
+    w[24]=display.Line;w[25]=display.Event;w[26]=display.Frame;w[27]=display.InitialFrame;
+    RtlCopyMemory(p->pBuffer,w,sizeof(w));
+    if(p->pExtension){p->pExtension->BucketingKey=w[0];p->pExtension->CurrentDmaBufferOffset=(g->WriteIndex&8191)*4;}
+    return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY StopCapture(HANDLE adapter,const DXGKARG_STOPCAPTURE *p) {
     UNREFERENCED_PARAMETER(adapter);UNREFERENCED_PARAMETER(p);return STATUS_SUCCESS;
@@ -234,7 +257,7 @@ static VOID ResetDevice(PVOID context) {
     if(a->Hardware.Powered && a->Hardware.Stage>=6){Gw(&a->Hardware,REG_A8XX_CP_SQE_CNTL,3);Gw(&a->Hardware,REG_A8XX_RBBM_INT_0_MASK,0);}
 }
 static NTSTATUS Interface(PVOID context,PQUERY_INTERFACE query) {
-    UNREFERENCED_PARAMETER(context);UNREFERENCED_PARAMETER(query);return STATUS_NOT_SUPPORTED;
+    return A830BrightnessInterface(context,query);
 }
 static NTSTATUS APIENTRY CreateDevice(HANDLE adapter,DXGKARG_CREATEDEVICE *p) {
     A830_DEVICE *d=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*d),GPU_TAG);if(!d)return STATUS_INSUFFICIENT_RESOURCES;

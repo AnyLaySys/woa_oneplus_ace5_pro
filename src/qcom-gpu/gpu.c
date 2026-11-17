@@ -206,9 +206,11 @@ static VOID StopLocked(GPU *g) {
 
 NTSTATUS GpuStart(GPU *g) {
     KeWaitForSingleObject(&g->MappingLock,Executive,KernelMode,FALSE,NULL);
-    NTSTATUS status=StartLocked(g);KeReleaseMutex(&g->MappingLock,FALSE);return status;
+    KeWaitForSingleObject(&g->PowerLock,Executive,KernelMode,FALSE,NULL);
+    NTSTATUS status=StartLocked(g);KeReleaseMutex(&g->PowerLock,FALSE);KeReleaseMutex(&g->MappingLock,FALSE);return status;
 }
 VOID GpuStop(GPU *g) {
     KeWaitForSingleObject(&g->MappingLock,Executive,KernelMode,FALSE,NULL);
-    StopLocked(g);KeReleaseMutex(&g->MappingLock,FALSE);
+    KeWaitForSingleObject(&g->PowerLock,Executive,KernelMode,FALSE,NULL);
+    StopLocked(g);KeReleaseMutex(&g->PowerLock,FALSE);KeReleaseMutex(&g->MappingLock,FALSE);
 }

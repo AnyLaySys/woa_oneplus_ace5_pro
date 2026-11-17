@@ -20,7 +20,7 @@
   <PropertyGroup>
     <TargetName>qcom_keys</TargetName>
     <KeysVersionDate Condition="'$(KeysVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</KeysVersionDate>
-    <KeysRevision Condition="'$(KeysRevision)' == ''">6</KeysRevision>
+    <KeysRevision Condition="'$(KeysRevision)' == ''">19</KeysRevision>
     <KeysDriverDate>$([System.DateTime]::Parse('$(KeysVersionDate)').ToString('MM/dd/yyyy'))</KeysDriverDate>
     <KeysDriverVersion>$([System.DateTime]::Parse('$(KeysVersionDate)').ToString('yy.M.d')).$(KeysRevision)</KeysDriverVersion>
     <KeysDriverVersionComma>$([System.String]::Copy('$(KeysDriverVersion)').Replace('.', ','))</KeysDriverVersionComma>
@@ -29,12 +29,14 @@
     <IntDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-keys\ARM64\Release\obj\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
-    <ClCompile><PreprocessorDefinitions>_UNICODE;UNICODE;POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MinSpace</Optimization></ClCompile>
+    <ClCompile><PreprocessorDefinitions>_UNICODE;UNICODE;POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MinSpace</Optimization><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
+    <Link><GenerateDebugInformation>false</GenerateDebugInformation><Profile>false</Profile></Link>
     <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>$(KeysDriverDate)</DateStamp><TimeStamp>$(KeysDriverVersion)</TimeStamp></Inf>
     <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=$(KeysDriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(KeysDriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\keys.c" />
+    <ClInclude Include="..\haptics.h" /><ClInclude Include="..\haptics.inc" /><ClInclude Include="..\feedback.h" />
     <ResourceCompile Include="qcom_keys.rc" /><Inf Include="qcom_keys.inx" /><FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

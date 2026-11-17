@@ -1,7 +1,11 @@
 #pragma once
 #include <ntddk.h>
+#include "..\qcom-sensors\see.h"
+#include "..\qcom-sensors\rpc.h"
 #include "usb.h"
 #include "charge.h"
+#include "volume.h"
+#include "..\qcom-keys\haptics.h"
 
 #define SIA_PCM_RATE 48000u
 #define SIA_PCM_FRAMES 960u
@@ -25,6 +29,7 @@ typedef struct _SIA_GPR_PACKET {
 
 typedef struct _SIA_LINK {
     SIA_USB Usb;
+    QCOM_SEE See;
     QCH_LINK Charge;
     BOOLEAN VersionReady;
     PUCHAR Smem;
@@ -78,6 +83,7 @@ typedef struct _SIA_DEVICE {
     volatile LONG Running;
     BOOLEAN RetainedDma;
     SIA_PCM Stream[2];
+    volatile LONG Volume[2],Gain[2],Muted[2];
 } SIA_DEVICE, *PSIA_DEVICE;
 
 typedef struct _SIA_MIC SIA_MIC, *PSIA_MIC;
@@ -107,6 +113,14 @@ static __inline VOID SiaGprHeader (UCHAR *Packet, ULONG Length, ULONG Source, UL
 #ifdef __cplusplus
 extern "C" {
 #endif
+BOOLEAN QcomRpcFast(VOID);
+VOID QcomRpcInit(VOID);
+VOID QcomRpcDetach(PFILE_OBJECT file);
+NTSTATUS QcomRpcInvoke(PIRP Irp,PULONG bytes);
+ULONG SiaVolumeLimits(VOID);
+VOID SiaDspMemoryInit(VOID);
+NTSTATUS SiaDspMemoryAcquire(VOID);
+VOID SiaDspMemoryRelease(BOOLEAN retain);
 NTSTATUS SiaHardwareStart (PSIA_DEVICE Dev, PCM_PARTIAL_RESOURCE_DESCRIPTOR Resource);
 VOID SiaHardwareStop (PSIA_DEVICE Dev);
 NTSTATUS SiaStreamStart (PSIA_DEVICE Dev, BOOLEAN Capture);

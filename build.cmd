@@ -17,6 +17,7 @@ if /i "%NAME%"=="qcom-charge" (set "NAME=qcom-audio"& set "TARGET=sia9177")
 if /i "%NAME%"=="qcom-battery" (set "NAME=qcom-battery"& set "TARGET=qcom_battery")
 if /i "%NAME%"=="qcom-cpupower" (set "NAME=qcom-cpupower"& set "TARGET=qcom_cpupower")
 if /i "%NAME%"=="qcom-keys" (set "NAME=qcom-keys"& set "TARGET=qcom_keys")
+if /i "%NAME%"=="qcom-sensors" (set "NAME=qcom-sensors"& set "TARGET=qcom_sensors")
 if /i "%NAME%"=="qcom-gpu" (set "NAME=qcom-gpu"& set "TARGET=qcom_gpu")
 if not defined TARGET goto invalid
 set "CREDENTIAL="
@@ -93,6 +94,12 @@ if defined GPU_PACKAGE (
 )
 "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%TARGET%.sys"
 if errorlevel 1 exit /b 1
+if /i "%NAME%"=="qcom-sensors" (
+  copy /y "%BIN%\qcom_sensors_service.exe" "%DST%\qcom_sensors_service.exe" >nul
+  if errorlevel 1 exit /b 1
+  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_sensors_service.exe"
+  if errorlevel 1 exit /b 1
+)
 if /i "%NAME%"=="qcom-audio" (
   if exist "%DST%\charge.exe" del /q "%DST%\charge.exe"
   copy /y "%CREDENTIAL%" "%DST%\credential.bin" >nul
@@ -113,7 +120,7 @@ dir "%DST%" /b
 exit /b 0
 
 :build_all
-for %%D in (syna-s3910 qcom-audio qcom-bluetooth qcom-wcn7861 qcom-battery qcom-cpupower qcom-keys qcom-gpu) do (
+for %%D in (syna-s3910 qcom-audio qcom-bluetooth qcom-wcn7861 qcom-battery qcom-cpupower qcom-keys qcom-sensors qcom-gpu) do (
   echo.
   echo Building %%D...
   call "%~f0" %%D
@@ -197,6 +204,7 @@ echo        build.cmd qcom-charge
 echo        build.cmd qcom-battery
 echo        build.cmd qcom-cpupower
 echo        build.cmd qcom-keys
+echo        build.cmd qcom-sensors
 echo        build.cmd qcom-gpu
 echo        build.cmd install-fw -WindowsDirectory "W:\Windows" [-BluetoothAddress "XX:XX:XX:XX:XX:XX"] [-WhatIf] [-Force]
 echo all builds every driver.
@@ -335,7 +343,7 @@ options = [
     '-Dgbm=disabled', '-Dgles1=disabled', '-Dgles2=disabled', '-Dopengl=true',
     '-Dshader-cache=disabled', '-Dexpat=disabled', '-Dzlib=enabled', '-Dzstd=disabled',
     '-Dbuild-tests=false', '-Dspirv-tools=disabled', '-Dtools=[]', '-Ddefault_library=static',
-    '-Dtu-build-id=' + mesa_commit]
+    '-Dtu-build-id=' + hashlib.sha256(mesa_commit.encode() + patch.read_bytes()).hexdigest()]
 def build_mesa(directory, cross_file, config, *targets):
     setup = ['--reconfigure'] if (directory / 'build.ninja').exists() else []
     cached = directory / 'meson-private/cmd_line.txt'
@@ -445,6 +453,94 @@ build_mesa(build_x64, cross_x64, options_x64, 'src/freedreno/vulkan/vulkan_freed
 copy(build_x64 / 'src/gallium/targets/wgl/a830_gl_x64.dll', package / 'a830_gl_x64.dll')
 copy(build_x64 / 'src/freedreno/vulkan/vulkan_freedreno.dll', package / 'vulkan_freedreno_x64.dll')
 write(package / 'freedreno_icd_x64.json', (package / 'freedreno_icd.json').read_text().replace('vulkan_freedreno.dll', 'vulkan_freedreno_x64.dll'))
+def patched_source(name, repository, tag, revision, patch):
+    directory = output / name
+    if not directory.exists():
+        run('git', 'clone', '--depth', '1', '--branch', tag, '--recurse-submodules', '--shallow-submodules', repository, directory)
+    if subprocess.check_output(['git', '-C', str(directory), 'rev-parse', 'HEAD'], text=True).strip() != revision:
+        raise ValueError('Unexpected ' + name + ' revision')
+    patch = local / patch
+    if subprocess.run(['git', '-C', str(directory), 'apply', '--reverse', '--check', str(patch)], capture_output=True).returncode:
+        run('git', '-C', directory, 'apply', '--check', patch)
+        run('git', '-C', directory, 'apply', patch)
+    return directory
+
+
+d3d12_source = patched_source('vkd3d-proton-3.1', 'https://github.com/HansKristian-Work/vkd3d-proton.git',
+    'v3.1', '4522cc1a8b1347f1ab1b0f7b14a23ed9444d95d1', 'vkd3d.patch')
+copy(local / 'd3d12_dxgi.h', d3d12_source / 'libs/d3d12/d3d12_dxgi.h')
+dxgi_source = patched_source('dxvk-2.7.1', 'https://github.com/doitsujin/dxvk.git',
+    'v2.7.1', 'c3dd74be6baec53786d4e064a572185b70347a17', 'dxgi.patch')
+copy(local / 'qcom_vulkan.h', d3d12_source / 'libs/d3d12core/qcom_vulkan.h')
+copy(local / 'qcom_vulkan.h', dxgi_source / 'src/vulkan/qcom_vulkan.h')
+d3d12_cross = output / 'd3d12.ini'
+write(d3d12_cross, """[binaries]
+widl = ['x86_64-w64-mingw32-widl', '-I/usr/share/mingw-w64/include']
+[built-in options]
+c_args = ['/DNOMINMAX', '/DVKD3D_NO_DEBUG_MESSAGES', '/clang:-Wno-incompatible-pointer-types']
+cpp_args = ['/EHsc', '/DVKD3D_NO_DEBUG_MESSAGES']
+""")
+destination = root / 'out/drv/qcom-d3d12'
+destination.mkdir(parents=True, exist_ok=True)
+for arch, config in [('arm64', cross), ('x64', cross_x64)]:
+    directory = output / ('vkd3d-proton-' + arch)
+    setup = ['--reconfigure'] if (directory / 'build.ninja').exists() else []
+    run('meson', 'setup', *setup, directory, d3d12_source, '--cross-file', config, '--cross-file', d3d12_cross,
+        '--buildtype', 'release', '-Db_ndebug=true', '-Db_vscrt=mt', '-Denable_trace=false')
+    run('ninja', '-C', directory, '-j', min(os.cpu_count() or 1, 8))
+    for name in ['d3d12', 'd3d12core']:
+        copy(directory / 'libs' / name / (name + '.dll'), destination / ('qcom_' + name + '_' + arch + '.dll'))
+    dxgi_cross = output / ('dxgi-' + arch + '.ini')
+    write(dxgi_cross, config.read_text().replace('windres =', 'rc ='))
+    directory = output / ('dxvk-' + arch)
+    setup = ['--reconfigure'] if (directory / 'build.ninja').exists() else []
+    run('meson', 'setup', *setup, directory, dxgi_source, '--cross-file', dxgi_cross,
+        "-Dcpp_args=['/EHsc', '/DDXVK_NO_LOG', '/clang:-Wno-pragma-pack']",
+        '--buildtype', 'release', '-Db_ndebug=true', '-Db_vscrt=mt', '-Denable_d3d8=false', '-Denable_d3d9=false',
+        '-Denable_d3d10=false', '-Denable_d3d11=false')
+    run('ninja', '-C', directory, '-j', min(os.cpu_count() or 1, 8), 'src/dxgi/dxgi.dll')
+    copy(directory / 'src/dxgi/dxgi.dll', destination / ('qcom_dxgi_' + arch + '.dll'))
+forwarder = output / 'd3d12-forwarder'
+forwarder.mkdir(parents=True, exist_ok=True)
+exports = {
+    'arm64': [None, 'SetAppCompatStringPointer', 'D3D12CreateDevice', 'D3D12GetDebugInterface',
+        'D3D12CoreCreateLayeredDevice', 'D3D12CoreGetLayeredDeviceSize', 'D3D12CoreRegisterLayers',
+        'D3D12CreateRootSignatureDeserializer', 'D3D12CreateVersionedRootSignatureDeserializer',
+        'D3D12DeviceRemovedExtendedData', 'D3D12EnableExperimentalFeatures', 'D3D12GetInterface',
+        'D3D12PIXEventsReplaceBlock', 'D3D12PIXGetThreadInfo', 'D3D12PIXNotifyWakeFromFenceSignal',
+        'D3D12PIXReportCounter', 'D3D12SerializeRootSignature', 'D3D12SerializeVersionedRootSignature', 'GetBehaviorValue'],
+    'x64': [None, 'D3D12CoreCreateLayeredDevice', 'D3D12CreateDevice', 'D3D12GetDebugInterface',
+        'D3D12CoreGetLayeredDeviceSize', 'D3D12CoreRegisterLayers', 'D3D12CreateRootSignatureDeserializer',
+        'D3D12CreateVersionedRootSignatureDeserializer', 'D3D12EnableExperimentalFeatures', 'D3D12GetInterface',
+        'D3D12PIXEventsReplaceBlock', 'D3D12PIXGetThreadInfo', 'D3D12PIXNotifyWakeFromFenceSignal',
+        'D3D12PIXReportCounter', 'D3D12SerializeRootSignature', 'D3D12SerializeVersionedRootSignature',
+        'GetBehaviorValue', 'SetAppCompatStringPointer', 'D3D12DeviceRemovedExtendedData']}
+translated = set(exports['x64'][2:4] + exports['x64'][6:10] + exports['x64'][14:16])
+objects = []
+for arch, target, machine in [('arm64', 'aarch64', 'arm64'), ('x64', 'arm64ec', 'x64')]:
+    definition = forwarder / (arch + '.def')
+    entries = []
+    for ordinal, name in enumerate(exports[arch], 99):
+        module = 'qcom_d3d12_' + arch if name in translated else 'qcom_d3d12_system'
+        entries.append('    ' + (name or 'Ordinal99') + '=' + module + '.' + (name or '#99') +
+            ' @' + str(ordinal) + ('' if name else ' NONAME'))
+    write(definition, 'EXPORTS\n' + '\n'.join(entries) + '\n')
+    obj = forwarder / (arch + '.obj')
+    run(*[arg.replace('aarch64-pc-windows-msvc', target + '-pc-windows-msvc') for arg in compiler],
+        '/c', '/Zl', '/GS-', '/Fo' + str(obj), local / 'd3d12_forward.c')
+    library = forwarder / (arch + '.lib')
+    run('lld-link', '/lib', '/machine:' + machine, '/def:' + str(definition), '/out:' + str(library))
+    objects += [obj, library]
+run('lld-link', '/dll', '/noentry', '/nodefaultlib', '/machine:arm64x',
+    '/defarm64native:' + str(forwarder / 'arm64.def'), '/def:' + str(forwarder / 'x64.def'),
+    *objects, '/out:' + str(destination / 'd3d12.dll'), '/implib:' + str(forwarder / 'd3d12.lib'))
+copy(local / 'install-d3d12.ps1', destination / 'install-d3d12.ps1')
+for name, path in [('vkd3d', d3d12_source / 'LICENSE'), ('dxvk', dxgi_source / 'LICENSE'),
+    ('dxil-spirv', d3d12_source / 'subprojects/dxil-spirv/LICENSE.MIT'),
+    ('dxbc-spirv', d3d12_source / 'subprojects/dxil-spirv/subprojects/dxbc-spirv/LICENSE'),
+    ('SPIRV-Cross', d3d12_source / 'subprojects/dxil-spirv/third_party/SPIRV-Cross/LICENSE'),
+    ('libdisplay-info', dxgi_source / 'subprojects/libdisplay-info/LICENSE')]:
+    copy(path, root / 'out/drv/qcom-d3d12' / ('LICENSE.' + name))
 print('GPU_RENDERER=' + str(package))
 #</GPU-BUILD>
 

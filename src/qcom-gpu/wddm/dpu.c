@@ -1,5 +1,6 @@
 #include "adapter.h"
 #include "dpu.h"
+#include "dpu-completion.h"
 
 /* SM8750 DPU12: Linux dpu_12_0_sm8750.h, dpu_hw_sspp.c,
  * dpu_hw_ctl.c and dpu_hw_intf.c. No DSI/DSC/clock programming is performed.
@@ -184,6 +185,7 @@ typedef struct {
     LONG64 TransactionSequence;
     ULONGLONG TransactionAddress,TransactionDeadline;
     ULONG TransactionPitch,TransactionFrame,TransactionState,TransactionSync,TransactionAuto,PpMask;
+    ULONG FailureState,FailureLine,FailureEvent,FailureDone,FailureFrame,FailureFlush;
     BOOLEAN TransactionGated;
     volatile LONG Kick;
     volatile LONG WakeNeeded;
@@ -276,6 +278,29 @@ static BOOLEAN FlushComplete(A830_DPU *d) {
     for(ULONG i=0;i<d->CtlCount;i++)if(Read(d,d->Ctls[i].Base+0x18)&d->Ctls[i].Mask)return FALSE;
     return TRUE;
 }
+typedef struct { A830_ADAPTER *Adapter;GPU_DISPLAY_INFO *Info; } DPU_QUERY;
+static BOOLEAN QueryState(PVOID context) {
+    DPU_QUERY *query=context;A830_ADAPTER *a=query->Adapter;GPU_DISPLAY_INFO *r=query->Info;
+    A830_DPU *d=a->Dpu;r->Status=(ULONG)a->Failed;r->Completed=a->Completed;r->Submitted=a->LastSubmitted;
+    if(!d)return TRUE;
+    r->Flags=(d->Enabled?1u:0u)|(d->Stopping?2u:0u);
+    r->State=d->TransactionState;r->Queued=(ULONG)d->Queued;r->Applied=(ULONG)d->Applied;
+    r->PendingFence=d->PendingFence;r->InitialFrame=d->TransactionFrame;r->Pitch=d->PendingPitch;r->Period=(ULONG)d->Period;
+    r->FailureState=d->FailureState;r->FailureLine=d->FailureLine;r->FailureEvent=d->FailureEvent;
+    r->FailureDone=d->FailureDone;r->FailureFrame=d->FailureFrame;r->FailureFlushed=d->FailureFlush;
+    if(d->Enabled && !d->Stopping) {
+        r->Line=Read(d,d->Intf+0x2b0);r->Event=Read(d,d->Intf+0x804);
+        r->Done=Read(d,0x14)&d->PpMask;r->Frame=TxFrame(d);r->Flushed=FlushComplete(d);
+    }
+    return TRUE;
+}
+NTSTATUS A830DpuQuery(PVOID context,GPU_DISPLAY_INFO *info) {
+    A830_ADAPTER *a=context;RtlZeroMemory(info,sizeof(*info));info->Version=1;info->Size=sizeof(*info);
+    DPU_QUERY query={a,info};BOOLEAN result=FALSE;
+    KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);
+    NTSTATUS status=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,QueryState,&query,0,&result);
+    KeReleaseSpinLock(&a->QueueLock,old);return NT_SUCCESS(status)?(result?STATUS_SUCCESS:STATUS_UNSUCCESSFUL):status;
+}
 static VOID RestoreTransaction(A830_DPU *d) {
     if(!d->TransactionGated)return;
     /* Restore only the exact configuration held by this transaction. */
@@ -295,17 +320,22 @@ static VOID CompleteTransaction(A830_DPU *d) {
 
     InterlockedExchange(&d->WakeNeeded,1);
 }
+static VOID FailTransaction(A830_DPU *d,NTSTATUS status) {
+    d->FailureState=d->TransactionState;
+    d->FailureLine=Read(d,d->Intf+0x2b0);
+    d->FailureEvent=Read(d,d->Intf+0x804);d->FailureDone=Read(d,0x14)&d->PpMask;
+    d->FailureFrame=TxFrame(d);d->FailureFlush=FlushComplete(d);
+    RestoreTransaction(d);d->TransactionState=4;
+    InterlockedExchange(&d->Adapter->Failed,status);InterlockedExchange(&d->WakeNeeded,1);
+}
 /* Short display-interrupt-lock sections only. The timer provides all waits;
  * an Address callback never waits or writes a live SSPP source register. */
 static BOOLEAN AdvanceTransaction(PVOID context) {
     A830_DPU *d=context;
     if(d->Stopping || !d->Enabled || d->TransactionState==4)return TRUE;
     ULONGLONG now=PreciseTime();
-    if(d->TransactionState && now>=d->TransactionDeadline) {
-        RestoreTransaction(d);d->TransactionState=4;
-
-        InterlockedExchange(&d->Adapter->Failed,STATUS_IO_TIMEOUT);InterlockedExchange(&d->WakeNeeded,1);
-
+    if(d->TransactionState==1 && now>=d->TransactionDeadline) {
+        FailTransaction(d,STATUS_IO_TIMEOUT);
         return TRUE;
     }
     if(!d->TransactionState) {
@@ -324,10 +354,7 @@ static BOOLEAN AdvanceTransaction(PVOID context) {
         Write(d,d->Intf+0x288,d->TransactionSync&~(1u<<20));
         Write(d,d->Intf+0x2b4,d->TransactionAuto&~(1u<<31));KeMemoryBarrier();
         if((Read(d,d->Intf+0x288)&(1u<<20)) || (Read(d,d->Intf+0x2b4)&(1u<<31))) {
-            RestoreTransaction(d);d->TransactionState=4;
-
-            InterlockedExchange(&d->Adapter->Failed,STATUS_IO_DEVICE_ERROR);
-            InterlockedExchange(&d->WakeNeeded,1);return TRUE;
+            FailTransaction(d,STATUS_IO_DEVICE_ERROR);return TRUE;
         }
         d->TransactionState=1;
 
@@ -340,9 +367,7 @@ static BOOLEAN AdvanceTransaction(PVOID context) {
            latched 4f/100 may be mistaken for completion of this commit. */
         Write(d,d->Intf+0x808,1);Write(d,0x18,d->PpMask);KeMemoryBarrier();
         if((Read(d,d->Intf+0x804)&1) || (Read(d,0x14)&d->PpMask)) {
-            RestoreTransaction(d);d->TransactionState=4;
-
-            InterlockedExchange(&d->Adapter->Failed,STATUS_IO_DEVICE_ERROR);return TRUE;
+            FailTransaction(d,STATUS_IO_DEVICE_ERROR);return TRUE;
         }
         ULONGLONG physical=(ULONGLONG)ReadAcquire64(&d->TransactionPhysical);
 
@@ -361,13 +386,13 @@ static BOOLEAN AdvanceTransaction(PVOID context) {
         return TRUE;
     }
     ULONG event=Read(d,d->Intf+0x804),done=Read(d,0x14)&d->PpMask;
-    if(d->TransactionState==2 && (event&1) && active && FlushComplete(d)) {
-        /* Fresh AUTOREFRESH_DONE proves the double-buffer kickoff; observing
-           active WRPTR associates the following PPdone with this transfer. */
-        Write(d,0x18,d->PpMask);KeMemoryBarrier();d->TransactionState=3;
-
-    } else if(d->TransactionState==3 && !active && done && TxFrame(d)!=d->TransactionFrame && FlushComplete(d)) {
+    if(d->TransactionState==2 && A830DpuCommitComplete(d->TransactionFrame,
+        TxFrame(d),active,event,done,FlushComplete(d))) {
         CompleteTransaction(d);
+    } else if(d->TransactionState==2 && now>=d->TransactionDeadline) {
+        /* A late timer must inspect the latched evidence before declaring
+           timeout. Do not discard PPdone while waiting for another sample. */
+        FailTransaction(d,STATUS_IO_TIMEOUT);
     }
     return TRUE;
 }

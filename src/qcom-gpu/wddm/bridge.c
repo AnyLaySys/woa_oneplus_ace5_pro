@@ -6,6 +6,15 @@
 
 typedef struct {
     LIST_ENTRY Entry;
+    ULONGLONG Address,Size;
+    ULONG Handle;
+    BOOLEAN Zero,Released;
+    ULONGLONG Pages[];
+} A830_SPARSE;
+typedef struct {
+    LIST_ENTRY Entry,Sparse;
+    ULONG NextSparse;
+    PULONG SparseRefs;
     GPU_BO Buffers[GPU_MAX_BUFFERS];
     PVOID Maps[GPU_MAX_BUFFERS];
     PEPROCESS Owner;
@@ -42,9 +51,13 @@ static BOOLEAN KernelRange(ULONGLONG address,SIZE_T bytes) {
 }
 static A830_BRIDGE Bridge;
 static VOID CollectClientDeferred(A830_BRIDGE *g,A830_CLIENT *c);
-static VOID FreeAddress(A830_BRIDGE *g,ULONGLONG address,ULONG size) {
+static VOID CollectSparse(A830_BRIDGE *g,A830_CLIENT *c);
+static VOID CleanupSparse(A830_BRIDGE *g,A830_CLIENT *c);
+static NTSTATUS ResetSparse(A830_BRIDGE *g,A830_CLIENT *c);
+
+static VOID FreeAddress(A830_BRIDGE *g,ULONGLONG address,ULONGLONG size) {
     if(g->AddressBits && address>=GPU_CLIENT_VA_BASE && address<GPU_CLIENT_VA_END)
-        RtlClearBits(&g->Addresses,(ULONG)((address-GPU_CLIENT_VA_BASE)>>PAGE_SHIFT),size>>PAGE_SHIFT);
+        RtlClearBits(&g->Addresses,(ULONG)((address-GPU_CLIENT_VA_BASE)>>PAGE_SHIFT),(ULONG)(size>>PAGE_SHIFT));
 }
 static BOOLEAN FenceComplete(GPU *hardware,ULONGLONG fence) {
     if(!hardware || !hardware->Online)return TRUE;
@@ -129,9 +142,10 @@ static VOID CollectClientDeferred(A830_BRIDGE *g,A830_CLIENT *c) {
     GPU *hardware=g->Hardware;ULONGLONG completed=0;KeMemoryBarrier();
     if(hardware && hardware->Memory.Cpu)completed=*(volatile ULONGLONG *)hardware->Memory.Cpu;
     if(!GpuDeferredReady(&c->Deferred,(ULONG)InterlockedCompareExchange(&c->PendingRefs,0,0),hardware && hardware->Online,hardware && hardware->Memory.Cpu,completed))return;
+    CollectSparse(g,c);
     BOOLEAN attached=FALSE;KAPC_STATE state;
     for(ULONG i=0;i<GPU_MAX_BUFFERS;i++) {
-        if(c->Deferred.Buffers[i]) {
+        if(c->Deferred.Buffers[i] && (!c->SparseRefs || !c->SparseRefs[i])) {
             GPU_BO *bo=c->Buffers+i;
             ULONGLONG address=bo->Address;
             if(c->Maps[i]) {
@@ -185,11 +199,16 @@ static VOID LoadPowerPolicy(GPU *gpu) {
     ZwClose(key);
 }
 static VOID Governor(PVOID context) {
-    A830_BRIDGE *g=context;LARGE_INTEGER interval;interval.QuadPart=-500000;
+    A830_BRIDGE *g=context;LARGE_INTEGER interval;interval.QuadPart=-200000;
     while(KeWaitForSingleObject(&g->GovernorStop,Executive,KernelMode,FALSE,&interval)==STATUS_TIMEOUT) {
-        KeWaitForSingleObject(&g->Lock,Executive,KernelMode,FALSE,NULL);
-        if(g->Hardware)GpuGovern(g->Hardware);
-        KeReleaseMutex(&g->Lock,FALSE);
+        interval.QuadPart=-1000000;
+        if(ExAcquireRundownProtection(&g->ClockAccess)) {
+            if(g->Hardware) {
+                GpuGovern(g->Hardware);
+                if(g->Hardware->Online && (g->Hardware->BusyPercent>2 || g->Hardware->PerfIndex>1 || g->Hardware->CoolingBand))interval.QuadPart=-200000;
+            }
+            ExReleaseRundownProtection(&g->ClockAccess);
+        }
     }
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
@@ -214,6 +233,7 @@ static VOID Cleanup(A830_BRIDGE *g,A830_CLIENT *c) {
         BOOLEAN stopped=g->ClockStopped;
         PauseClock(g);GpuStop(g->Hardware);if(!stopped)ResumeClock(g);
     }
+    CleanupSparse(g,c);
     KAPC_STATE state;BOOLEAN attach=PsGetCurrentProcess()!=c->Owner;
     if(attach)KeStackAttachProcess(c->Owner,&state);
     for(ULONG i=0;i<RTL_NUMBER_OF(c->Buffers);i++) {
@@ -233,20 +253,27 @@ static VOID Cleanup(A830_BRIDGE *g,A830_CLIENT *c) {
     c->Deferred.Fence=0;
     ObDereferenceObject(c->Owner);c->Owner=NULL;
 }
-static ULONGLONG Address(A830_BRIDGE *g,ULONG size) {
+static ULONGLONG Address(A830_BRIDGE *g,ULONGLONG size,ULONGLONG requested) {
     const ULONG pages=(ULONG)(GPU_CLIENT_VA_SIZE>>PAGE_SHIFT);
     if(!g->AddressBits) {
         g->AddressBits=ExAllocatePool2(POOL_FLAG_NON_PAGED,pages/8,GPU_TAG);
         if(!g->AddressBits)return 0;
         RtlInitializeBitMap(&g->Addresses,g->AddressBits,pages);
     }
-    ULONG count=size>>PAGE_SHIFT;
-    ULONG index=RtlFindClearBitsAndSet(&g->Addresses,count,g->AddressHint);
+    if(!size || (size&(PAGE_SIZE-1)) || size>GPU_CLIENT_VA_SIZE)return 0;
+    ULONG count=(ULONG)(size>>PAGE_SHIFT),index;
+    if(requested) {
+        if(requested<GPU_CLIENT_VA_BASE || requested>=GPU_CLIENT_VA_END || (requested&(PAGE_SIZE-1)) || size>GPU_CLIENT_VA_END-requested)return 0;
+        index=(ULONG)((requested-GPU_CLIENT_VA_BASE)>>PAGE_SHIFT);
+        if(!RtlAreBitsClear(&g->Addresses,index,count))return 0;
+        RtlSetBits(&g->Addresses,index,count);
+    } else index=RtlFindClearBitsAndSet(&g->Addresses,count,g->AddressHint);
     if(index==MAXULONG)return 0;
     g->AddressHint=index+count;
     if(g->AddressHint>=pages)g->AddressHint=0;
     return GPU_CLIENT_VA_BASE+((ULONGLONG)index<<PAGE_SHIFT);
 }
+#include "sparse.inc"
 static NTSTATUS Submit(A830_BRIDGE *g,A830_CLIENT *c,const GPU_SUBMIT *entries,ULONG count) {
     GPU_COMMAND commands[GPU_MAX_COMMANDS];
     if(!count || count>RTL_NUMBER_OF(commands))return STATUS_INVALID_PARAMETER;
@@ -337,6 +364,7 @@ NTSTATUS A830BridgeReset(VOID) {
                 GPU_BO *b=c->Buffers+i;
                 if(b->Mdl)status=GpuMap(Bridge.Hardware,0,b,b->Address);
             }
+            if(NT_SUCCESS(status))status=ResetSparse(&Bridge,c);
         }
         for(PLIST_ENTRY entry=Bridge.Shared.Flink;NT_SUCCESS(status) && entry!=&Bridge.Shared;entry=entry->Flink) {
             GPU_BO *bo=&CONTAINING_RECORD(entry,A830_ALLOCATION,Entry)->Buffer;
@@ -402,6 +430,9 @@ static NTSTATUS Io(A830_BRIDGE *g,A830_CLIENT *c,PIRP request,ULONG code,ULONG i
     PVOID in=NULL,out=NULL;ULONG_PTR bytes=0;NTSTATUS status=STATUS_INVALID_PARAMETER;
     in=out=request->AssociatedIrp.SystemBuffer;
     if((inLength || outLength) && !in)return STATUS_INVALID_PARAMETER;
+    if(code==GPU_IOCTL_SPARSE_CAPS || code==GPU_IOCTL_VA_RESERVE || code==GPU_IOCTL_VA_RELEASE || code==GPU_IOCTL_VA_BIND)
+        return SparseIo(g,c,request,code,inLength,outLength);
+
 
     if(code==GPU_IOCTL_SHARED_RETAIN && inLength==sizeof(GPU_SHARED_IMPORT) && outLength>=sizeof(ULONG)) {
         GPU_SHARED_IMPORT import=*(GPU_SHARED_IMPORT *)in;
@@ -421,6 +452,19 @@ static NTSTATUS Io(A830_BRIDGE *g,A830_CLIENT *c,PIRP request,ULONG code,ULONG i
     }           else if(code==GPU_IOCTL_QUERY && outLength>=sizeof(GPU_INFO)) {
         const GPU_INFO info={GPU_UAPI_VERSION,0x44050001,g->Hardware->Fault};
         RtlCopyMemory(out,&info,sizeof(info));bytes=sizeof(info);status=STATUS_SUCCESS;
+    } else if(code==GPU_IOCTL_POWER_QUERY && !inLength && outLength>=sizeof(GPU_POWER_INFO)) {
+        GPU *gpu=g->Hardware;GPU_POWER_INFO info={0};
+        KeWaitForSingleObject(&gpu->PowerLock,Executive,KernelMode,FALSE,NULL);
+        info.Version=1;info.Size=sizeof(info);info.Flags=(gpu->Online?1u:0u)|(gpu->Temperature!=MINLONG?2u:0u)|(gpu->Fault?4u:0u);
+        if(gpu->Online && gpu->PerfIndex<gpu->PerfCount && gpu->CeilingIndex<gpu->PerfCount) {
+            info.CurrentKhz=gpu->PerfKhz[gpu->PerfIndex];info.CeilingKhz=gpu->PerfKhz[gpu->CeilingIndex];
+        }
+        info.BusyPercent=gpu->BusyPercent;info.TemperatureDci=(ULONG)gpu->Temperature;info.CoolingBand=gpu->CoolingBand;info.Status=(ULONG)gpu->PowerStatus;
+        KeReleaseMutex(&gpu->PowerLock,FALSE);
+        RtlCopyMemory(out,&info,sizeof(info));bytes=sizeof(info);status=STATUS_SUCCESS;
+    } else if(code==GPU_IOCTL_DISPLAY_QUERY && !inLength && outLength>=sizeof(GPU_DISPLAY_INFO)) {
+        GPU_DISPLAY_INFO info={0};status=A830DpuQuery(g->Adapter,&info);
+        if(NT_SUCCESS(status)){RtlCopyMemory(out,&info,sizeof(info));bytes=sizeof(info);}
     } else if(code==GPU_IOCTL_CLIENT_LEASE && !inLength && outLength>=sizeof(ULONGLONG)) {
         *(PULONGLONG)out=c->Lease;bytes=sizeof(ULONGLONG);status=STATUS_SUCCESS;
     }    else if(!g->Hardware->Online)status=STATUS_DEVICE_NOT_READY;
@@ -431,7 +475,7 @@ static NTSTATUS Io(A830_BRIDGE *g,A830_CLIENT *c,PIRP request,ULONG code,ULONG i
             GPU_BO *bo=c->Buffers+i;
             status=code==GPU_IOCTL_ALLOC_CACHED?GpuAllocateCached(bo,size):GpuAllocate(bo,size);
             if(!NT_SUCCESS(status)){break;}
-            ULONGLONG address=Address(g,bo->Size);
+            ULONGLONG address=Address(g,bo->Size,0);
             if(!address){GpuFree(bo);status=STATUS_INSUFFICIENT_RESOURCES;break;}
             status=GpuMap(g->Hardware,0,bo,address);
             if(!NT_SUCCESS(status)){FreeAddress(g,address,bo->Size);GpuStop(g->Hardware);GpuFree(bo);break;}
@@ -481,6 +525,7 @@ static NTSTATUS Dispatch(PDEVICE_OBJECT device,PIRP request) {
                     c->Owner=IoGetRequestorProcess(request);
                     if(!c->Owner){ExFreePoolWithTag(c,GPU_TAG);status=STATUS_INVALID_PARAMETER;}
                     else {
+                        InitializeListHead(&c->Sparse);
                         ObReferenceObject(c->Owner);c->Lease=++Bridge.NextLease;KeInitializeEvent(&c->Drained,NotificationEvent,TRUE);KeInitializeSpinLock(&c->RefLock);
                         InsertTailList(&Bridge.Clients,&c->Entry);stack->FileObject->FsContext=c;status=STATUS_SUCCESS;
                     }
