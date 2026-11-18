@@ -25,8 +25,13 @@ void APIENTRY CreateResource(D3D10DDI_HDEVICE h,const D3D10DDIARG_CREATERESOURCE
    }
    bool shared=(p->MiscFlags&D3D10_DDI_RESOURCE_MISC_SHARED)||(p->BindFlags&D3D10_DDI_BIND_PRESENT);
    if(shared) {
-     if(r->dimension!=D3D10DDIRESOURCE_TEXTURE2D || r->layers*r->levels!=1 || (r->format!=DXGI_FORMAT_B8G8R8A8_UNORM && r->format!=DXGI_FORMAT_R8G8B8A8_UNORM)){error(d,DXGI_ERROR_UNSUPPORTED);return;}
-     A830_RESOURCE data={A830_ABI_VERSION,0,r->width,r->height,(r->width*4+255)&~255u,(unsigned)(r->format==DXGI_FORMAT_B8G8R8A8_UNORM?D3DDDIFMT_A8R8G8B8:D3DDDIFMT_A8B8G8R8),A830_RESOURCE_OWNED|(p->pPrimaryDesc?A830_RESOURCE_PRIMARY:0u)};
+     unsigned native=r->format==DXGI_FORMAT_B8G8R8A8_UNORM?D3DDDIFMT_A8R8G8B8:
+       r->format==DXGI_FORMAT_R8G8B8A8_UNORM?D3DDDIFMT_A8B8G8R8:
+       r->format==DXGI_FORMAT_R10G10B10A2_UNORM?D3DDDIFMT_A2B10G10R10:
+       r->format==DXGI_FORMAT_R16G16B16A16_FLOAT?D3DDDIFMT_A16B16G16R16F:0;
+     unsigned bytes=A830PixelBytes(native);
+     if(!bytes || r->dimension!=D3D10DDIRESOURCE_TEXTURE2D || r->layers*r->levels!=1 || r->width>(UINT_MAX-255)/bytes){error(d,DXGI_ERROR_UNSUPPORTED);return;}
+     A830_RESOURCE data={A830_ABI_VERSION,0,r->width,r->height,(r->width*bytes+255)&~255u,native,A830_RESOURCE_OWNED|(p->pPrimaryDesc?A830_RESOURCE_PRIMARY:0u)};
      data.Rotation=p->pPrimaryDesc?(unsigned)p->pPrimaryDesc->ModeDesc.Rotation:(unsigned)D3DDDI_ROTATION_IDENTITY;
      if(data.Height>0x4000000u/data.Pitch){error(d,E_OUTOFMEMORY);return;}data.Size=data.Pitch*data.Height;
      D3DDDI_ALLOCATIONINFO info{};info.pPrivateDriverData=&data;info.PrivateDriverDataSize=sizeof(data);info.Flags.Primary=p->pPrimaryDesc!=nullptr;
@@ -45,7 +50,12 @@ void APIENTRY OpenResource(D3D10DDI_HDEVICE h,const D3D10DDIARG_OPENRESOURCE *p,
  if(p->NumAllocations!=1 || p->PrivateDriverDataSize!=sizeof(A830_RESOURCE) || !p->pPrivateDriverData){error(d,E_INVALIDARG);return;}
  auto *a=(const A830_RESOURCE *)p->pPrivateDriverData;
  if(a->Version!=A830_ABI_VERSION || !a->Width || !a->Height || !(a->Flags&A830_RESOURCE_OWNED)){error(d,E_INVALIDARG);return;}
- r->format=a->Format==D3DDDIFMT_A8R8G8B8?DXGI_FORMAT_B8G8R8A8_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;r->vkformat=format(r->format);r->width=a->Width;r->height=a->Height;r->pitch=a->Pitch;r->dimension=D3D10DDIRESOURCE_TEXTURE2D;r->bind=D3D10_DDI_BIND_RENDER_TARGET|D3D10_DDI_BIND_SHADER_RESOURCE;
+ r->format=a->Format==D3DDDIFMT_A8R8G8B8 || a->Format==D3DDDIFMT_X8R8G8B8?DXGI_FORMAT_B8G8R8A8_UNORM:
+   a->Format==D3DDDIFMT_A8B8G8R8?DXGI_FORMAT_R8G8B8A8_UNORM:
+   a->Format==D3DDDIFMT_A2B10G10R10?DXGI_FORMAT_R10G10B10A2_UNORM:
+   a->Format==D3DDDIFMT_A16B16G16R16F?DXGI_FORMAT_R16G16B16A16_FLOAT:DXGI_FORMAT_UNKNOWN;
+ if(r->format==DXGI_FORMAT_UNKNOWN){error(d,DXGI_ERROR_UNSUPPORTED);return;}
+ r->vkformat=format(r->format);r->width=a->Width;r->height=a->Height;r->pitch=a->Pitch;r->dimension=D3D10DDIRESOURCE_TEXTURE2D;r->bind=D3D10_DDI_BIND_RENDER_TARGET|D3D10_DDI_BIND_SHADER_RESOURCE;
  r->allocation=p->pOpenAllocationInfo[0].hAllocation;r->kmresource=p->hKMResource.handle;r->runtime=rt.handle;r->imported=true;imported_image(d,r);
 }
 void APIENTRY DestroyResource(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hr) {

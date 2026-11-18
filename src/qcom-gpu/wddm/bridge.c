@@ -201,12 +201,8 @@ static VOID LoadPowerPolicy(GPU *gpu) {
 static VOID Governor(PVOID context) {
     A830_BRIDGE *g=context;LARGE_INTEGER interval;interval.QuadPart=-200000;
     while(KeWaitForSingleObject(&g->GovernorStop,Executive,KernelMode,FALSE,&interval)==STATUS_TIMEOUT) {
-        interval.QuadPart=-1000000;
         if(ExAcquireRundownProtection(&g->ClockAccess)) {
-            if(g->Hardware) {
-                GpuGovern(g->Hardware);
-                if(g->Hardware->Online && (g->Hardware->BusyPercent>2 || g->Hardware->PerfIndex>1 || g->Hardware->CoolingBand))interval.QuadPart=-200000;
-            }
+            if(g->Hardware)GpuGovern(g->Hardware);
             ExReleaseRundownProtection(&g->ClockAccess);
         }
     }
@@ -449,31 +445,12 @@ static NTSTATUS Io(A830_BRIDGE *g,A830_CLIENT *c,PIRP request,ULONG code,ULONG i
         ULONG slot=(*(PULONG)in&0x7fffffffu)-1;
         if(slot>=RTL_NUMBER_OF(c->Imports) || !c->Imports[slot] || c->Deferred.Imports[slot])return STATUS_INVALID_HANDLE;
         MarkDeferred(g,c,slot,TRUE);CollectClientDeferred(g,c);status=STATUS_SUCCESS;
-    }           else if(code==GPU_IOCTL_QUERY && outLength>=sizeof(GPU_INFO)) {
+    } else if(code==GPU_IOCTL_QUERY && outLength>=sizeof(GPU_INFO)) {
         const GPU_INFO info={GPU_UAPI_VERSION,0x44050001,g->Hardware->Fault};
         RtlCopyMemory(out,&info,sizeof(info));bytes=sizeof(info);status=STATUS_SUCCESS;
-    } else if(code==GPU_IOCTL_POWER_QUERY && !inLength && outLength>=sizeof(GPU_POWER_INFO)) {
-        GPU *gpu=g->Hardware;GPU_POWER_INFO info={0};
-        KeWaitForSingleObject(&gpu->PowerLock,Executive,KernelMode,FALSE,NULL);
-        info.Version=1;info.Size=sizeof(info);info.Flags=(gpu->Online?1u:0u)|(gpu->Temperature!=MINLONG?2u:0u)|(gpu->Fault?4u:0u);
-        if(gpu->Online && gpu->PerfIndex<gpu->PerfCount && gpu->CeilingIndex<gpu->PerfCount) {
-            info.CurrentKhz=gpu->PerfKhz[gpu->PerfIndex];info.CeilingKhz=gpu->PerfKhz[gpu->CeilingIndex];
-        }
-        info.BusyPercent=gpu->BusyPercent;info.TemperatureDci=(ULONG)gpu->Temperature;info.CoolingBand=gpu->CoolingBand;info.Status=(ULONG)gpu->PowerStatus;
-        KeReleaseMutex(&gpu->PowerLock,FALSE);
-        RtlCopyMemory(out,&info,sizeof(info));bytes=sizeof(info);status=STATUS_SUCCESS;
-    } else if(code==GPU_IOCTL_FAULT_QUERY && !inLength && outLength>=sizeof(GPU_FAULT_INFO)) {
-        GPU_FAULT_INFO info={0};
-        if(g->Hardware->FaultTrace.Version){KeMemoryBarrier();info=g->Hardware->FaultTrace;}
-        info.Version=1;info.Size=sizeof(info);
-        info.ResetStage=(ULONG)g->Adapter->ResetStage;info.ResetStatus=(ULONG)g->Adapter->ResetStatus;
-        RtlCopyMemory(out,&info,sizeof(info));bytes=sizeof(info);status=STATUS_SUCCESS;
-    } else if(code==GPU_IOCTL_DISPLAY_QUERY && !inLength && outLength>=sizeof(GPU_DISPLAY_INFO)) {
-        GPU_DISPLAY_INFO info={0};status=A830DpuQuery(g->Adapter,&info);
-        if(NT_SUCCESS(status)){RtlCopyMemory(out,&info,sizeof(info));bytes=sizeof(info);}
     } else if(code==GPU_IOCTL_CLIENT_LEASE && !inLength && outLength>=sizeof(ULONGLONG)) {
         *(PULONGLONG)out=c->Lease;bytes=sizeof(ULONGLONG);status=STATUS_SUCCESS;
-    }    else if(!g->Hardware->Online)status=STATUS_DEVICE_NOT_READY;
+    } else if(!g->Hardware->Online)status=STATUS_DEVICE_NOT_READY;
     else if((code==GPU_IOCTL_ALLOC || code==GPU_IOCTL_ALLOC_CACHED) && inLength==sizeof(ULONG) && outLength>=sizeof(GPU_ALLOCATION)) {
         ULONG size=*(PULONG)in;
         status=STATUS_INSUFFICIENT_RESOURCES;

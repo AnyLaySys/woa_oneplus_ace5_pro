@@ -13,6 +13,14 @@ typedef struct { unsigned Version,Reserved; GPU_U64 CompletionEvent,CompletionPa
 typedef struct { GPU_U64 Submitted,Completed; unsigned Status,Generation; } A830_COMPLETION;
 typedef struct { unsigned Version,Reserved; GPU_U64 CompletionPage; } A830_CONTEXT_QUERY;
 typedef struct { unsigned Version,Size,Width,Height,Pitch,Format,Flags,Rotation; } A830_RESOURCE;
+static inline unsigned A830PixelBytes(unsigned format) {
+    switch(format) {
+    case D3DDDIFMT_A8R8G8B8:case D3DDDIFMT_X8R8G8B8:case D3DDDIFMT_A8B8G8R8:
+    case D3DDDIFMT_A2R10G10B10:case D3DDDIFMT_A2B10G10R10:return 4;
+    case D3DDDIFMT_A16B16G16R16F:return 8;
+    default:return 0;
+    }
+}
 typedef struct { unsigned Version,Allocation; GPU_U64 Address; unsigned Size,Pitch,Format,Reserved; } A830_ALLOCATION_ADDRESS;
 typedef struct { unsigned Version,Operation,Allocation,Offset,Bytes,Value; } A830_COMMAND;
 typedef struct {

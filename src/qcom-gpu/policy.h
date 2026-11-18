@@ -1,35 +1,35 @@
 #pragma once
-#ifdef _KERNEL_MODE
-typedef unsigned long GPU_POLICY_U32;
-#else
-#include <stdint.h>
-typedef uint32_t GPU_POLICY_U32;
-#endif
 
-static inline GPU_POLICY_U32 GpuCoolingBand(GPU_POLICY_U32 band,int temperature) {
+static inline ULONG GpuCoolingBand(ULONG band,int temperature) {
     if(temperature>=990)return 2;
     if(band>=2)return temperature<=810?1u:2u;
     if(band==1)return temperature<=780?0u:1u;
     return temperature>=870?1u:0u;
 }
-static inline GPU_POLICY_U32 GpuCoolingKhz(GPU_POLICY_U32 band) {
-    static const GPU_POLICY_U32 limits[]={0,660000,160000};
-    return limits[band<3?band:2];
+static inline ULONG GpuCoolingKhz(ULONG band) {
+    return band==0?0:band==1?734000:160000;
 }
-static inline GPU_POLICY_U32 GpuChooseLevel(const GPU_POLICY_U32 *khz,GPU_POLICY_U32 maximum,GPU_POLICY_U32 desired) {
-    GPU_POLICY_U32 level=1;
+static inline ULONG GpuChooseLevel(const ULONG *khz,ULONG maximum,ULONG desired) {
+    ULONG level=1;
     while(level<maximum && khz[level]<desired)++level;
     return level;
 }
-static inline GPU_POLICY_U32 GpuDemand(const GPU_POLICY_U32 *khz,GPU_POLICY_U32 current,GPU_POLICY_U32 busy,GPU_POLICY_U32 ceiling) {
-    GPU_POLICY_U32 target;
-    if(busy<=2)return 1;
-    if(busy>100)busy=100;
-    target=busy>=80?khz[current]*2:khz[current]*busy/70;
-    if(target>=khz[current]*7/8 && target<=khz[current] && current<=ceiling)return current;
-    return GpuChooseLevel(khz,ceiling,target);
-}
-static inline GPU_POLICY_U32 GpuDelayDown(GPU_POLICY_U32 target,GPU_POLICY_U32 current,GPU_POLICY_U32 busy,GPU_POLICY_U32 ceiling,GPU_POLICY_U32 *samples) {
+static inline ULONG GpuDelayDown(ULONG target,ULONG current,ULONG busy,ULONG ceiling,ULONG *samples) {
     if(target<current && busy>2 && current<=ceiling && ++*samples<2)return current;
     *samples=0;return target;
+}
+/* Thermal/admin ceilings override the 342 MHz floor and pending-work boost. */
+static inline ULONG GpuResponsiveDemand(const ULONG *khz,
+    ULONG current,ULONG busy,ULONG ceiling,
+    int slowPending,int holdRaised) {
+    if(current>ceiling)return ceiling;
+    ULONG target=GpuChooseLevel(khz,ceiling,342000);
+    if(busy>2 || slowPending) {
+        ULONG demand=(slowPending || busy>=80)?khz[current]*2:khz[current]*busy/70;
+        ULONG level=!slowPending && demand>=khz[current]*7/8 && demand<=khz[current]?
+            current:GpuChooseLevel(khz,ceiling,demand);
+        if(target<level)target=level;
+    }
+    if(holdRaised && target<current)target=current;
+    return target;
 }

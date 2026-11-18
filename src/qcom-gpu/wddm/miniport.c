@@ -45,7 +45,7 @@ static NTSTATUS Add(PDEVICE_OBJECT device,PVOID *context) {
     KeInitializeDpc(&a->DisplayWake,DisplayWake,a);
     ExInitializeRundownProtection(&a->ScanoutAccess);
     for(ULONG i=0;i<A830_QUEUE_DEPTH;i++)InsertTailList(&a->Free,&a->Jobs[i].Entry);
-    a->Brightness=47;a->PanelBrightness=(47*0xDBB+50)/100;*context=a;return STATUS_SUCCESS;
+    a->Brightness=47;a->PanelBrightness=A830BacklightLevel(a->Brightness);*context=a;return STATUS_SUCCESS;
 }
 static VOID StopWorker(A830_ADAPTER *a) {
     InterlockedIncrement(&a->Generation);InterlockedExchange(&a->Failed,STATUS_DEVICE_NOT_READY);
@@ -61,7 +61,7 @@ static VOID StopWorker(A830_ADAPTER *a) {
     if(a->Thread){ZwWaitForSingleObject(a->Thread,FALSE,NULL);ZwClose(a->Thread);a->Thread=NULL;}
     /* Hardware may still read pinned command BOs. Quiesce before dropping references. */
     {
-        if(a->BridgeAttached)A830BridgeStopHardware(a);
+       if(a->BridgeAttached)A830BridgeStopHardware(a);
         else if(a->Hardware.Online)GpuStop(&a->Hardware);
     }
     A830Retire(a);a->IrqRead=a->IrqWrite;
@@ -192,27 +192,7 @@ static NTSTATUS Power(PVOID context,ULONG uid,DEVICE_POWER_STATE state,POWER_ACT
 }
 static VOID Unload(VOID){A830BridgeDestroy();}
 static NTSTATUS APIENTRY Collect(HANDLE adapter,const DXGKARG_COLLECTDBGINFO *p) {
-    A830_ADAPTER *a=adapter;GPU *g=&a->Hardware;ULONG w[27]={0x38524454,3,p->Reason};
-    if(!p->pBuffer || p->BufferSize<sizeof(w))return STATUS_BUFFER_TOO_SMALL;
-    KIRQL old;KeAcquireSpinLock(&g->RingLock,&old);
-    w[3]=g->Fault;w[4]=g->FaultTrace.Source;w[5]=g->FaultTrace.Bits;
-    w[6]=g->FaultTrace.Syndrome0;w[7]=g->FaultTrace.Syndrome1;
-    w[8]=g->FaultTrace.AddressLow;w[9]=g->FaultTrace.AddressHigh;
-    w[10]=(ULONG)g->Temperature;
-    w[11]=g->PerfIndex<g->PerfCount?g->PerfKhz[g->PerfIndex]:0;w[12]=(ULONG)g->Submitted;
-    if(g->Online && g->Powered && g->Memory.Cpu) {
-        w[13]=*(volatile ULONG *)g->Memory.Cpu;
-        w[14]=Gr(g,REG_A6XX_CP_RB_RPTR);w[15]=Gr(g,REG_A6XX_CP_RB_WPTR);
-    }
-    KeReleaseSpinLock(&g->RingLock,old);
-    GPU_DISPLAY_INFO display={0};A830DpuQuery(a,&display);
-    w[16]=(ULONG)a->Failed;w[17]=a->Completed;w[18]=a->LastSubmitted;
-    w[19]=(ULONG)a->ResetStage;w[20]=(ULONG)a->ResetStatus;
-    w[21]=display.State;w[22]=display.FailureState;w[23]=display.Queued;w[24]=display.Applied;
-    w[25]=g->FaultTrace.GmuStatus;w[26]=g->FaultTrace.PowerStatus;
-    RtlCopyMemory(p->pBuffer,w,sizeof(w));
-    if(p->pExtension){p->pExtension->BucketingKey=w[0];p->pExtension->CurrentDmaBufferOffset=(g->WriteIndex&8191)*4;}
-    return STATUS_SUCCESS;
+    UNREFERENCED_PARAMETER(adapter);UNREFERENCED_PARAMETER(p);return STATUS_NOT_SUPPORTED;
 }
 static NTSTATUS APIENTRY StopCapture(HANDLE adapter,const DXGKARG_STOPCAPTURE *p) {
     UNREFERENCED_PARAMETER(adapter);UNREFERENCED_PARAMETER(p);return STATUS_SUCCESS;
@@ -337,23 +317,20 @@ static NTSTATUS APIENTRY Metadata(HANDLE adapter,UINT node,DXGKARG_GETNODEMETADA
     return RtlStringCchCopyW(p->FriendlyName,RTL_NUMBER_OF(p->FriendlyName),L"Qualcomm Adreno 830");
 }
 static NTSTATUS ResetToFence(A830_ADAPTER *a,PULONG aborted) {
-    InterlockedExchange(&a->ResetStage,1);InterlockedExchange(&a->ResetStatus,STATUS_PENDING);
     ULONG boundary=A830FreezeFences(a);StopWorker(a);
     NTSTATUS status;
-     if(a->BridgeAttached)status=A830BridgeReset();
+    if(a->BridgeAttached)status=A830BridgeReset();
     else {GpuStop(&a->Hardware);status=GpuStart(&a->Hardware);}
-    if(NT_SUCCESS(status)){InterlockedExchange(&a->ResetStage,2);status=A830Map(a,&a->Memory.Segment,A830_SEGMENT_ADDRESS);}
-    if(NT_SUCCESS(status)){InterlockedExchange(&a->ResetStage,3);status=A830Map(a,&a->Memory.Commands,A830_COMMAND_ADDRESS);}
-    if(NT_SUCCESS(status)){InterlockedExchange(&a->ResetStage,4);status=A830SharedRestore(a);}
-    if(NT_SUCCESS(status)){InterlockedExchange(&a->ResetStage,5);status=QcomGpuScanoutAfterReset(a);}
+    if(NT_SUCCESS(status))status=A830Map(a,&a->Memory.Segment,A830_SEGMENT_ADDRESS);
+    if(NT_SUCCESS(status))status=A830Map(a,&a->Memory.Commands,A830_COMMAND_ADDRESS);
+    if(NT_SUCCESS(status))status=A830SharedRestore(a);
+    if(NT_SUCCESS(status))status=QcomGpuScanoutAfterReset(a);
     if(NT_SUCCESS(status)) {
         /* All WDDM work up to this snapshot has now been quiesced/aborted.
            Do not use Hardware.Submitted: scanout copies have private fences. */
         a->Completed=boundary;*aborted=boundary;
-        InterlockedExchange(&a->ResetStage,6);
     }
     InterlockedExchange(&a->Failed,NT_SUCCESS(status)?0:status);InterlockedExchange(&a->PreemptPending,0);
-    InterlockedExchange(&a->ResetStatus,status);
     return status;
 }
 static NTSTATUS APIENTRY Reset(HANDLE adapter) {
@@ -361,8 +338,7 @@ static NTSTATUS APIENTRY Reset(HANDLE adapter) {
 }
 static NTSTATUS APIENTRY Restart(HANDLE adapter) {
     A830_ADAPTER *a=adapter;if(a->Failed)return (NTSTATUS)a->Failed;
-    InterlockedExchange(&a->ResetStage,7);NTSTATUS status=StartWorker(a);
-    InterlockedExchange(&a->ResetStatus,status);return status;
+    return StartWorker(a);
 }
 static NTSTATUS APIENTRY EngineGroup(HANDLE adapter,DXGKARG_QUERYDEPENDENTENGINEGROUP *p) {
     UNREFERENCED_PARAMETER(adapter);if(p->NodeOrdinal || p->EngineOrdinal)return STATUS_INVALID_PARAMETER;

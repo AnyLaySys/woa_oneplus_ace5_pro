@@ -1,30 +1,29 @@
 #pragma once
-#if defined(_KERNEL_MODE)
-typedef unsigned int uint32_t;
-#else
-#include <stdint.h>
-#endif
-
 #define SM_DOMAIN_COUNT 2u
 #define SM_LEVEL_COUNT 16u
 
-static const uint32_t SmFrequencyKhz[SM_DOMAIN_COUNT][SM_LEVEL_COUNT] = {
+static const ULONG SmFrequencyKhz[SM_DOMAIN_COUNT][SM_LEVEL_COUNT] = {
     {384000,556800,748800,960000,1152000,1363200,1555200,1785600,
      1996800,2227200,2400000,2745600,2918400,3072000,3321600,3532800},
     {1017600,1209600,1401600,1689600,1958400,2246400,2438400,2649600,
      2841600,3072000,3283200,3513600,3801600,4089600,4204800,4320000}
 };
+static inline ULONG SmCoolingBand(ULONG band,int temperature) {
+    if(temperature>=990)return 2;
+    if(band>=2)return temperature<=810?1u:2u;
+    if(band==1)return temperature<=780?0u:1u;
+    return temperature>=870?1u:0u;
+}
 
-
-static inline uint32_t SmDomain(uint32_t core) { return core < 6 ? 0u : 1u; }
-static inline uint32_t SmClampLevel(uint32_t level) {
+static inline ULONG SmDomain(ULONG core) { return core < 6 ? 0u : 1u; }
+static inline ULONG SmClampLevel(ULONG level) {
     return level < SM_LEVEL_COUNT ? level : SM_LEVEL_COUNT-1;
 }
-static inline uint32_t SmLevelFromState(uint32_t state) {
+static inline ULONG SmLevelFromState(ULONG state) {
     return SM_LEVEL_COUNT-1-SmClampLevel(state);
 }
-static inline uint32_t SmChooseState(uint32_t desired,
-                                    uint32_t minimum, uint32_t maximum) {
+static inline ULONG SmChooseState(ULONG desired,
+                                    ULONG minimum, ULONG maximum) {
     if (minimum >= SM_LEVEL_COUNT || maximum >= SM_LEVEL_COUNT ||
         desired >= SM_LEVEL_COUNT || minimum < maximum) return 0xffffffffu;
     if (desired < maximum) desired = maximum;
@@ -32,9 +31,9 @@ static inline uint32_t SmChooseState(uint32_t desired,
     return SmLevelFromState(desired);
 }
 /* Discrete states are ordered fastest to slowest by the PEP contract. */
-static inline uint32_t SmChooseLevel(uint32_t domain, uint32_t desired,
-                                    uint32_t maximum) {
-    uint32_t level;
+static inline ULONG SmChooseLevel(ULONG domain, ULONG desired,
+                                    ULONG maximum) {
+    ULONG level;
     if (desired > maximum) desired = maximum;
     for (level = 0; level < SM_LEVEL_COUNT-1; ++level)
         if (SmFrequencyKhz[domain][level] >= desired) break;
@@ -44,8 +43,8 @@ static inline uint32_t SmChooseLevel(uint32_t domain, uint32_t desired,
 
 /* A single busy core can raise its domain. OS requests bound active demand;
  * they never force an idle domain to run at a high operating point. */
-static inline uint32_t SmDemand(uint32_t domain,uint32_t current,uint32_t busy,uint32_t ceiling) {
-    uint32_t khz,target;
+static inline ULONG SmDemand(ULONG domain,ULONG current,ULONG busy,ULONG ceiling) {
+    ULONG khz,target;
     current=SmClampLevel(current);ceiling=SmClampLevel(ceiling);
     if(busy<=2)return 0;
     if(busy>100)busy=100;

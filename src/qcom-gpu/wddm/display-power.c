@@ -1,4 +1,7 @@
 #include "adapter.h"
+#define A830_BRIGHTNESS_DURATION_MS 180u
+#define A830_BRIGHTNESS_INTERVAL_MS 9u
+#define A830_BRIGHTNESS_MAX_ADVANCE_MS 18u
 
 static ULONG Read(PUCHAR base,ULONG offset) {return READ_REGISTER_ULONG((PULONG)(base+offset));}
 static VOID Write(PUCHAR base,ULONG offset,ULONG value) {WRITE_REGISTER_ULONG((PULONG)(base+offset),value);}
@@ -44,21 +47,35 @@ static NTSTATUS Levels(PVOID context,ULONG bytes,PUCHAR count,PUCHAR levels) {
 static NTSTATUS Get(PVOID context,PUCHAR brightness) {*brightness=((A830_ADAPTER *)context)->Brightness;return STATUS_SUCCESS;}
 static VOID Fade(PDEVICE_OBJECT device,PVOID context) {
     UNREFERENCED_PARAMETER(device);A830_ADAPTER *a=context;
+    LONGLONG position=0,origin=0;ULONGLONG tick=0;ULONG elapsed=0,failures=0;USHORT previous=0;
+    PEX_TIMER timer=ExAllocateTimer(NULL,NULL,EX_TIMER_HIGH_RESOLUTION);
     for(;;) {
         KeWaitForSingleObject(&a->DisplayPowerLock,Executive,KernelMode,FALSE,NULL);
-        LONG delta=(a->Brightness*0xDBBu+50)/100-a->PanelBrightness;
-        NTSTATUS status=STATUS_SUCCESS;
-        if(delta && a->PanelOn && !a->Stopping) {
-            USHORT next=(USHORT)(a->PanelBrightness+(delta>0?(delta+3)/4:(delta-3)/4));
-            status=Send(0x51,next);if(NT_SUCCESS(status))a->PanelBrightness=next;
-        }
-        if(!delta || !a->PanelOn || a->Stopping || !NT_SUCCESS(status)) {
-            a->BrightnessQueued=FALSE;KeSetEvent(&a->BrightnessIdle,IO_NO_INCREMENT,FALSE);
-            KeReleaseMutex(&a->DisplayPowerLock,FALSE);return;
+        USHORT target=A830BacklightLevel(a->Brightness);
+        if(!a->PanelOn || a->Stopping || a->PanelBrightness==target)break;
+        ULONGLONG now=KeQueryInterruptTime();
+        if(!tick)position=(LONGLONG)a->PanelBrightness*65536;
+        if(previous!=target){origin=position;elapsed=0;previous=target;}
+        ULONGLONG dt=tick?(now-tick)/10000:A830_BRIGHTNESS_INTERVAL_MS;tick=now;
+        elapsed=(ULONG)min(elapsed+min(max(dt,1ULL),(ULONGLONG)A830_BRIGHTNESS_MAX_ADVANCE_MS),(ULONGLONG)A830_BRIGHTNESS_DURATION_MS);
+        LONGLONG t=(LONGLONG)elapsed*65536/A830_BRIGHTNESS_DURATION_MS,s=t*t/65536*(196608-2*t)/65536;
+        position=origin+((LONGLONG)target*65536-origin)*s/65536;
+        USHORT next=(USHORT)((position+32768)/65536);
+        if(next!=a->PanelBrightness) {
+            NTSTATUS status=Send(0x51,next);
+            if(NT_SUCCESS(status)){a->PanelBrightness=next;failures=0;}
+            else {
+                if(status!=STATUS_DEVICE_BUSY || ++failures>=3)break;
+                position=(LONGLONG)a->PanelBrightness*65536;previous=0;
+            }
         }
         KeReleaseMutex(&a->DisplayPowerLock,FALSE);
-        LARGE_INTEGER pause;pause.QuadPart=-100000;KeDelayExecutionThread(KernelMode,FALSE,&pause);
+        if(timer){ExSetTimer(timer,-(LONGLONG)A830_BRIGHTNESS_INTERVAL_MS*10000,0,NULL);KeWaitForSingleObject(timer,Executive,KernelMode,FALSE,NULL);}
+        else {LARGE_INTEGER pause;pause.QuadPart=-(LONGLONG)A830_BRIGHTNESS_INTERVAL_MS*10000;KeDelayExecutionThread(KernelMode,FALSE,&pause);}
     }
+    if(timer)ExDeleteTimer(timer,TRUE,TRUE,NULL);
+    a->BrightnessQueued=FALSE;KeSetEvent(&a->BrightnessIdle,IO_NO_INCREMENT,FALSE);
+    KeReleaseMutex(&a->DisplayPowerLock,FALSE);
 }
 VOID A830BrightnessStop(A830_ADAPTER *a) {
     KeWaitForSingleObject(&a->BrightnessIdle,Executive,KernelMode,FALSE,NULL);
@@ -69,7 +86,7 @@ static NTSTATUS Set(PVOID context,UCHAR brightness) {
     A830_ADAPTER *a=context;if(brightness>100)return STATUS_INVALID_PARAMETER;
     KeWaitForSingleObject(&a->DisplayPowerLock,Executive,KernelMode,FALSE,NULL);
     a->Brightness=brightness;
-    if(a->PanelOn && !a->Stopping && !a->BrightnessQueued && a->PanelBrightness!=(brightness*0xDBBu+50)/100) {
+    if(a->PanelOn && !a->Stopping && !a->BrightnessQueued && a->PanelBrightness!=A830BacklightLevel(brightness)) {
         a->BrightnessQueued=TRUE;KeClearEvent(&a->BrightnessIdle);IoQueueWorkItem(a->BrightnessWork,Fade,DelayedWorkQueue,a);
     }
     KeReleaseMutex(&a->DisplayPowerLock,FALSE);return STATUS_SUCCESS;
@@ -93,7 +110,7 @@ NTSTATUS A830DisplayPower(A830_ADAPTER *a,ULONG uid,BOOLEAN on) {
         if(NT_SUCCESS(status)) {
             LARGE_INTEGER pause;pause.QuadPart=-200000;
             KeDelayExecutionThread(KernelMode,FALSE,&pause);a->PanelOn=on;
-            if(on){USHORT brightness=(USHORT)((a->Brightness*0xDBBu+50)/100);status=Send(0x51,brightness);if(NT_SUCCESS(status))a->PanelBrightness=brightness;}
+            if(on){USHORT brightness=A830BacklightLevel(a->Brightness);status=Send(0x51,brightness);if(NT_SUCCESS(status))a->PanelBrightness=brightness;}
         }
     }
     KeReleaseMutex(&a->DisplayPowerLock,FALSE);return status;

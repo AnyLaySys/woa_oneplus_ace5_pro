@@ -166,7 +166,7 @@ static NTSTATUS Configure(GPU *g) {
         g->PerfKhz[index]=opp->Khz;g->PerfBw[index]=opp->Bandwidth;
         if(opp->Acd){acd[2]|=1u<<index;acd[5+acd[4]++]=opp->Acd;}
     }
-    g->MaxKhz=0;g->FixedKhz=0;g->DownSamples=0;g->CoolingBand=0;g->CeilingIndex=1;g->BusyPercent=0;
+    g->MaxKhz=g->FixedKhz=g->DownSamples=g->CoolingBand=0;
     perf[3]=g->PerfCount;ULONG at=5+g->PerfCount*3;
     perf[at++]=2;perf[at++]=2;perf[at++]=0;perf[at++]=0;perf[at++]=cx;perf[at++]=500000;
     status=Send(g,15,perf,at);if(!NT_SUCCESS(status))return status;
@@ -181,6 +181,7 @@ static NTSTATUS Configure(GPU *g) {
     if(NT_SUCCESS(status))status=Send(g,10,start,1);
     if(NT_SUCCESS(status))status=GpuSetFrequency(g,1);
     if(NT_SUCCESS(status)) {
+        Gw(g,REG_A6XX_GPU_GMU_AO_GPU_CX_BUSY_MASK,0xff000000u);
         Gw(g,0x1fc40,(Gr(g,0x1fc40)&~255u)|32);Gw(g,0x1fc10,1);
         g->PerfLast=KeQueryInterruptTime();g->BusyLast=((ULONGLONG)Gr(g,0x1fca1)<<32)|Gr(g,0x1fca0);
     }
@@ -190,7 +191,6 @@ NTSTATUS GpuSetFrequency(GPU *g,ULONG index) {
     if(KeGetCurrentIrql()!=PASSIVE_LEVEL || !index || index>=g->PerfCount)return STATUS_INVALID_PARAMETER;
     ULONG message[]={0,1,index,index};NTSTATUS status=Send(g,30,message,4);
 
-    g->PowerStatus=status;
     if(NT_SUCCESS(status)){g->PerfIndex=index;}
     return status;
 }
@@ -209,20 +209,34 @@ static VOID GovernLocked(GPU *g) {
     ULONG high,low;do{high=Gr(g,0x1fca1);low=Gr(g,0x1fca0);}while(high!=Gr(g,0x1fca1));
     ULONGLONG busy=((ULONGLONG)high<<32)|low,delta=busy>=g->BusyLast?busy-g->BusyLast:0,ticks=elapsed*192/100;
     g->PerfLast=now;g->BusyLast=busy;
-    g->BusyPercent=delta>=ticks?100:(ULONG)(delta*100/ticks);
-    g->Temperature=GpuTemperature(g);
-    if(g->Temperature!=MINLONG)g->CoolingBand=GpuCoolingBand(g->CoolingBand,g->Temperature);
+    ULONG utilization=delta>=ticks?100:(ULONG)(delta*100/ticks);
+    LONG temperature=GpuTemperature(g);
+    if(temperature!=MINLONG)g->CoolingBand=GpuCoolingBand(g->CoolingBand,temperature);
     ULONG maximum=g->PerfCount-1;
     if(g->MaxKhz)while(maximum>1 && g->PerfKhz[maximum]>g->MaxKhz)maximum--;
     ULONG limit=GpuCoolingKhz(g->CoolingBand);
     if(limit)while(maximum>1 && g->PerfKhz[maximum]>limit)maximum--;
-    if(g->Temperature==MINLONG)maximum=1;
-    g->CeilingIndex=maximum;
-    ULONG target;
-    if(g->FixedKhz){target=1;while(target<maximum && g->PerfKhz[target]<g->FixedKhz)target++;}
-    else target=GpuDemand(g->PerfKhz,g->PerfIndex,g->BusyPercent,maximum);
-    target=GpuDelayDown(target,g->PerfIndex,g->BusyPercent,maximum,&g->DownSamples);
-    if(target!=g->PerfIndex && !NT_SUCCESS(GpuSetFrequency(g,target)))g->Fault=(ULONG)g->PowerStatus;
+    if(temperature==MINLONG)maximum=1;
+    KIRQL old;KeAcquireSpinLock(&g->RingLock,&old);
+    ULONGLONG completed=g->Memory.Cpu?*(volatile ULONGLONG *)g->Memory.Cpu:0;
+    BOOLEAN pending=g->Submitted>completed;
+    ULONGLONG lastSubmit=g->LastSubmitTime;
+    KeReleaseSpinLock(&g->RingLock,old);
+    if(!pending)g->PendingSince=0;
+    else if(!g->PendingSince || completed!=g->PendingCompleted)g->PendingSince=now;
+    g->PendingCompleted=completed;
+    BOOLEAN slow=pending && g->PendingSince && now-g->PendingSince>=200000;
+    BOOLEAN hold=g->RaisedAt && now-g->RaisedAt<1000000 &&
+        (pending || (lastSubmit && now-lastSubmit<=2000000));
+    ULONG target=g->FixedKhz?GpuChooseLevel(g->PerfKhz,maximum,g->FixedKhz):
+        GpuResponsiveDemand(g->PerfKhz,g->PerfIndex,utilization,maximum,slow,hold);
+    target=GpuDelayDown(target,g->PerfIndex,utilization,maximum,&g->DownSamples);
+    if(target!=g->PerfIndex) {
+        ULONG previous=g->PerfIndex;
+        NTSTATUS status=GpuSetFrequency(g,target);
+        if(!NT_SUCCESS(status))g->Fault=(ULONG)status;
+        else if(target>previous)g->RaisedAt=now;
+    }
 }
 VOID GpuGovern(GPU *g) {
     KeWaitForSingleObject(&g->PowerLock,Executive,KernelMode,FALSE,NULL);
@@ -274,7 +288,8 @@ NTSTATUS GpuGmuStart(GPU *g) {
     if(!NT_SUCCESS(status))return status;
     g->Stage=4;
     Gw(g,REG_A6XX_GMU_GMU2HOST_INTR_CLR,0xFFFFFFFF);Gw(g,REG_A6XX_GMU_GMU2HOST_INTR_MASK,0xFFFFFFFC);
-    Gw(g,REG_A6XX_GMU_AO_HOST_INTERRUPT_CLR,0xFFFFFFFF);Gw(g,REG_A6XX_GMU_AO_HOST_INTERRUPT_MASK,0xFFFFFFFC);
+    Gw(g,REG_A6XX_GMU_AO_HOST_INTERRUPT_CLR,0xFFFFFFFF);
+    Gw(g,REG_A6XX_GMU_AO_HOST_INTERRUPT_MASK,~GMU_AO_FAULT_BITS);
     Gw(g,REG_A6XX_GMU_HFI_CTRL_INIT,1);
     status=GpuPoll(g->Registers,REG_A6XX_GMU_HFI_CTRL_STATUS*4,1,1,100000);
     if(NT_SUCCESS(status)){status=Configure(g);}

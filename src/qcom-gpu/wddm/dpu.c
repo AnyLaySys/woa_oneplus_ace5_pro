@@ -185,7 +185,6 @@ typedef struct {
     LONG64 TransactionSequence;
     ULONGLONG TransactionAddress,TransactionDeadline;
     ULONG TransactionPitch,TransactionFrame,TransactionState,TransactionSync,TransactionAuto,PpMask;
-    ULONG FailureState,FailureLine,FailureEvent,FailureDone,FailureFrame,FailureFlush;
     BOOLEAN TransactionGated;
     volatile LONG Kick;
     volatile LONG WakeNeeded;
@@ -278,29 +277,6 @@ static BOOLEAN FlushComplete(A830_DPU *d) {
     for(ULONG i=0;i<d->CtlCount;i++)if(Read(d,d->Ctls[i].Base+0x18)&d->Ctls[i].Mask)return FALSE;
     return TRUE;
 }
-typedef struct { A830_ADAPTER *Adapter;GPU_DISPLAY_INFO *Info; } DPU_QUERY;
-static BOOLEAN QueryState(PVOID context) {
-    DPU_QUERY *query=context;A830_ADAPTER *a=query->Adapter;GPU_DISPLAY_INFO *r=query->Info;
-    A830_DPU *d=a->Dpu;r->Status=(ULONG)a->Failed;r->Completed=a->Completed;r->Submitted=a->LastSubmitted;
-    if(!d)return TRUE;
-    r->Flags=(d->Enabled?1u:0u)|(d->Stopping?2u:0u);
-    r->State=d->TransactionState;r->Queued=(ULONG)d->Queued;r->Applied=(ULONG)d->Applied;
-    r->PendingFence=d->PendingFence;r->InitialFrame=d->TransactionFrame;r->Pitch=d->PendingPitch;r->Period=(ULONG)d->Period;
-    r->FailureState=d->FailureState;r->FailureLine=d->FailureLine;r->FailureEvent=d->FailureEvent;
-    r->FailureDone=d->FailureDone;r->FailureFrame=d->FailureFrame;r->FailureFlushed=d->FailureFlush;
-    if(d->Enabled && !d->Stopping) {
-        r->Line=Read(d,d->Intf+0x2b0);r->Event=Read(d,d->Intf+0x804);
-        r->Done=Read(d,0x14)&d->PpMask;r->Frame=TxFrame(d);r->Flushed=FlushComplete(d);
-    }
-    return TRUE;
-}
-NTSTATUS A830DpuQuery(PVOID context,GPU_DISPLAY_INFO *info) {
-    A830_ADAPTER *a=context;RtlZeroMemory(info,sizeof(*info));info->Version=1;info->Size=sizeof(*info);
-    DPU_QUERY query={a,info};BOOLEAN result=FALSE;
-    KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);
-    NTSTATUS status=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,QueryState,&query,0,&result);
-    KeReleaseSpinLock(&a->QueueLock,old);return NT_SUCCESS(status)?(result?STATUS_SUCCESS:STATUS_UNSUCCESSFUL):status;
-}
 static VOID RestoreTransaction(A830_DPU *d) {
     if(!d->TransactionGated)return;
     /* Restore only the exact configuration held by this transaction. */
@@ -321,10 +297,6 @@ static VOID CompleteTransaction(A830_DPU *d) {
     InterlockedExchange(&d->WakeNeeded,1);
 }
 static VOID FailTransaction(A830_DPU *d,NTSTATUS status) {
-    d->FailureState=d->TransactionState;
-    d->FailureLine=Read(d,d->Intf+0x2b0);
-    d->FailureEvent=Read(d,d->Intf+0x804);d->FailureDone=Read(d,0x14)&d->PpMask;
-    d->FailureFrame=TxFrame(d);d->FailureFlush=FlushComplete(d);
     RestoreTransaction(d);d->TransactionState=4;
     InterlockedExchange(&d->Adapter->Failed,status);InterlockedExchange(&d->WakeNeeded,1);
 }

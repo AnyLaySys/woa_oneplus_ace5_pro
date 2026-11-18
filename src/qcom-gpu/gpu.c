@@ -86,6 +86,7 @@ NTSTATUS GpuSubmitContextBatch(GPU *g,const GPU_COMMAND *entries,ULONG count,ULO
         ULONGLONG address=s->Buffer->Address+s->Offset;
         Emit(g,Packet(CP_INDIRECT_BUFFER,3));Emit(g,(ULONG)address);Emit(g,(ULONG)(address>>32));Emit(g,s->Words);
     }
+    g->LastSubmitTime=KeQueryInterruptTime();
     Fence(g);KeReleaseSpinLock(&g->RingLock,old);return STATUS_SUCCESS;
 }
 static NTSTATUS Microcode(GPU *g,GPU_BO *bo,PCWSTR name,ULONGLONG address) {
@@ -174,6 +175,7 @@ static NTSTATUS Core(GPU *g) {
 static NTSTATUS StartLocked(GPU *g) {
     KIRQL contextIrql;KeAcquireSpinLock(&g->RingLock,&contextIrql);g->LastContextValid=FALSE;g->LastContextCookie=0;KeReleaseSpinLock(&g->RingLock,contextIrql);
     g->Fault=0;g->Submitted=0;g->Sequence=0;g->GmuResetReleased=FALSE;
+    g->LastSubmitTime=g->PendingSince=g->RaisedAt=0;
     g->Stage=1;
     NTSTATUS status=GpuPower(g,TRUE);
     if(NT_SUCCESS(status)){g->Powered=TRUE;g->Stage=2;status=GpuMmuStart(g);}

@@ -154,8 +154,8 @@ BOOLEAN SmProcessorNotification(PEPHANDLE handle,ULONG notification,PVOID data) 
     }
     case PEP_NOTIFY_PPM_PERF_CONSTRAINTS: {
         PPEP_PPM_PERF_CONSTRAINTS constraints=data;
-        constraints->GuaranteedPerformanceLimit=Sm.Fault?SmFrequencyKhz[domain][0]:Sm.NominalKhz[domain];
-        constraints->LimitReasons=Sm.Fault?PERFORMANCE_LIMIT_POWER:0;
+        constraints->GuaranteedPerformanceLimit=min(Sm.NominalKhz[domain],SmFrequencyKhz[domain][SmEffectiveCeiling(domain)]);
+        constraints->LimitReasons=Sm.Fault?PERFORMANCE_LIMIT_POWER:Sm.CoolingBand[domain]?PERFORMANCE_LIMIT_THERMAL:0;
         return TRUE;
     }
     case PEP_NOTIFY_PPM_PERF_SET: {

@@ -10,6 +10,7 @@
 #define A830_SEGMENT_ADDRESS 0x70000000ULL
 #define A830_COMMAND_ADDRESS (A830_SEGMENT_ADDRESS+A830_SEGMENT_BYTES)
 #define A830_QUEUE_DEPTH 32
+static __inline USHORT A830BacklightLevel(UCHAR brightness) {return (USHORT)(70+((ULONG)brightness*(0xDBBu-70)+50)/100);}
 typedef struct A830_CONTEXT A830_CONTEXT;
 typedef struct A830_PREPARED A830_PREPARED;
 typedef struct A830_ALLOCATION A830_ALLOCATION;
@@ -80,7 +81,6 @@ typedef struct {
     volatile LONG WorkerBusy;
     A830_JOB Jobs[A830_QUEUE_DEPTH];
     volatile LONG Stopping,Failed,PreemptPending,SchedulerDpcPending,Generation,CpuBarriers;
-    volatile LONG ResetStage,ResetStatus;
     ULONG Completed,Preemption,LastSubmitted;
     DXGKARGCB_NOTIFY_INTERRUPT_DATA Notify;
 } A830_ADAPTER;

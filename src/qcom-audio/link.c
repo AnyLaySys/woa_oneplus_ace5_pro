@@ -372,7 +372,10 @@ SiaLinkPoll (
         }
     }
 
-    if (!Dev->Stopping && Link->VersionReady) {SiaUsbPoll (Link);SeePoll(Link);RpcPoll(Link);}
+    if (!Dev->Stopping && !Link->Charge.Closing && Link->VersionReady) {
+        RpcPoll(Link);
+        if(Link->PowerHeld){SiaUsbPoll(Link);SeePoll(Link);}
+    }
     for (Messages = 0; Messages < 128; Messages++) {
         Head = SiaRead32 (Link->Desc, 12);
         Tail = SiaRead32 (Link->Desc, 8);
@@ -546,6 +549,43 @@ SiaGprPop (
     return TRUE;
 }
 
+static NTSTATUS SiaLinkRequest(PSIA_DEVICE Dev,const UCHAR *Packet,ULONG Size,ULONG Reply,ULONG Timeout,ULONG *Value)
+{
+    const ULONG UNALIGNED *Request=(const ULONG UNALIGNED*)Packet;SIA_GPR_PACKET Rsp;
+    NTSTATUS Status=SiaGprSendRaw(Dev,Packet,Size);
+    if(!NT_SUCCESS(Status))return Status;
+    ULONGLONG Due=KeQueryInterruptTime()+(ULONGLONG)Timeout*10000;
+    do {
+        if(Dev->Stopping && Reply==APM_CMD_RSP_SPF_STATE)return STATUS_CANCELLED;
+        SiaLinkPoll(Dev);
+        while(SiaGprPop(Dev,&Rsp)) {
+            if(Rsp.Length<SIA_GPR_HEADER)continue;
+            const ULONG UNALIGNED *H=(const ULONG UNALIGNED*)Rsp.Data;
+            ULONG Header=(Rsp.Data[0]>>4)*4;
+            if(Header<SIA_GPR_HEADER || Header>Rsp.Length || Rsp.Length-Header<(Value?4u:8u) ||
+               H[2]!=Request[3] || H[3]!=Request[2] || H[4]!=Request[4])continue;
+            const ULONG UNALIGNED *Data=(const ULONG UNALIGNED*)(Rsp.Data+Header);
+            if(H[5]==Reply) {
+                if(Value){*Value=Data[0];return STATUS_SUCCESS;}
+                return Data[1]?STATUS_DEVICE_NOT_READY:STATUS_SUCCESS;
+            }
+            if(H[5]==0x02001005 && Rsp.Length-Header>=8 && Data[0]==Request[5] && Data[1])return STATUS_DEVICE_NOT_READY;
+        }
+        SiaSleep(1);
+    }while(KeQueryInterruptTime()<Due);
+    return STATUS_IO_TIMEOUT;
+}
+
+static NTSTATUS SiaLinkPower(PSIA_DEVICE Dev,BOOLEAN Enable)
+{
+    const ULONG Payload[]={0,0,0,20,2,0x08001032,4,0,1};UCHAR Packet[SIA_GPR_HEADER+sizeof(Payload)];
+    SiaGprHeader(Packet,sizeof(Packet),0x5355,2,0x5055,Enable?0x0100100Fu:0x01001010u);
+    RtlCopyMemory(Packet+SIA_GPR_HEADER,Payload,sizeof(Payload));
+    NTSTATUS Status=SiaLinkRequest(Dev,Packet,sizeof(Packet),Enable?0x02001002u:0x02001003u,2000,NULL);
+    if(NT_SUCCESS(Status))Dev->Link->PowerHeld=Enable;
+    return Status;
+}
+
 NTSTATUS
 SiaLinkStart (
     _In_ PSIA_DEVICE Dev
@@ -558,7 +598,6 @@ SiaLinkStart (
     ULONG Index;
     ULONG Tick;
     UCHAR Packet[24];
-    SIA_GPR_PACKET Rsp;
 
     Link = (PSIA_LINK)ExAllocatePool2 (POOL_FLAG_NON_PAGED, sizeof (SIA_LINK), 'kniS');
     if (Link == NULL) {
@@ -633,21 +672,11 @@ SiaLinkStart (
 
     SiaGprHeader (Packet, sizeof (Packet), 1, 1, 0x5A, APM_CMD_GET_SPF_STATE);
     for (Count = 0; Count < 20; Count++) {
-        SiaGprSendRaw (Dev, Packet, sizeof (Packet));
-        for (Tick = 0; Tick < 200; Tick++) {
-            if (Dev->Stopping != 0) {
-                return STATUS_CANCELLED;
-            }
-            SiaLinkPoll (Dev);
-            while (SiaGprPop (Dev, &Rsp)) {
-                if (Rsp.Length >= 28 && *(ULONG UNALIGNED *)(Rsp.Data + 20) == APM_CMD_RSP_SPF_STATE) {
-                    if (*(ULONG UNALIGNED *)(Rsp.Data + 24) == 1) {
-                        return STATUS_SUCCESS;
-                    }
-                }
-            }
-            SiaSleep (1);
-        }
+        ULONG State;
+        if(Dev->Stopping)return STATUS_CANCELLED;
+        NTSTATUS Status=SiaLinkRequest(Dev,Packet,sizeof(Packet),APM_CMD_RSP_SPF_STATE,200,&State);
+        if(Status==STATUS_CANCELLED)return Status;
+        if(NT_SUCCESS(Status) && State==1)return SiaLinkPower(Dev,TRUE);
         SiaSleep (100);
     }
     return STATUS_DEVICE_NOT_READY;
@@ -681,6 +710,7 @@ SiaLinkStop (
         SiaGlinkCmd (Link, GLINK_CMD_CLOSE, SIA_USB_LCID, 0);
     }
     if (Link->AudioOpenAcked) {
+        SiaLinkPower(Dev,FALSE);
         SiaGlinkCmd (Link, GLINK_CMD_CLOSE, GLINK_AUDIO_LCID, 0);
         for (ULONG Tick = 0; Tick < 100 && Link->AudioOpenAcked; Tick++) { SiaLinkPoll (Dev); SiaSleep (1); }
     }

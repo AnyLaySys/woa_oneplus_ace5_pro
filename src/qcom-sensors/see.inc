@@ -137,7 +137,7 @@ static VOID SeeReceive(PSIA_LINK l,const UCHAR *packet,ULONG size) {
     s->Due=0;SeePoll(l);
 }
 static VOID SeePoll(PSIA_LINK l) {
-    QCOM_SEE *s=&l->See;if(!l->VersionReady)return;
+    QCOM_SEE *s=&l->See;if(!l->VersionReady || !l->PowerHeld || l->Charge.Closing)return;
     if(s->ResumePort) {
         ULONG confirm[]={7,s->OwnNode,0x100,0,0};
         if(!SeePacket(l,7,s->ResumeNode,s->ResumePort,(UCHAR*)confirm,sizeof(confirm)))return;

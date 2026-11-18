@@ -5,7 +5,7 @@ VOID GpuInitialize(GPU *g,GPU_SYNCHRONIZE synchronize,PVOID host) {
     RtlZeroMemory(g,sizeof(*g));g->Synchronize=synchronize;g->Host=host;
     KeInitializeEvent(&g->Event,SynchronizationEvent,FALSE);KeInitializeSpinLock(&g->RingLock);
     KeInitializeMutex(&g->MappingLock,0);
-    KeInitializeMutex(&g->PowerLock,0);g->Temperature=MINLONG;
+    KeInitializeMutex(&g->PowerLock,0);
 }
 ULONG GpuRead(PUCHAR base,ULONG offset) {
     return READ_REGISTER_ULONG((PULONG)(base+offset));
@@ -41,24 +41,6 @@ NTSTATUS GpuBind(GPU *g,PHYSICAL_ADDRESS registers,ULONG length) {
     if(!g->Registers || !g->Gcc || !g->Rsc || !g->Db || !g->Thermal){GpuUnbind(g);return STATUS_INSUFFICIENT_RESOURCES;}
     g->Stage=1;return STATUS_SUCCESS;
 }
-static VOID CaptureFault(GPU *g,ULONG index,ULONG bits,PUCHAR bank) {
-    if(g->FaultTrace.Version)return;
-    GPU_FAULT_INFO *f=&g->FaultTrace;f->Size=sizeof(*f);f->Source=index+1;f->Bits=bits;
-    if(index>3) {
-        f->Syndrome0=GpuRead(bank,0x68);f->Syndrome1=GpuRead(bank,0x6c);
-        f->AddressLow=GpuRead(bank,0x60);f->AddressHigh=GpuRead(bank,0x64);
-    } else if(index==3) {
-        f->Syndrome0=GpuRead(bank,0x50);f->Syndrome1=GpuRead(bank,0x54);
-        f->AddressLow=GpuRead(bank,0x58);
-    }
-    f->Submitted=(ULONG)g->Submitted;f->WriteIndex=g->WriteIndex;
-    if(g->Memory.Cpu)f->Completed=*(volatile ULONG *)g->Memory.Cpu;
-    /* MMU faults can arrive before CM3/core clocks have been started. */
-    if(g->Stage>=6)f->ReadIndex=Gr(g,REG_A6XX_CP_RB_RPTR);
-    if(g->Stage>=4)f->GmuStatus=Gr(g,REG_A6XX_GMU_GMU2HOST_INTR_INFO);
-    f->PowerStatus=(ULONG)g->PowerStatus;
-    KeMemoryBarrier();f->Version=1;
-}
 BOOLEAN GpuInterrupt(GPU *g,ULONG index) {
     if(!g->Powered)return FALSE;
     ULONG value=0;
@@ -73,8 +55,11 @@ BOOLEAN GpuInterrupt(GPU *g,ULONG index) {
         if(value)Gw(g,REG_A6XX_GMU_GMU2HOST_INTR_CLR,value);
     } else if(index==2) {
         if(g->Stage<4)return FALSE;
-        value=Gr(g,REG_A6XX_GMU_AO_HOST_INTERRUPT_STATUS)&3;
-        if(value){CaptureFault(g,index,value,NULL);Gw(g,REG_A6XX_GMU_AO_HOST_INTERRUPT_CLR,value);g->Fault=(ULONG)STATUS_DEVICE_HARDWARE_ERROR;}
+        value=Gr(g,REG_A6XX_GMU_AO_HOST_INTERRUPT_STATUS)&GMU_AO_INTERRUPT_STATUS_BITS;
+        if(value) {
+            Gw(g,REG_A6XX_GMU_AO_HOST_INTERRUPT_CLR,value);
+            if(value&GMU_AO_FAULT_BITS)g->Fault=(ULONG)STATUS_DEVICE_HARDWARE_ERROR;
+        }
     } else {
         if(g->Stage<3)return FALSE;
         if(index>3 && !g->Vm[index-4].Tables.Mdl)return FALSE;
@@ -83,7 +68,6 @@ BOOLEAN GpuInterrupt(GPU *g,ULONG index) {
         value=GpuRead(m,offset);
         if(index>3 && !(value&0xC00001FEu))return FALSE;
         if(value){
-            CaptureFault(g,index,value,index>3?m+g->CbBase+(index-4)*4096:m);
             if(index>3) {
                 GpuWrite(m,offset-0x58,GpuRead(m,offset-0x58)&~0x40u);
 

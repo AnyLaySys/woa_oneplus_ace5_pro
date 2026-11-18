@@ -24,15 +24,13 @@ typedef struct {
     KMUTEX MappingLock,PowerLock;
     BOOLEAN Online,Powered,GmuResetReleased;
     ULONG CbBase;
-    ULONG SpeedBin,PerfCount,PerfIndex,FixedKhz,MaxKhz,BusyPercent;
+    ULONG SpeedBin,PerfCount,PerfIndex,FixedKhz,MaxKhz;
     ULONG PerfKhz[GPU_PERF_LEVELS],PerfBw[GPU_PERF_LEVELS];
     ULONGLONG PerfLast,BusyLast;
-    ULONG CoolingBand,CeilingIndex,DownSamples;
-    LONG Temperature,PowerStatus;
+    ULONG CoolingBand,DownSamples;
     BOOLEAN LastContextValid;
     ULONGLONG LastContextCookie;
-    /* First hardware fault in this device lifetime, retained across TDR. */
-    GPU_FAULT_INFO FaultTrace;
+    ULONGLONG LastSubmitTime,PendingSince,PendingCompleted,RaisedAt;
 } GPU;
 VOID GpuInitialize(GPU *gpu,GPU_SYNCHRONIZE synchronize,PVOID host);
 NTSTATUS GpuBind(GPU *gpu,PHYSICAL_ADDRESS registers,ULONG length);

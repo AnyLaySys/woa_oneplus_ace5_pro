@@ -59,10 +59,7 @@ NTSTATUS SmScmiSet(ULONG domain,ULONG index) {
     SM_REPLY reply;NTSTATUS status;
     if(domain>=2)return STATUS_INVALID_PARAMETER;
     status=SmScmiRequest(7,domain,index,&reply);
-    InterlockedExchange(&Sm.LastStatus[domain],(LONG)status);
-    if(NT_SUCCESS(status)) {
-        InterlockedExchange(&Sm.Applied[domain],(LONG)index);
-    } else InterlockedExchange(&Sm.Applied[domain],-1);
+    InterlockedExchange(&Sm.Applied[domain],NT_SUCCESS(status)?(LONG)index:-1);
     return status;
 }
 

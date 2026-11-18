@@ -32,6 +32,7 @@ typedef struct _SIA_LINK {
     QCOM_SEE See;
     QCH_LINK Charge;
     BOOLEAN VersionReady;
+    BOOLEAN PowerHeld;
     PUCHAR Smem;
     PUCHAR Mutex;
     PUCHAR Ipcc;

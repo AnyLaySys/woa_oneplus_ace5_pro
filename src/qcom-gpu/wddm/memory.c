@@ -38,6 +38,11 @@ NTSTATUS APIENTRY A830CreateAllocation(HANDLE adapter,DXGKARG_CREATEALLOCATION *
         BOOLEAN shared=(r.Flags&1) || ((r.Flags&A830_RESOURCE_OWNED) && !(r.Flags&A830_RESOURCE_PRIMARY));
         ULONGLONG limit=shared?min(((A830_ADAPTER *)adapter)->Memory.Shared.Bytes,(ULONGLONG)GPU_BUFFER_LIMIT):A830_SEGMENT_BYTES;
         if(r.Version!=A830_ABI_VERSION || !r.Size || r.Size>limit || (r.Flags&~7u) || r.Rotation>D3DDDI_ROTATION_270)break;
+        if(r.Flags&A830_RESOURCE_OWNED) {
+            ULONG bytes=A830PixelBytes(r.Format);
+            if(!bytes || !r.Width || !r.Height || r.Width>MAXULONG/bytes ||
+               r.Pitch<r.Width*bytes || r.Height>r.Size/r.Pitch)break;
+        }
         A830_ALLOCATION *allocation=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*allocation),GPU_TAG);
         if(!allocation){status=STATUS_INSUFFICIENT_RESOURCES;break;}
         allocation->Resource=r;info->hAllocation=allocation;info->Size=(r.Size+4095)&~4095u;

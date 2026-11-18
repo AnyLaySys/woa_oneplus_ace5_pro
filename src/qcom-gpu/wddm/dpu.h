@@ -15,5 +15,4 @@ BOOLEAN A830DpuEnabled(PVOID adapter);
 BOOLEAN A830DpuReferences(PVOID adapter,ULONGLONG physical);
 NTSTATUS A830DpuQueue(PVOID adapter,ULONGLONG physical,ULONG pitch,ULONGLONG wddmAddress);
 VOID A830DpuEnableVsync(PVOID adapter,BOOLEAN enabled);
-NTSTATUS A830DpuQuery(PVOID adapter,GPU_DISPLAY_INFO *info);
 VOID A830DpuWork(A830_ADAPTER *adapter);

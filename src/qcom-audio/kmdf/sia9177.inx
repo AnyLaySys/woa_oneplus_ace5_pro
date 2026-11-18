@@ -11,6 +11,7 @@ Provider=%Provider%
 DriverVer=11/15/2026,26.11.15.5
 
 CatalogFile=sia9177.cat
+DriverPackageDisplayName=%DeviceName%
 
 PnpLockdown=1
 
