@@ -113,10 +113,11 @@ static NTSTATUS MmuStartLocked(GPU *g) {
         GpuWrite(cb,0x30,0x803019);
         GpuWrite(cb,0x20,(ULONG)vm->Tables.Physical);GpuWrite(cb,0x24,(ULONG)(vm->Tables.Physical>>32));
         GpuWrite(cb,0x28,0);GpuWrite(cb,0x2C,0);
-        GpuWrite(cb,0x38,0x44);GpuWrite(cb,0x3C,0);
+        GpuWrite(cb,0x38,0xFF44);GpuWrite(cb,0x3C,0);
         GpuWrite(cb,0x58,0xFFFFFFFF);
         GpuWrite(cb,0,0x1167);
     }
+    g->LastRoot=0;
     static const ULONG streams[]={0,1,5};
     for(ULONG i=0;i<RTL_NUMBER_OF(streams);i++) {
         ULONG sid=streams[i];

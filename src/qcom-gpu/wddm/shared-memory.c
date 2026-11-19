@@ -11,6 +11,21 @@ static PFN_NUMBER Pfn(const A830_SHARED_MEMORY *s,SIZE_T page) {
     A830_SHARED_BLOCK *b=s->Blocks[page/SHARED_BLOCK_PAGES];
     return b?b->Pfns[page%SHARED_BLOCK_PAGES]:UNMAPPED_PFN;
 }
+NTSTATUS A830PhysicalAddress(A830_ADAPTER *a,ULONG segment,ULONGLONG offset,PULONGLONG physical) {
+    if(offset&4095)return STATUS_INVALID_PARAMETER;
+    if(!segment){*physical=offset;return STATUS_SUCCESS;}
+    if(segment==1) {
+        if(!a->Memory.Segment.Mdl || offset>=a->Memory.Segment.Size)return STATUS_INVALID_PARAMETER;
+        *physical=a->Memory.Segment.Physical+offset;return STATUS_SUCCESS;
+    }
+    A830_SHARED_MEMORY *s=&a->Memory.Shared;
+    if(segment!=2 || !s->Blocks || offset>=s->Bytes)return STATUS_INVALID_PARAMETER;
+    KeWaitForSingleObject(&s->Lock,Executive,KernelMode,FALSE,NULL);
+    PFN_NUMBER pfn=s->Blocks && offset<s->Bytes?Pfn(s,(SIZE_T)(offset>>12)):UNMAPPED_PFN;
+    KeReleaseMutex(&s->Lock,FALSE);
+    if(pfn==UNMAPPED_PFN)return STATUS_INVALID_ADDRESS;
+    *physical=(ULONGLONG)pfn<<12;return STATUS_SUCCESS;
+}
 static VOID DropEmpty(A830_SHARED_MEMORY *s,SIZE_T page,SIZE_T count) {
     SIZE_T first=page/SHARED_BLOCK_PAGES,last=(page+count-1)/SHARED_BLOCK_PAGES;
     for(SIZE_T i=first;i<=last;i++)if(s->Blocks[i] && !s->Blocks[i]->Used) {

@@ -8,6 +8,7 @@
 #include "util/os_time.h"
 #include "qcom_gpu_uapi.h"
 #include "a830_wddm_abi.h"
+#include "a830_completion.h"
 #include "a830_host.h"
 
 typedef struct {
@@ -36,11 +37,9 @@ static int a830_ioctl(HANDLE handle, DWORD code, const void *input, DWORD input_
    return DeviceIoControl(handle,code,(void *)input,input_size,output,output_size,&bytes,NULL)!=FALSE;
 }
 static int a830_context_status(windows_context *ctx, uint64_t fence) {
-   if(!ctx->page)return -4;
-   MemoryBarrier();
-   uint64_t completed=ctx->page->Completed;MemoryBarrier();
-   if(ctx->page->Status || ctx->page->Generation!=ctx->generation)return -4;
-   return completed>=fence?0:1;
+   A830_COMPLETION page;
+   if(!a830_read_completion(ctx->page,&page) || page.Status || page.Generation!=ctx->generation)return -4;
+   return page.Completed>=fence?0:1;
 }
 static int a830_context_wait(windows_context *ctx, uint64_t fence, uint64_t deadline) {
    for(;;) {
@@ -112,7 +111,9 @@ static windows_context *a830_context_new(HANDLE handle, const A830_HOST *host) {
       ctx->page=(volatile A830_COMPLETION *)(uintptr_t)data.CompletionPage;
       if(!ctx->page)goto fail;
    }
-   ctx->generation=ctx->page->Generation;
+   A830_COMPLETION page;
+   if(!a830_read_completion(ctx->page,&page) || page.Status)goto fail;
+   ctx->generation=page.Generation;
    return ctx;
 fail:
    a830_context_finish(ctx);return NULL;

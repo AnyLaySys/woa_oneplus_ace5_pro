@@ -10,11 +10,13 @@
 #define A830_SEGMENT_ADDRESS 0x70000000ULL
 #define A830_COMMAND_ADDRESS (A830_SEGMENT_ADDRESS+A830_SEGMENT_BYTES)
 #define A830_QUEUE_DEPTH 32
-static __inline USHORT A830BacklightLevel(UCHAR brightness) {return (USHORT)(70+((ULONG)brightness*(0xDBBu-70)+50)/100);}
+#define A830_NODE_COUNT 2
+static __inline USHORT A830BacklightLevel(UCHAR brightness) {return (USHORT)(1+((ULONG)brightness*(0xDBBu-1)+50)/100);}
 typedef struct A830_CONTEXT A830_CONTEXT;
 typedef struct A830_PREPARED A830_PREPARED;
 typedef struct A830_ALLOCATION A830_ALLOCATION;
 typedef struct A830_SHARED_BLOCK A830_SHARED_BLOCK;
+typedef struct { PEPROCESS Owner; ULONGLONG Root; KMUTEX Lock; BOOLEAN Reserved,System; } A830_PROCESS;
 typedef struct {
     KMUTEX Lock;
     ULONGLONG Bytes;
@@ -40,7 +42,7 @@ typedef struct {
     ULONG Count;
     union { GPU_SUBMIT Commands[256]; RECT Rects[256]; } Payload;
 } A830_DMA;
-typedef struct { LIST_ENTRY Entry; ULONGLONG HardwareFence; ULONG Fence; BOOLEAN Dynamic; A830_DMA Dma; } A830_JOB;
+typedef struct { LIST_ENTRY Entry; ULONGLONG HardwareFence; ULONG Fence,Node; BOOLEAN Dynamic; A830_DMA Dma; } A830_JOB;
 typedef struct {
     GPU Hardware;
     PVOID Dpu,ScanoutPool,GpuScanout;
@@ -48,6 +50,7 @@ typedef struct {
     ULONG GpuRegisterSize;
     DXGKRNL_INTERFACE Dxgk;
     A830_MEMORY Memory;
+    ULONGLONG PagingRoot;
     DXGK_DISPLAY_INFORMATION DisplayInfo;
     PUCHAR Framebuffer;
     SIZE_T FramebufferSize;
@@ -75,13 +78,13 @@ typedef struct {
     LIST_ENTRY Inflight;
     LIST_ENTRY Contexts;
     KSPIN_LOCK ContextLock;
-    volatile LONG FaultFence;
-    struct { ULONGLONG HardwareFence,Sequence; ULONG Fence; A830_CONTEXT *Context; } IrqRecords[128];
+    volatile LONG64 FaultFence;
+    struct { ULONGLONG HardwareFence,Sequence; ULONG Fence,Node; A830_CONTEXT *Context; } IrqRecords[128];
     volatile ULONG IrqRead,IrqWrite;
     volatile LONG WorkerBusy;
     A830_JOB Jobs[A830_QUEUE_DEPTH];
     volatile LONG Stopping,Failed,PreemptPending,SchedulerDpcPending,Generation,CpuBarriers;
-    ULONG Completed,Preemption,LastSubmitted;
+    ULONG Completed[A830_NODE_COUNT],Preemption[A830_NODE_COUNT],LastSubmitted[A830_NODE_COUNT];
     DXGKARGCB_NOTIFY_INTERRUPT_DATA Notify;
 } A830_ADAPTER;
 BOOLEAN A830RotationSupported(D3DKMDT_VIDPN_PRESENT_PATH_ROTATION rotation);
@@ -98,9 +101,9 @@ static __forceinline VOID A830WakeDisplay(A830_ADAPTER *a) {
     if(KeGetCurrentIrql()<=DISPATCH_LEVEL)KeSetEvent(&a->Wake,IO_NO_INCREMENT,FALSE);
     else KeInsertQueueDpc(&a->DisplayWake,NULL,NULL);
 }
-typedef struct { A830_ADAPTER *Adapter; } A830_DEVICE;
-struct A830_CONTEXT { A830_ADAPTER *Adapter; PEPROCESS Process; PKEVENT Completion; GPU_BO CompletionBuffer; PVOID CompletionMap; EX_RUNDOWN_REF Jobs; LIST_ENTRY Entry; ULONGLONG NotifiedSequence; KSPIN_LOCK TokenLock; LIST_ENTRY Rendered; BOOLEAN Closing; ULONGLONG ClientLease; };
-struct A830_ALLOCATION { A830_RESOURCE Resource; LIST_ENTRY Entry; GPU_BO Buffer; ULONG References; ULONGLONG ReleaseFence; BOOLEAN ReleasePending; volatile LONG ScanoutReferences; };
+typedef struct { A830_ADAPTER *Adapter; A830_PROCESS *Process; } A830_DEVICE;
+struct A830_CONTEXT { A830_ADAPTER *Adapter; PEPROCESS Process; PKEVENT Completion; GPU_BO CompletionBuffer; PVOID CompletionMap; EX_RUNDOWN_REF Jobs; LIST_ENTRY Entry; ULONGLONG NotifiedSequence; KSPIN_LOCK TokenLock; LIST_ENTRY Rendered; BOOLEAN Closing,Virtual,System; ULONG Node; ULONGLONG ClientLease; A830_PROCESS *AddressSpace; };
+struct A830_ALLOCATION { A830_RESOURCE Resource; LIST_ENTRY Entry; GPU_BO Buffer; ULONG References; ULONGLONG ReleaseFence; BOOLEAN ReleasePending; volatile LONG ScanoutReferences;D3DGPU_PHYSICAL_ADDRESS Resident; };
 NTSTATUS A830SharedCreate(A830_ALLOCATION *allocation);
 VOID A830SharedDestroy(A830_ALLOCATION *allocation);
 NTSTATUS APIENTRY A830Escape(HANDLE adapter,const DXGKARG_ESCAPE *args);
@@ -115,7 +118,7 @@ NTSTATUS A830ContextStart(A830_CONTEXT *context,A830_CONTEXT_DATA *data);
 VOID A830ContextStop(A830_CONTEXT *context);
 VOID A830CancelRendered(A830_ADAPTER *adapter,const A830_DMA *token);
 VOID A830CancelRenderedClient(A830_ADAPTER *adapter,PEPROCESS process,ULONGLONG lease);
-ULONG A830FreezeFences(A830_ADAPTER *adapter);
+VOID A830FreezeFences(A830_ADAPTER *adapter,ULONG boundaries[A830_NODE_COUNT]);
 A830_JOB *A830TakePending(A830_ADAPTER *adapter);
 
 NTSTATUS A830MemoryStart(A830_ADAPTER *adapter);
@@ -129,11 +132,14 @@ VOID A830SharedStop(A830_ADAPTER *adapter);
 NTSTATUS A830SharedMap(A830_ADAPTER *adapter,SIZE_T page,SIZE_T count,PMDL source,ULONG offset);
 NTSTATUS A830SharedUnmap(A830_ADAPTER *adapter,SIZE_T page,SIZE_T count);
 NTSTATUS A830SharedRestore(A830_ADAPTER *adapter);
+NTSTATUS A830PhysicalAddress(A830_ADAPTER *adapter,ULONG segment,ULONGLONG offset,PULONGLONG physical);
+NTSTATUS A830CopyKernelMappings(A830_ADAPTER *adapter,ULONGLONG root);
 NTSTATUS A830MapSharedCpu(A830_ADAPTER *adapter,ULONGLONG address,SIZE_T bytes,PVOID *map,PMDL *mapping);
 NTSTATUS APIENTRY A830StandardAllocation(HANDLE adapter,DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA *args);
 NTSTATUS APIENTRY A830Render(HANDLE context,DXGKARG_RENDER *args);
 NTSTATUS APIENTRY A830Patch(HANDLE adapter,const DXGKARG_PATCH *args);
 NTSTATUS APIENTRY A830Submit(HANDLE adapter,const DXGKARG_SUBMITCOMMAND *args);
+NTSTATUS APIENTRY A830SubmitVirtual(HANDLE adapter,const DXGKARG_SUBMITCOMMANDVIRTUAL *args);
 VOID A830Worker(PVOID context);
 NTSTATUS A830DisplayStart(A830_ADAPTER *adapter);
 NTSTATUS A830DisplayLayout(const DXGK_DISPLAY_INFORMATION *display,SIZE_T *bytes);

@@ -653,7 +653,7 @@ diff --git a/src/freedreno/drm/meson.build b/src/freedreno/drm/meson.build
    'freedreno_ringbuffer.h',
    'freedreno_ringbuffer_sp.c',
    'freedreno_ringbuffer_sp.h',
-@@ -45,7 +45,11 @@
+@@ -45,7 +45,12 @@
    'msm/msm_ringbuffer.c',
    'msm/msm_ringbuffer_sp.c',
  )
@@ -662,8 +662,9 @@ diff --git a/src/freedreno/drm/meson.build b/src/freedreno/drm/meson.build
 +  libfreedreno_drm_files += libfreedreno_drm_msm_files
 +else
 +  libfreedreno_drm_files += 'fd_windows.c'
++  libfreedreno_drm_flags += cc.get_supported_arguments('/EHa')
 +endif
-
+ 
  libfreedreno_drm_virtio_files = files(
    'virtio/virtio_bo.c',
 diff --git a/src/freedreno/ir2/disasm-a2xx.c b/src/freedreno/ir2/disasm-a2xx.c
@@ -913,7 +914,7 @@ diff --git a/src/freedreno/vulkan/meson.build b/src/freedreno/vulkan/meson.build
 @@ -103,7 +103,13 @@
  tu_deps = []
  tu_flags = [sse2_args]
-
+ 
 -tu_wsi = false
 +tu_wsi = with_platform_windows
 +
@@ -922,10 +923,21 @@ diff --git a/src/freedreno/vulkan/meson.build b/src/freedreno/vulkan/meson.build
 +  libtu_files += files('tu_knl_windows.cc')
 +  tu_deps += cc.find_library('cfgmgr32')
 +endif
-
+ 
  if with_platform_x11
    tu_deps += dep_xcb_dri3
-@@ -226,7 +232,8 @@
+@@ -199,6 +205,10 @@
+   tu_cpp_args += cpp.get_supported_arguments(['-Wno-misleading-indentation'])
+ endif
+ 
++if with_platform_windows
++  tu_cpp_args += cpp.get_supported_arguments('/EHa')
++endif
++
+ libvulkan_freedreno = shared_library(
+   'vulkan_freedreno',
+   [libtu_files, tu_drirc, tu_entrypoints, tu_tracepoints, freedreno_xml_header_files, sha1_h, u_format_pack_h, bvh_spv],
+@@ -226,7 +236,8 @@
    c_args : [no_override_init_args, tu_flags, soong_compat_c_args],
    cpp_args : [tu_cpp_args, tu_flags, soong_compat_cpp_args],
    gnu_symbol_visibility : 'hidden',
@@ -1649,9 +1661,22 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_context.c b/src/gallium/dri
     }
 +#endif
  }
-
+ 
  void
-@@ -540,7 +542,7 @@
+@@ -412,6 +414,12 @@
+       fd_batch_reference(&batch, NULL);
+    }
+ 
++#ifdef _WIN32
++   for (unsigned stage=0;stage<MESA_SHADER_STAGES;stage++)
++      for (unsigned i=0;i<128;i++)
++         pipe_sampler_view_reference(&ctx->native_texture[stage].views[i], NULL);
++#endif
++
+    fd_prog_fini(pctx);
+ 
+    if (ctx->blitter)
+@@ -540,7 +548,7 @@
         * changes the behavior of what we are trying to measure:
         */
        while (fd_bo_cpu_prep(ts_bo, ctx->pipe, FD_BO_PREP_NOSYNC))
@@ -1665,7 +1690,7 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_context.h b/src/gallium/dri
 +++ b/src/gallium/drivers/freedreno/freedreno_context.h
 @@ -10,7 +10,9 @@
  #define FREEDRENO_CONTEXT_H_
-
+ 
  #include "pipe/p_context.h"
 +#ifndef _WIN32
  #include "util/libsync.h"
@@ -1673,6 +1698,31 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_context.h b/src/gallium/dri
  #include "util/list.h"
  #include "util/slab.h"
  #include "util/u_blitter.h"
+@@ -33,6 +35,14 @@
+ 
+ struct fd_vertex_stateobj;
+ struct fd_batch;
++
++#ifdef _WIN32
++struct fd_native_texture_state {
++   struct pipe_sampler_view *views[128];
++   struct pipe_sampler_state *samplers[16];
++   bool active;
++};
++#endif
+ 
+ struct fd_texture_stateobj {
+    struct pipe_sampler_view *textures[PIPE_MAX_SAMPLERS];
+@@ -471,6 +481,9 @@
+    struct pipe_depth_stencil_alpha_state *zsa dt;
+ 
+    struct fd_texture_stateobj tex[MESA_SHADER_STAGES] dt;
++#ifdef _WIN32
++   struct fd_native_texture_state native_texture[MESA_SHADER_STAGES];
++#endif
+ 
+    struct fd_program_stateobj prog dt;
+    uint32_t bound_shader_stages dt;
 diff --git a/src/gallium/drivers/freedreno/freedreno_fence.c b/src/gallium/drivers/freedreno/freedreno_fence.c
 --- a/src/gallium/drivers/freedreno/freedreno_fence.c
 +++ b/src/gallium/drivers/freedreno/freedreno_fence.c
@@ -1787,10 +1837,40 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/dr
     if (rsc->scanout)
        renderonly_scanout_destroy(rsc->scanout, fd_screen(pscreen)->ro);
 +#endif
-
+ 
     if (prsc->target == PIPE_BUFFER)
        util_idalloc_mt_free(&screen->buffer_ids, rsc->b.buffer_id_unique);
-@@ -1450,6 +1452,7 @@
+@@ -1436,6 +1438,29 @@
+ /**
+  * Create a new texture object, using the given template info.
+  */
++#ifdef _WIN32
++#include "drm/a830_native.h"
++struct pipe_resource *fd_native_resource(struct pipe_screen *screen,const struct pipe_resource *tmpl,
++    struct fd_bo *bo,A830_NATIVE_LAYOUT *layout) {
++   uint64_t modifier=(tmpl->bind&PIPE_BIND_LINEAR)?DRM_FORMAT_MOD_LINEAR:DRM_FORMAT_MOD_INVALID;
++   uint32_t size=0;
++   struct pipe_resource *resource=fd_resource_allocate_and_resolve(screen,tmpl,&modifier,1,&size);
++   if(!resource)return NULL;
++   struct fd_resource *rsc=fd_resource(resource);
++   if(bo && fd_bo_size(bo)<size){fd_resource_destroy(screen,resource);return NULL;}
++   if(layout) {
++      memset(layout,0,sizeof(*layout));layout->Size=size;layout->Levels=tmpl->last_level+1;layout->Layers=tmpl->array_size;
++      for(unsigned i=0;i<layout->Levels && i<16;i++) {
++         layout->Mip[i].Offset=rsc->layout.slices[i].offset;
++         layout->Mip[i].Pitch=fdl_pitch(&rsc->layout,i);
++         layout->Mip[i].LayerPitch=fdl_layer_stride(&rsc->layout,i);
++      }
++   }
++   if(bo)fd_resource_set_bo(rsc,fd_bo_ref(bo));
++   return resource;
++}
++#endif
++
+ static struct pipe_resource *
+ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
+                                   const struct pipe_resource *tmpl,
+@@ -1450,6 +1475,7 @@
      * create_with_modifiers() doesn't give us usage flags, so we have to
      * assume that all calls with modifiers are scanout-possible
      */
@@ -1798,7 +1878,7 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/dr
     if (screen->ro &&
         ((tmpl->bind & PIPE_BIND_SCANOUT) ||
          has_explicit_modifier(modifiers, count))) {
-@@ -1470,12 +1473,13 @@
+@@ -1470,12 +1496,13 @@
        assert(handle.type == WINSYS_HANDLE_TYPE_FD);
        rsc = fd_resource(pscreen->resource_from_handle(
           pscreen, tmpl, &handle, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE));
@@ -1806,14 +1886,14 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/dr
 +      close((int)(uintptr_t)handle.handle);
        if (!rsc)
           return NULL;
-
+ 
        return &rsc->b.b;
     }
 +#endif
-
+ 
     prsc =
        fd_resource_allocate_and_resolve(pscreen, tmpl, modifiers, count, &size);
-@@ -1511,6 +1515,8 @@
+@@ -1511,6 +1538,8 @@
                          const struct pipe_resource *tmpl,
                          struct winsys_handle *handle, unsigned usage)
  {
@@ -1821,8 +1901,8 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/dr
 +
     struct fd_screen *screen = fd_screen(pscreen);
     struct fd_resource *rsc = alloc_resource_struct(pscreen, tmpl);
-
-@@ -1568,6 +1574,10 @@
+ 
+@@ -1568,6 +1597,10 @@
  fail:
     fd_resource_destroy(pscreen, prsc);
     return NULL;
@@ -1831,7 +1911,7 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/dr
 +   return NULL;
 +#endif
  }
-
+ 
  bool
 diff --git a/src/gallium/drivers/freedreno/freedreno_resource.h b/src/gallium/drivers/freedreno/freedreno_resource.h
 --- a/src/gallium/drivers/freedreno/freedreno_resource.h
@@ -2242,3 +2322,73 @@ diff --git a/src/freedreno/vulkan/tu_pipeline.cc b/src/freedreno/vulkan/tu_pipel
        /* VK_EXT_rasterization_order_attachment_access:
         *
         * This extension allow access to framebuffer attachments when used as
+diff --git a/src/gallium/drivers/freedreno/freedreno_draw.c b/src/gallium/drivers/freedreno/freedreno_draw.c
+--- a/src/gallium/drivers/freedreno/freedreno_draw.c
++++ b/src/gallium/drivers/freedreno/freedreno_draw.c
+@@ -126,6 +126,11 @@
+ 
+          /* Mark textures as being read */
+          if (dirty_shader & FD_DIRTY_SHADER_TEX) {
++#ifdef _WIN32
++            for (unsigned i=0;i<128;i++)
++               if (ctx->native_texture[s].views[i])
++                  resource_read(batch, ctx->native_texture[s].views[i]->texture);
++#endif
+             u_foreach_bit (i, ctx->tex[s].valid_textures)
+                resource_read(batch, ctx->tex[s].textures[i]->texture);
+          }
+@@ -590,6 +595,12 @@
+    u_foreach_bit (i, ctx->constbuf[MESA_SHADER_COMPUTE].enabled_mask)
+       resource_read(batch, ctx->constbuf[MESA_SHADER_COMPUTE].cb[i].buffer);
+ 
++#ifdef _WIN32
++   for (unsigned i=0;i<128;i++)
++      if (ctx->native_texture[MESA_SHADER_COMPUTE].views[i])
++         resource_read(batch, ctx->native_texture[MESA_SHADER_COMPUTE].views[i]->texture);
++#endif
++
+    /* Mark textures as being read */
+    u_foreach_bit (i, ctx->tex[MESA_SHADER_COMPUTE].valid_textures)
+       resource_read(batch, ctx->tex[MESA_SHADER_COMPUTE].textures[i]->texture);
+diff --git a/src/gallium/drivers/freedreno/a6xx/fd6_image.cc b/src/gallium/drivers/freedreno/a6xx/fd6_image.cc
+--- a/src/gallium/drivers/freedreno/a6xx/fd6_image.cc
++++ b/src/gallium/drivers/freedreno/a6xx/fd6_image.cc
+@@ -220,9 +220,17 @@
+       validate_image_descriptor<CHIP>(ctx, set, idx, img);
+    }
+ 
++   unsigned descriptor_bytes=sizeof(set->descriptor);
++#ifdef _WIN32
++   const struct fd_native_texture_state *native=&ctx->native_texture[shader];
++   if (native->active) {
++      fd6_descriptor_set_invalidate(set);
++      descriptor_bytes=256*FDL6_TEX_CONST_DWORDS*sizeof(uint32_t);
++   }
++#endif
+    if (!set->bo) {
+       set->bo = fd_bo_new(
+-            ctx->dev, sizeof(set->descriptor),
++            ctx->dev, descriptor_bytes,
+             /* Use same flags as ringbuffer so hits the same heap,
+              * because those will already have the FD_RELOC_DUMP
+              * flag set:
+@@ -234,6 +242,19 @@
+       uint32_t *desc_buf = (uint32_t *)fd_bo_map(set->bo);
+ 
+       memcpy(desc_buf, set->descriptor, sizeof(set->descriptor));
++#ifdef _WIN32
++      if (native->active) {
++         memset(desc_buf+64*FDL6_TEX_CONST_DWORDS,0,descriptor_bytes-sizeof(set->descriptor));
++         for (unsigned i=0;i<128;i++)
++            if (native->views[i])
++               memcpy(desc_buf+(64+i)*FDL6_TEX_CONST_DWORDS,
++                      fd6_pipe_sampler_view(native->views[i])->descriptor,FDL6_TEX_CONST_DWORDS*sizeof(uint32_t));
++         for (unsigned i=0;i<16;i++)
++            if (native->samplers[i])
++               memcpy(desc_buf+(192+i)*FDL6_TEX_CONST_DWORDS,
++                      fd6_sampler_stateobj(native->samplers[i])->descriptor,4*sizeof(uint32_t));
++      }
++#endif
+ 
+       if (unlikely(append_fb_read)) {
+          /* Reserve A6XX_MAX_RENDER_TARGETS image slots for fb-read */

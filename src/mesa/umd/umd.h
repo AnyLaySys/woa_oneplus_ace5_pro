@@ -135,8 +135,6 @@ struct Device : Batch {
  CRITICAL_SECTION lock{};
  void *command_buffer = nullptr;
  UINT command_buffer_size = 0;
- volatile A830_COMPLETION *completion = nullptr;
- UINT generation = 0;
  HMODULE module = nullptr;
  Dispatch vk;
  VkInstance instance = VK_NULL_HANDLE;

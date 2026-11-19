@@ -43,15 +43,29 @@ NTSTATUS APIENTRY A830Query(HANDLE adapter,const DXGKARG_QUERYADAPTERINFO *q) {
         DXGK_DRIVERCAPS *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));
 
         c->HighestAcceptableAddress.QuadPart=0xFFFFFFFFFFF;
+        c->MemoryManagementCaps.VirtualAddressingSupported=1;c->MemoryManagementCaps.GpuMmuSupported=1;
         c->MemoryManagementCaps.NonCpuVisiblePrimary=1;
         c->FlipCaps.FlipOnVSyncMmIo=1;
         c->MaxQueuedFlipOnVSync=1;
         c->MaxAllocationListSlotId=127;c->SchedulingCaps.MultiEngineAware=1;
         c->SchedulingCaps.PreemptionAware=1;c->SchedulingCaps.CancelCommandAware=1;
-        c->GpuEngineTopology.NbAsymetricProcessingNodes=1;c->WDDMVersion=DXGKDDI_WDDMv2_4;
+        c->GpuEngineTopology.NbAsymetricProcessingNodes=A830_NODE_COUNT;c->WDDMVersion=DXGKDDI_WDDMv2_4;
         c->PreemptionCaps.GraphicsPreemptionGranularity=D3DKMDT_GRAPHICS_PREEMPTION_DMA_BUFFER_BOUNDARY;
         c->PreemptionCaps.ComputePreemptionGranularity=D3DKMDT_COMPUTE_PREEMPTION_DMA_BUFFER_BOUNDARY;
         c->SupportNonVGA=TRUE;c->SupportPerEngineTDR=TRUE;c->SupportSmoothRotation=TRUE;return STATUS_SUCCESS;
+    }
+    if(q->Type==DXGKQAITYPE_GPUMMUCAPS) {
+        if(q->InputDataSize!=sizeof(DXGK_QUERYGPUMMUCAPSIN) || !q->pInputData || ((DXGK_QUERYGPUMMUCAPSIN *)q->pInputData)->PhysicalAdapterIndex ||
+           q->OutputDataSize<sizeof(DXGK_GPUMMUCAPS))return STATUS_INVALID_PARAMETER;
+        DXGK_GPUMMUCAPS *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->ReadOnlyMemorySupported=1;c->NoExecuteMemorySupported=1;
+        c->CacheCoherentMemorySupported=1;c->PageTableUpdateRequireAddressSpaceIdle=1;
+        c->PageTableUpdateMode=DXGK_PAGETABLEUPDATE_CPU_VIRTUAL;c->VirtualAddressBitCount=39;c->PageTableLevelCount=3;return STATUS_SUCCESS;
+    }
+    if(q->Type==DXGKQAITYPE_PAGETABLELEVELDESC) {
+        if(q->InputDataSize!=sizeof(DXGK_QUERYPAGETABLELEVELDESCIN) || !q->pInputData || q->OutputDataSize<sizeof(DXGK_PAGE_TABLE_LEVEL_DESC))return STATUS_INVALID_PARAMETER;
+        const DXGK_QUERYPAGETABLELEVELDESCIN *in=q->pInputData;if(in->PhysicalAdapterIndex || in->LevelIndex>2)return STATUS_INVALID_PARAMETER;
+        DXGK_PAGE_TABLE_LEVEL_DESC *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->PageTableIndexBitCount=9;
+        c->PageTableSizeInBytes=c->PageTableAlignmentInBytes=PAGE_SIZE;return STATUS_SUCCESS;
     }
     if(q->Type==DXGKQAITYPE_WDDMDEVICECAPS) {
         if(q->OutputDataSize<sizeof(DXGK_WDDMDEVICECAPS))return STATUS_BUFFER_TOO_SMALL;
@@ -74,8 +88,9 @@ NTSTATUS APIENTRY A830Query(HANDLE adapter,const DXGKARG_QUERYADAPTERINFO *q) {
         if(q->InputDataSize!=sizeof(DXGK_QUERYPHYSICALADAPTERCAPSIN) || !q->pInputData ||
             ((DXGK_QUERYPHYSICALADAPTERCAPSIN *)q->pInputData)->PhysicalAdapterIndex)return STATUS_INVALID_PARAMETER;
         if(!a->Dxgk.DeviceHandle)return STATUS_DEVICE_NOT_READY;
-        DXGK_PHYSICALADAPTERCAPS *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->NumExecutionNodes=1;
+        DXGK_PHYSICALADAPTERCAPS *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->NumExecutionNodes=A830_NODE_COUNT;
         c->DxgkPhysicalAdapterHandle=a->Dxgk.DeviceHandle;
+        c->Flags.GpuMmuSupported=1;c->PagingNodeIndex=1;
         return STATUS_SUCCESS;
     }
     if(q->Type==DXGKQAITYPE_QUERYSEGMENT4) {

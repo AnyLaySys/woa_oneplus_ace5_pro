@@ -74,11 +74,21 @@ static VOID HapticPoll(WDFTIMER timer) {
 }
 static NTSTATUS HapticPulse(KEYS *k,ULONG voltage,ULONG pulses) {
     if(voltage!=800 && voltage!=1200)return STATUS_INVALID_PARAMETER;
-    if(!k->Online)return STATUS_DEVICE_NOT_READY;
+    if(!k->Online || !k->DisplayOn)return STATUS_DEVICE_NOT_READY;
     if(!NT_SUCCESS(k->HapticStatus))return k->HapticStatus;
     if(k->HapticPhase || KeQueryInterruptTime()<k->HapticDue)return STATUS_DEVICE_BUSY;
     k->HapticVoltage=(UCHAR)(voltage/50);k->HapticRepeat=(UCHAR)(pulses-1);k->HapticPhase=1;
     WdfTimerStart(k->HapticTimer,WDF_REL_TIMEOUT_IN_MS(1));return STATUS_SUCCESS;
+}
+static NTSTATUS HapticDisplay(LPCGUID setting,PVOID value,ULONG bytes,PVOID context) {
+    UNREFERENCED_PARAMETER(setting);if(bytes!=sizeof(ULONG))return STATUS_INVALID_PARAMETER;
+    WDFDEVICE device=context;KEYS *k=Context(device);
+    WdfObjectAcquireLock(device);k->DisplayOn=*(ULONG UNALIGNED*)value!=0;
+    if(!k->DisplayOn) {
+        WdfTimerStop(k->HapticTimer,FALSE);k->HapticRepeat=0;
+        if(k->Online && k->HapticPhase){NTSTATUS status=HapticOff(k);if(!NT_SUCCESS(status))k->HapticStatus=status;}
+    }
+    WdfObjectReleaseLock(device);return STATUS_SUCCESS;
 }
 static VOID HapticControl(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input,ULONG code) {
     WDFDEVICE parent=HapticContext(WdfIoQueueGetDevice(queue))->Parent;KEYS *k=Context(parent);

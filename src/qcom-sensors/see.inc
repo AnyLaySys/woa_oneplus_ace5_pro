@@ -1,24 +1,59 @@
 #define SEE_CID 6u
-typedef struct {
-    QCOM_LIGHT Value;volatile LONG Sequence;volatile LONG64 Demand;
-    ULONGLONG Suid[2];UCHAR Stage;
-} SEE_SENSOR;
-static SEE_SENSOR Sensors[]={{{0,STATUS_DEVICE_NOT_CONNECTED,0}},{{0,STATUS_DEVICE_NOT_CONNECTED,0}}};
-static const CHAR *const SensorNames[]={"wise_rgb","device_orient"};
-static VOID SeeValue(SEE_SENSOR *s,ULONG value,NTSTATUS status) {
-    InterlockedIncrement(&s->Sequence);s->Value.LuxMilli=value;s->Value.Status=status;
+typedef struct {QCOM_ROTATION Value;volatile LONG Sequence;} SEE_SAMPLE;
+typedef struct {ULONGLONG Suid[2];UCHAR Stage,Rate,Alternate;} SEE_SENSOR;
+static SEE_SAMPLE Samples[QcomSensorCount],Activity;
+static volatile LONG64 Demands[QcomSensorCount];
+typedef struct {const CHAR *Name;ULONG Sample,Request;} SEE_TYPE;
+static const SEE_TYPE SensorTypes[]={
+    {"wise_rgb",QcomLight,514},{"accel",QcomSimpleOrientation,513},{"gyro",QcomGyro,513},{"rotv",QcomRotation,513},
+    {"gravity",QcomGravity,513},{"mag",QcomMagnetometer,513},{"game_rv",QcomRelativeOrientation,513},{"geomag_rv",QcomGeomagneticOrientation,513},
+    {"proximity",QcomProximity,514},{"pedometer",QcomPedometer,514},{"rmd",QcomActivity,514},{"activity_recognition",QcomActivity,514}
+};
+#define SEE_AR (RTL_NUMBER_OF(SensorTypes)-1)
+static SEE_SENSOR Sensors[RTL_NUMBER_OF(SensorTypes)];
+static const CHAR *SeeName(ULONG i) {return i==10 && Sensors[i].Alternate?"amd":SensorTypes[i].Name;}
+static VOID SeePublish(SEE_SAMPLE *s,const LONG *values,ULONG accuracy,NTSTATUS status) {
+    InterlockedIncrement(&s->Sequence);RtlCopyMemory(s->Value.Micro,values,sizeof(s->Value.Micro));s->Value.Accuracy=accuracy;s->Value.Status=status;
     s->Value.Time=NT_SUCCESS(status)?KeQueryInterruptTime():0;InterlockedIncrement(&s->Sequence);
 }
+static VOID SeeValue(SEE_SAMPLE *s,LONG x,LONG y,LONG z,NTSTATUS status) {
+    const LONG values[]={x,y,z,0};SeePublish(s,values,0,status);
+}
 static VOID SeeReset(NTSTATUS status) {
-    for(ULONG i=0;i<RTL_NUMBER_OF(Sensors);i++){Sensors[i].Stage=0;RtlZeroMemory(Sensors[i].Suid,sizeof(Sensors[i].Suid));SeeValue(&Sensors[i],0,status);}
+    RtlZeroMemory(Sensors,sizeof(Sensors));for(ULONG i=0;i<RTL_NUMBER_OF(Samples);i++)SeeValue(&Samples[i],0,0,0,status);
+    SeeValue(&Activity,0,0,0,status);
 }
-static VOID SeeQuery(ULONG i,PVOID value) {
-    SEE_SENSOR *s=&Sensors[i];InterlockedExchange64(&s->Demand,(LONG64)KeQueryInterruptTime());
-    LONG seq=InterlockedCompareExchange(&s->Sequence,0,0);RtlCopyMemory(value,&s->Value,sizeof(s->Value));
-    if((seq&1) || seq!=InterlockedCompareExchange(&s->Sequence,0,0))((QCOM_LIGHT*)value)->Status=STATUS_DEVICE_NOT_READY;
+static VOID SeeState(ULONG i,NTSTATUS status) {
+    SeeValue(i==SEE_AR?&Activity:&Samples[SensorTypes[i].Sample],0,0,0,status);if(i==1)SeeValue(&Samples[QcomAccel],0,0,0,status);if(i==4)SeeValue(&Samples[QcomLinearAccel],0,0,0,status);
 }
-VOID QcomLightQuery(QCOM_LIGHT *value) {SeeQuery(0,value);}
-VOID QcomOrientationQuery(QCOM_ORIENTATION *value) {SeeQuery(1,value);}
+static QCOM_ROTATION SeeRead(SEE_SAMPLE *s) {
+    LONG seq=InterlockedCompareExchange(&s->Sequence,0,0);QCOM_ROTATION sample=s->Value;
+    if((seq&1) || seq!=InterlockedCompareExchange(&s->Sequence,0,0))sample.Status=STATUS_DEVICE_NOT_READY;
+    return sample;
+}
+NTSTATUS QcomSensorQuery(ULONG sensor,QCOM_ROTATION *value) {
+    if(sensor>=QcomSensorCount)return STATUS_INVALID_PARAMETER;
+    InterlockedExchange64(&Demands[sensor],(LONG64)KeQueryInterruptTime());*value=SeeRead(&Samples[sensor]);
+    if(sensor==QcomActivity && Sensors[SEE_AR].Stage==3) {
+        QCOM_ROTATION sample=SeeRead(&Activity);if(NT_SUCCESS(sample.Status) && sample.Time)*value=sample;
+    }
+    return STATUS_SUCCESS;
+}
+static LONG SeeScaled(ULONG bits,ULONG scale,ULONG limit) {
+    // Scale an IEEE-754 value with a Q16 multiplier, without kernel floating point.
+    LONG shift=166-(LONG)((bits>>23)&255);ULONGLONG n=(ULONGLONG)((bits&0x7fffff)|0x800000u)*scale;
+    n=shift>=64?0:shift>0?n>>shift:limit;LONG value=(LONG)min(n,limit);return bits>>31?-value:value;
+}
+static BOOLEAN SeeQuaternion(const ULONG *bits,LONG *q) {
+    // Cache ADSP x,y,z,w as w,x,y,z in millionths, without kernel floating point.
+    LONGLONG norm=0;
+    for(ULONG i=0;i<4;i++) {
+        ULONG b=bits[(i+3)%4];if((b&0x7fffffffu)>0x3f800000u)return FALSE;
+        LONG shift=150-(LONG)((b>>23)&255);ULONGLONG n=(ULONGLONG)((b&0x7fffffu)|0x800000u)*1000000;
+        LONG value=(LONG)(shift>=64?0:n>>shift);q[i]=b>>31?-value:value;norm+=(LONGLONG)value*value;
+    }
+    return norm>=500000000000LL && norm<=1500000000000LL;
+}
 typedef struct {const UCHAR *At,*End;} SEE_PB;
 static BOOLEAN SeeVar(SEE_PB *p,ULONGLONG *v) {
     *v=0;for(ULONG s=0;s<64;s+=7) {
@@ -40,6 +75,30 @@ static BOOLEAN SeeField(SEE_PB *p,ULONG *tag,SEE_PB *data,ULONGLONG *value) {
     data->At=p->At;data->End=p->At+(SIZE_T)n;p->At=data->End;
     if((key&7)!=2)RtlCopyMemory(value,data->At,(SIZE_T)n);return TRUE;
 }
+static ULONG SeeActivityState(const ULONG *states,ULONG count) {
+    // QTI publishes hierarchical activity states.
+    if(count==1)return states[0]==1?2u:states[0]==4?32u:1u;
+    if(count==2) {
+        if(states[0]==2)return states[1]==5?8u:states[1]==6?16u:1u;
+        if(states[0]==3 && states[1]==7)return 64u;
+        if(states[0]==4)return states[1]==1?2u:states[1]==8 || states[1]==9?32u:1u;
+    }
+    if(count==3 && states[2]==1 && ((states[0]==3 && states[1]==7) || (states[0]==4 && states[1]==8)))return 2u;
+    return 1u;
+}
+static VOID SeeActivity(SEE_PB payload) {
+    ULONG states[3],count=0,tag;ULONGLONG value;SEE_PB data;
+    while(payload.At<payload.End) {
+        if(!SeeField(&payload,&tag,&data,&value))return;if(tag!=1)continue;
+        if(data.At) {
+            while(data.At<data.End) {
+                if(count==RTL_NUMBER_OF(states) || !SeeVar(&data,&value) || value>9)return;
+                states[count++]=(ULONG)value;
+            }
+        } else {if(count==RTL_NUMBER_OF(states) || value>9)return;states[count++]=(ULONG)value;}
+    }
+    if(count)SeeValue(&Activity,(LONG)SeeActivityState(states,count),0,0,STATUS_SUCCESS);
+}
 static VOID SeeEvent(const ULONGLONG *source,SEE_PB event) {
     ULONG tag,id=0;ULONGLONG value;SEE_PB data,payload={0};
     while(event.At<event.End) {
@@ -52,7 +111,7 @@ static VOID SeeEvent(const ULONGLONG *source,SEE_PB event) {
         while(payload.At<payload.End) {
             if(!SeeField(&payload,&tag,&data,&value))return;
             if(tag==1 && data.At)for(ULONG i=0;i<RTL_NUMBER_OF(Sensors);i++) {
-                SIZE_T n=strlen(SensorNames[i]);if((SIZE_T)(data.End-data.At)==n && RtlCompareMemory(data.At,SensorNames[i],n)==n)sensor=(LONG)i;
+                SIZE_T n=strlen(SeeName(i));if((SIZE_T)(data.End-data.At)==n && RtlCompareMemory(data.At,SeeName(i),n)==n)sensor=(LONG)i;
             }
             else if(tag==2 && data.At && !suid[0] && !suid[1])while(data.At<data.End) {
                 SEE_PB field;if(!SeeField(&data,&tag,&field,&value))return;
@@ -60,33 +119,59 @@ static VOID SeeEvent(const ULONGLONG *source,SEE_PB event) {
             }
         }
         if(sensor<0)return;SEE_SENSOR *s=&Sensors[sensor];
-        if(!suid[0] && !suid[1]){SeeValue(s,0,STATUS_NO_SUCH_DEVICE);return;}
+        if(!suid[0] && !suid[1]){if(sensor==10 && !s->Alternate){s->Alternate=1;s->Stage=0;SeeState((ULONG)sensor,STATUS_DEVICE_NOT_READY);}else SeeState((ULONG)sensor,STATUS_NO_SUCH_DEVICE);return;}
         if(s->Stage<2 || RtlCompareMemory(s->Suid,suid,sizeof(suid))!=sizeof(suid)) {
-            RtlCopyMemory(s->Suid,suid,sizeof(suid));s->Stage=2;SeeValue(s,0,STATUS_DEVICE_NOT_READY);
+            RtlCopyMemory(s->Suid,suid,sizeof(suid));s->Stage=2;SeeState((ULONG)sensor,STATUS_DEVICE_NOT_READY);
         }
         return;
     }
+    if(id!=1025 && id!=769 && id!=1028 && id!=775 && id!=772 && id!=800)return;
     for(ULONG i=0;i<RTL_NUMBER_OF(Sensors);i++) {
-        SEE_SENSOR *s=&Sensors[i];if(s->Stage!=3 || RtlCompareMemory(s->Suid,source,sizeof(s->Suid))!=sizeof(s->Suid))continue;
-        if(i==1 && id==776) {
-            while(payload.At<payload.End){if(!SeeField(&payload,&tag,&data,&value))return;if(tag==1 && value<4){SeeValue(s,(ULONG)value,STATUS_SUCCESS);return;}}
-        } else if(i==0 && id==1025) {
-            ULONG bits=0,status=0;BOOLEAN sample=FALSE;
-            while(payload.At<payload.End) {
-                if(!SeeField(&payload,&tag,&data,&value))return;
-                if(tag==1 && data.At && data.End-data.At==64 && !sample){RtlCopyMemory(&bits,data.At+36,4);sample=TRUE;}
-                if(tag==2)status=(ULONG)value;
+        SEE_SENSOR *sensor=&Sensors[i];if(sensor->Stage!=3 || RtlCompareMemory(sensor->Suid,source,sizeof(sensor->Suid))!=sizeof(sensor->Suid))continue;
+        if(i==SEE_AR){if(id==800)SeeActivity(payload);return;}
+        ULONG kind=SensorTypes[i].Sample,bits[6]={0},items=0,status=0,near=MAXULONG,steps=0,mask=0;BOOLEAN countSeen=FALSE,activitySeen=FALSE;SEE_SAMPLE *s=&Samples[kind];
+        while(payload.At<payload.End) {
+            if(!SeeField(&payload,&tag,&data,&value))return;
+            if(kind==QcomPedometer && (id==1028 || id==775)){if(tag==1 && !data.At && value<=MAXULONG){steps=(ULONG)value;countSeen=TRUE;}continue;}
+            if(kind==QcomActivity && id==772) {if(tag==1 && !data.At && value<=2){mask=value==1?2u:1u;activitySeen=TRUE;}continue;}
+            if(kind==QcomProximity && id==769) {if(tag==1)near=(ULONG)value;else if(tag==3)status=(ULONG)value;continue;}
+            if(tag==1 && data.At) {
+                SIZE_T bytes=(SIZE_T)(data.End-data.At);
+                if(!i && bytes==64){RtlCopyMemory(bits,data.At+36,4);items=1;}
+                else if(i && bytes && !(bytes&3) && bytes/4<=6-items){RtlCopyMemory(bits+items,data.At,bytes);items+=(ULONG)bytes/4;}
             }
-            if(!sample || status!=3 || bits&0x80000000u || (bits&0x7f800000u)==0x7f800000u)return;
-            LONG exponent=(LONG)((bits>>23)&255)-150;
-            ULONGLONG lux=(ULONGLONG)((bits&0x7fffff)|0x800000u)*1000;
-            if(exponent>=0)lux=exponent<16?lux<<exponent:1000000000ULL;
-            else lux=exponent>-64?lux>>(-exponent):0;
-            SeeValue(s,(ULONG)min(lux,1000000000ULL),STATUS_SUCCESS);
+            if(kind==QcomGravity && tag==2 && data.At && data.End-data.At==12){RtlCopyMemory(bits+3,data.At,12);items=6;}
+            else if((tag==2 || (kind==QcomGravity && tag==3)) && !data.At)status=(ULONG)value;
+        }
+        if(kind==QcomPedometer){if(countSeen)SeeValue(s,(LONG)steps,0,0,STATUS_SUCCESS);return;}
+        if(kind==QcomActivity){if(activitySeen)SeeValue(s,(LONG)mask,0,0,STATUS_SUCCESS);return;}
+        if(status>3)return;
+        if(kind==QcomProximity){if(near<=1 && status)SeeValue(s,(LONG)near,0,0,STATUS_SUCCESS);return;}
+        ULONG count=kind==QcomRotation || kind==QcomRelativeOrientation || kind==QcomGeomagneticOrientation?4:kind==QcomGravity?6:kind==QcomLight?1:3;
+        if(items!=count || ((!status || (!i && status!=3)) && kind<=QcomGyro))return;
+        for(ULONG j=0;j<count;j++)if((bits[j]&0x7f800000u)==0x7f800000u)return;
+        if(count==4) {
+            LONG q[4];if(!SeeQuaternion(bits,q))return;
+            SeePublish(s,q,max(status,1u),STATUS_SUCCESS);
+        } else if(kind==QcomGyro)SeeValue(s,SeeScaled(bits[0],3754936206u,2000000),SeeScaled(bits[1],3754936206u,2000000),SeeScaled(bits[2],3754936206u,2000000),STATUS_SUCCESS);
+        else if(kind==QcomGravity) {
+            SeeValue(s,SeeScaled(bits[0],6682812,16000),SeeScaled(bits[1],6682812,16000),SeeScaled(bits[2],6682812,16000),STATUS_SUCCESS);
+            SeeValue(&Samples[QcomLinearAccel],SeeScaled(bits[3],6682812,16000),SeeScaled(bits[4],6682812,16000),SeeScaled(bits[5],6682812,16000),STATUS_SUCCESS);
+        } else if(kind==QcomMagnetometer) {
+            const LONG v[]={SeeScaled(bits[0],655360000,100000000),SeeScaled(bits[1],655360000,100000000),SeeScaled(bits[2],655360000,100000000),0};SeePublish(s,v,max(status,1u),STATUS_SUCCESS);
+        } else if(kind==QcomSimpleOrientation) {
+            SeeValue(&Samples[QcomAccel],SeeScaled(bits[0],6682812,16000),SeeScaled(bits[1],6682812,16000),SeeScaled(bits[2],6682812,16000),STATUS_SUCCESS);
+            ULONG axis=0;for(ULONG j=1;j<3;j++)if((bits[j]&0x7fffffffu)>(bits[axis]&0x7fffffffu))axis=j;
+            if((bits[axis]&0x7fffffffu)<0x40f00000u)return;
+            ULONG negative=bits[axis]>>31;SeeValue(s,axis==1?negative*2:axis==0?1+negative*2:4+negative,0,0,STATUS_SUCCESS);
+        } else {
+            if(bits[0]&0x80000000u)return;
+            SeeValue(s,SeeScaled(bits[0],65536000,1000000000),0,0,STATUS_SUCCESS);
         }
         return;
     }
 }
+
 static BOOLEAN SeePacket(PSIA_LINK l,ULONG type,ULONG node,ULONG port,const UCHAR *data,ULONG size) {
     QCOM_SEE *s=&l->See;if(size>1024 || !s->Acked || !s->Rcid)return FALSE;
     ULONG i;for(i=0;i<s->Count && !(s->Free[i] && s->Size[i]>=32+size);i++);
@@ -136,6 +221,9 @@ static VOID SeeReceive(PSIA_LINK l,const UCHAR *packet,ULONG size) {
     }
     s->Due=0;SeePoll(l);
 }
+static BOOLEAN SeeActive(ULONG i,ULONGLONG now) {
+    ULONGLONG demand=(ULONGLONG)InterlockedCompareExchange64(&Demands[i],0,0);return demand && now-demand<50000000;
+}
 static VOID SeePoll(PSIA_LINK l) {
     QCOM_SEE *s=&l->See;if(!l->VersionReady || !l->PowerHeld || l->Charge.Closing)return;
     if(s->ResumePort) {
@@ -151,13 +239,15 @@ static VOID SeePoll(PSIA_LINK l) {
         SEE_SENSOR *sensor=&Sensors[i];
         if(!sensor->Stage) {
             static const ULONGLONG uid[]={0xababababababababULL,0xababababababababULL};
-            UCHAR body[32];UCHAR n=(UCHAR)strlen(SensorNames[i]);body[0]=10;body[1]=n;RtlCopyMemory(body+2,SensorNames[i],n);
+            UCHAR body[32];UCHAR n=(UCHAR)strlen(SeeName(i));body[0]=10;body[1]=n;RtlCopyMemory(body+2,SeeName(i),n);
             body[n+2]=16;body[n+3]=1;body[n+4]=24;body[n+5]=1;
             if(SeeRequest(l,uid,512,body,n+6))sensor->Stage=1;
         } else {
-            ULONGLONG demand=(ULONGLONG)InterlockedCompareExchange64(&sensor->Demand,0,0);BOOLEAN active=demand && KeQueryInterruptTime()-demand<50000000;
-            if(sensor->Stage==2 && active){if(SeeRequest(l,sensor->Suid,514,NULL,0))sensor->Stage=3;}
-            else if(sensor->Stage==3 && !active && SeeRequest(l,sensor->Suid,10,NULL,0)){sensor->Stage=2;SeeValue(sensor,0,STATUS_DEVICE_NOT_READY);}
+            ULONGLONG now=KeQueryInterruptTime();BOOLEAN raw=i==1 && SeeActive(QcomAccel,now),active=raw || SeeActive(SensorTypes[i].Sample,now) || (i==4 && SeeActive(QcomLinearAccel,now));UCHAR rate=(UCHAR)(i>=5 || i==3?2:i==1 && !raw?0:1);
+            if(active && (sensor->Stage==2 || (sensor->Stage==3 && sensor->Rate!=rate))) {
+                static const UCHAR rates[][5]={{13,0,0,16,65},{13,0,0,72,66},{13,0,0,32,65}};
+                if(SeeRequest(l,sensor->Suid,SensorTypes[i].Request,SensorTypes[i].Request==513?rates[rate]:NULL,SensorTypes[i].Request==513?sizeof(rates[0]):0)){sensor->Stage=3;sensor->Rate=rate;}
+            } else if(sensor->Stage==3 && !active && SeeRequest(l,sensor->Suid,10,NULL,0)){sensor->Stage=2;SeeState(i,STATUS_DEVICE_NOT_READY);}
         }
     }
 }

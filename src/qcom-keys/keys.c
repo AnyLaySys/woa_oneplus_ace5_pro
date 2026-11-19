@@ -31,6 +31,8 @@ typedef struct {
     NTSTATUS HapticStatus;
     ULONGLONG HapticDue;
     UCHAR HapticVoltage,HapticRepeat,HapticPhase;
+    PVOID DisplayCallback;
+    BOOLEAN DisplayOn;
     WDFIOTARGET Audio;
     KEY_FEEDBACK Feedback;
 } KEYS;
@@ -176,6 +178,7 @@ static BOOLEAN Isr(WDFINTERRUPT interrupt,ULONG message) {
     WdfObjectReleaseLock(device);return handled;
 }
 static NTSTATUS Prepare(WDFDEVICE device,WDFCMRESLIST raw,WDFCMRESLIST resources) {
+    static const GUID display={0x6fe69556,0x704a,0x47a0,{0x8f,0x24,0xc2,0x8d,0x93,0x6f,0xda,0x47}};
     KEYS *k=Context(device);
     WDF_INTERRUPT_CONFIG irq;WDF_INTERRUPT_CONFIG_INIT(&irq,Isr,NULL);irq.PassiveHandling=TRUE;
     ULONG n=0;
@@ -200,7 +203,8 @@ static NTSTATUS Prepare(WDFDEVICE device,WDFCMRESLIST raw,WDFCMRESLIST resources
         if(map&0x1000000)k->Irq[n]=owner?NULL:k->Base[3]+0x1000*i;
     }
     if(!k->Channel[0]||!k->Channel[1]||!k->Irq[0]||!k->Irq[1]||!irq.InterruptTranslated)return STATUS_DEVICE_CONFIGURATION_ERROR;
-    return WdfInterruptCreate(device,&irq,WDF_NO_OBJECT_ATTRIBUTES,&k->Interrupt);
+    NTSTATUS status=WdfInterruptCreate(device,&irq,WDF_NO_OBJECT_ATTRIBUTES,&k->Interrupt);
+    return NT_SUCCESS(status)?PoRegisterPowerSettingCallback(WdfDeviceWdmGetDeviceObject(device),&display,HapticDisplay,device,&k->DisplayCallback):status;
 }
 static NTSTATUS Start(WDFDEVICE device,WDF_POWER_DEVICE_STATE previous) {
     UNREFERENCED_PARAMETER(previous);
@@ -243,6 +247,7 @@ static NTSTATUS Stop(WDFDEVICE device,WDF_POWER_DEVICE_STATE next) {
 static NTSTATUS Release(WDFDEVICE device,WDFCMRESLIST resources) {
     UNREFERENCED_PARAMETER(resources);
     KEYS *k=Context(device);
+    if(k->DisplayCallback){PoUnregisterPowerSettingCallback(k->DisplayCallback);k->DisplayCallback=NULL;}k->DisplayOn=FALSE;
     SetInterrupts(k,FALSE);
     for(ULONG i=0;i<RTL_NUMBER_OF(Bases);i++)if(k->Base[i]){MmUnmapIoSpace(k->Base[i],Sizes[i]);k->Base[i]=NULL;}
     RtlZeroMemory(k->Observe,sizeof(k->Observe));RtlZeroMemory(k->Channel,sizeof(k->Channel));RtlZeroMemory(k->Irq,sizeof(k->Irq));return STATUS_SUCCESS;

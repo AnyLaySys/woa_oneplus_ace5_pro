@@ -472,6 +472,18 @@ static NTSTATUS Io(A830_BRIDGE *g,A830_CLIENT *c,PIRP request,ULONG code,ULONG i
             RtlCopyMemory(out,&allocation,sizeof(allocation));bytes=sizeof(allocation);break;
         }
 
+    } else if(code==GPU_IOCTL_FENCE_READ && inLength==sizeof(ULONGLONG) && outLength>=sizeof(ULONGLONG)) {
+        ULONGLONG address=*(PULONGLONG)in;
+        if(address&7)return STATUS_INVALID_PARAMETER;
+        status=STATUS_INVALID_ADDRESS;
+        for(ULONG i=0;i<RTL_NUMBER_OF(c->Buffers);i++) {
+            GPU_BO *bo=c->Buffers+i;
+            if(!bo->Mdl || c->Deferred.Buffers[i] || address<bo->Address ||
+               address-bo->Address>bo->Size || sizeof(ULONGLONG)>bo->Size-(address-bo->Address))continue;
+            if(bo->Cached)return STATUS_NOT_SUPPORTED;
+            KeMemoryBarrier();*(PULONGLONG)out=*(volatile ULONGLONG *)(bo->Cpu+(SIZE_T)(address-bo->Address));
+            bytes=sizeof(ULONGLONG);status=STATUS_SUCCESS;break;
+        }
     } else if(code==GPU_IOCTL_CACHE && inLength==sizeof(GPU_CACHE)) {
         GPU_CACHE range=*(GPU_CACHE *)in;
         if(!range.Handle || range.Handle>RTL_NUMBER_OF(c->Buffers) || range.Readback>1 || c->Deferred.Buffers[range.Handle-1])return STATUS_INVALID_PARAMETER;

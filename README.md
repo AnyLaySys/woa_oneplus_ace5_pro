@@ -18,6 +18,7 @@ Windows 驱动配合本设备的 UEFI/ACPI 使用。Linux 适配由 `linux_onepl
 | `src/qcom-charge` | 随音频包部署的充电与 USB 角色管理服务 |
 | `src/qcom-cpupower` | SM8750 原生 CPU 调频驱动 |
 | `src/qcom-keys` | Qualcomm 物理按键及 PMIH010x 振动控制 |
+| `src/qcom-cam` | Qualcomm SM8750 / Sony IMX906 主摄控制器及 AVStream 视频接口，实机采集待验证 |
 | `src/qcom-gpu` | Adreno 830 Windows 硬件执行驱动 |
 | `src/mesa/umd` | D3D DDI → Vulkan / Turnip 用户态后端 |
 | `fw/gpu` | Adreno 830 GMU、SQE、AQE 固件及来源、许可 |
@@ -61,6 +62,7 @@ build.cmd qcom-battery
 build.cmd qcom-charge
 build.cmd qcom-cpupower
 build.cmd qcom-keys
+build.cmd qcom-cam
 build.cmd qcom-gpu
 build.cmd --help
 ```
@@ -85,6 +87,7 @@ PowerShell 中对应使用 `.\build.cmd`，例如：
 | `qcom-charge` | `out/qcom-charge/ARM64/Release/bin` | charge.exe / credential.bin |
 | `qcom-cpupower` | `out/drv/qcom-cpupower` | qcom_cpupower.inf / qcom_cpupower.sys / qcom_cpupower.cat |
 | `qcom-keys` | `out/drv/qcom-keys` | qcom_keys.inf / qcom_keys.sys / qcom_keys.cat |
+| `qcom-cam` | `out/drv/qcom-cam` | qcom_cam.inf/sys/cat、qcom_cam_video.inf/sys/cat、采集及枚举工具 |
 | `qcom-gpu` | `out/drv/qcom-gpu` | a830_native.inf / a830_native.sys / a830_native.cat / a830_umd.dll / vulkan_freedreno.dll / msvcp140.dll / vcruntime140.dll / gen80000_zap.mbn |
 
 编译中间文件位于 `out/<目标>/ARM64/Release`。驱动包中的 SYS 和 CAT、GPU 用户态驱动 DLL 及充电服务 EXE 均由构建脚本签名，安装时使用 `out/drv` 下的完整包。
@@ -176,9 +179,25 @@ USB 2.0 Host/OTG 支持自动插拔与充电器输入切换，主控和集线器
 
 UFCS 认证文件 `credential.bin` 随音频包进入 DriverStore，与 `charge.exe` 位于同一目录，由服务读取。
 
+## 传感器
+
+`qcom-sensors` 通过 Windows 标准 HID 传感器接口提供环境光、简单方向、三轴陀螺仪和三轴加速度计，复用 `qcom-audio` 的 ADSP 通道。陀螺仪单位为度/秒，加速度单位为 g（包含重力）；两者最小及默认报告间隔为 20 ms。自动旋转与三轴加速度共用一条加速度订阅：仅旋转时请求 9 Hz，三轴应用订阅时请求 50 Hz，三轴需求结束后恢复旋转频率。Windows Gyrometer 和 Accelerometer 接口已实机验证。ADSP 的融合旋转向量通过同一个 HID 姿态设备提供 Compass（磁北航向）、Inclinometer（倾角）和 OrientationSensor（四元数与旋转矩阵）三个标准接口，最小及默认报告间隔为 100 ms；三者共用一条订阅。
+
+重力、线性加速度、相对姿态和地磁姿态也通过独立 HID 集合提供。磁力计、计步、活动状态和接近检测由同包的 UMDF SensorsCx 驱动提供，复用只读的 `QcomSensorData` 入口；入口只接受传感器查询。磁场单位为 µT；计步提供真实累计总步数，步态类型为 Unknown，累计时长不提供有效测量。活动状态接入 ADSP `activity_recognition`，支持 Unknown、Stationary、Walking、Running、InVehicle、Biking，置信度为 Low；固件未提供 Idle/Fidgeting。消息中的层级状态已按本机固件的发布器与消费端核对，步行事件已实测；RMD/AMD 保留为完整分类不可用时的静止/未知回退。跑步、骑行和乘车的实际识别准确性仍待实测。标准 API 已读到三轴磁场和活动状态；手持手机前后甩动后，ADSP 与 Windows 计步接口均读到累计计数 11，确认计步变化能够上报。实际步行准确性仍待验证。新增接口仅在应用订阅时轮询，订阅结束后 ADSP 需求在 5 秒内过期。HID 与原生接口统一使用 `QcomSensorData` 的单一读取 ABI，不包含原始事件采集或厂商服务探测接口。`qcom_sensors_service` 负责 ADSP 固件配置与注册初始化，是正常启动所需的服务。
+
+原生驱动的承载控制器标记为不在设备管理器普通列表显示，四个标准接口继续供应用使用。接近检测通过 `ProximityDetection` 布尔字段提供，实机 Windows 事件已验证 0→1→0；不提供未经测量的毫米距离。SensorExplorer 部分页面可能不更新；交叉测试可使用中文校验工具，接近距离未提供时显示为未提供，不以 0 毫米代替。
+
+实机没有注册 pressure 传感器，[OnePlus Ace 5 Pro 官方规格](https://www.oneplus.com/cn/ace-5-pro/specs)也未列出气压计；通用参考板的气压配置不能证明手机具备该硬件。目前不提供气压和气压高度。色温、环境色尚未接入标准接口，罗盘真北航向的磁偏角仍待校正。
+
+修改 ADSP 通道后，依次运行 `build.cmd qcom-audio` 和 `build.cmd qcom-sensors`。传感器包同时生成、签名 HID 驱动和原生 SensorsCx 驱动，两份 INF 都需安装。原生接口使用 `ROOT\QCOMSENSORNATIVE`；首次安装时需创建该根设备实例。更新底层通道后重启设备。
+
 ## 触屏反馈
 
 触控及按键反馈由 `qcom-keys` 控制 PMIH010x 马达，每次播放 18 ms，使用高精度定时器，实际电压为 800 mV 和 1200 mV，振幅均为 `0xFF`。`syna-s3910` 按接触 ID 分别记录每根手指：新增手指按下请求一次 800 mV 短振，在原有移动阈值内按住超过 495 ms 后请求一次 1200 mV 短振，抬起不振；移动超限或读取失败取消对应长按反馈。音量键单独按下上报一次音量按下／释放并请求一次 800 mV；按住 270 ms 后由按键驱动按 27 ms 节奏重复上报音量按下／释放，同时请求 800 mV 振动，系统音量连调与振动请求共用计时，播放和停机期间及停止后 27 ms 内的新触发忽略、不补振。电源键单独短按在抬起时请求一次 800 mV，单独按住 2.4 s 时请求一次 800 mV，之后抬起不再振。音量加／电源、音量减／电源组合成立时各请求一次 800 mV，并取消该次电源抬起反馈。`qcom-audio` 的扬声器音量和静音节点实际执行 24 位 PCM 增益处理，并通过已有内核控制设备提供当前音量上下限；音量键按住时到达相应极限播放两次 1200 mV，每次 18 ms，两次之间仍等待停止后 27 ms，随后停止重复反馈。极限模式在马达空闲后开始，开始前松开按键或离开极限会取消。触控、按键及音量协作不需要常驻用户态程序。版本沿用 `yy.M.d.revision`，日期和修订号由各驱动现有项目属性控制。
+
+## 主摄
+
+`qcom-cam` 控制高通 SM8750 相机平台，连接 Sony IMX906 主摄。当前包含主摄控制器和 AVStream 视频接口，可向 Windows 注册 IMX906 相机子设备；实机枚举和采集尚待重启完成驱动切换后验证。构建、配套 UEFI、诊断工具和运行限制见 [相机说明](src/qcom-cam/README.md)。
 
 ## 许可
 

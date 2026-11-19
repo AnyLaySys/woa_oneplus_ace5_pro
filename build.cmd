@@ -18,6 +18,7 @@ if /i "%NAME%"=="qcom-battery" (set "NAME=qcom-battery"& set "TARGET=qcom_batter
 if /i "%NAME%"=="qcom-cpupower" (set "NAME=qcom-cpupower"& set "TARGET=qcom_cpupower")
 if /i "%NAME%"=="qcom-keys" (set "NAME=qcom-keys"& set "TARGET=qcom_keys")
 if /i "%NAME%"=="qcom-sensors" (set "NAME=qcom-sensors"& set "TARGET=qcom_sensors")
+if /i "%NAME%"=="qcom-cam" (set "NAME=qcom-cam"& set "TARGET=qcom_cam")
 if /i "%NAME%"=="qcom-gpu" (set "NAME=qcom-gpu"& set "TARGET=qcom_gpu")
 if not defined TARGET goto invalid
 set "CREDENTIAL="
@@ -62,7 +63,7 @@ if defined GPU_PACKAGE call :build_gpu_renderer
 if errorlevel 1 exit /b 1
 if defined GPU_PACKAGE (
   if not exist "%BIN%" mkdir "%BIN%"
-  for %%F in (a830_umd.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll freedreno_icd.json freedreno_icd_x64.json msvcp140.dll vcruntime140.dll) do (
+  for %%F in (a830_umd.dll a830_gpu.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll freedreno_icd.json freedreno_icd_x64.json msvcp140.dll vcruntime140.dll) do (
     if not exist "%GPU_RENDER_PACKAGE%\%%F" (
       echo ERROR GPU renderer output is missing: %GPU_RENDER_PACKAGE%\%%F
       exit /b 1
@@ -81,7 +82,7 @@ if errorlevel 1 exit /b 1
 copy /y "%BIN%\%TARGET%.inf" "%DST%\%TARGET%.inf" >nul
 if errorlevel 1 exit /b 1
 if defined GPU_PACKAGE (
-  for %%F in (a830_umd.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll) do (
+  for %%F in (a830_umd.dll a830_gpu.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll) do (
     copy /y "%BIN%\%%F" "%DST%\%%F" >nul
     if errorlevel 1 exit /b 1
     "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%%F"
@@ -94,7 +95,30 @@ if defined GPU_PACKAGE (
 )
 "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%TARGET%.sys"
 if errorlevel 1 exit /b 1
+if /i "%NAME%"=="qcom-cam" (
+  for %%F in (qcom_cam_video.sys qcom_cam_video.inf) do (
+    copy /y "%BIN%\%%F" "%DST%\%%F" >nul
+    if errorlevel 1 exit /b 1
+  )
+  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_cam_video.sys"
+  if errorlevel 1 exit /b 1
+  copy /y "%BIN%\qcom_cam_check.exe" "%DST%\qcom_cam_check.exe" >nul
+  if errorlevel 1 exit /b 1
+  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_cam_check.exe"
+  if errorlevel 1 exit /b 1
+  copy /y "%BIN%\qcom_cam_capture.exe" "%DST%\qcom_cam_capture.exe" >nul
+  if errorlevel 1 exit /b 1
+  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_cam_capture.exe"
+  if errorlevel 1 exit /b 1
+)
+
 if /i "%NAME%"=="qcom-sensors" (
+  for %%F in (qcom_sensors_native.dll qcom_sensors_native.inf) do (
+    copy /y "%BIN%\%%F" "%DST%\%%F" >nul
+    if errorlevel 1 exit /b 1
+  )
+  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_sensors_native.dll"
+  if errorlevel 1 exit /b 1
   copy /y "%BIN%\qcom_sensors_service.exe" "%DST%\qcom_sensors_service.exe" >nul
   if errorlevel 1 exit /b 1
   "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_sensors_service.exe"
@@ -114,13 +138,21 @@ if /i "%NAME%"=="qcom-audio" (
 if errorlevel 1 exit /b 1
 "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%TARGET%.cat"
 if errorlevel 1 exit /b 1
+if /i "%NAME%"=="qcom-sensors" (
+  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_sensors_native.cat"
+  if errorlevel 1 exit /b 1
+)
+if /i "%NAME%"=="qcom-cam" (
+  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_cam_video.cat"
+  if errorlevel 1 exit /b 1
+)
 echo.
 echo DRIVER=%DST%
 dir "%DST%" /b
 exit /b 0
 
 :build_all
-for %%D in (syna-s3910 qcom-audio qcom-bluetooth qcom-wcn7861 qcom-battery qcom-cpupower qcom-keys qcom-sensors qcom-gpu) do (
+for %%D in (syna-s3910 qcom-audio qcom-bluetooth qcom-wcn7861 qcom-battery qcom-cpupower qcom-keys qcom-sensors qcom-cam qcom-gpu) do (
   echo.
   echo Building %%D...
   call "%~f0" %%D
@@ -205,6 +237,7 @@ echo        build.cmd qcom-battery
 echo        build.cmd qcom-cpupower
 echo        build.cmd qcom-keys
 echo        build.cmd qcom-sensors
+echo        build.cmd qcom-cam
 echo        build.cmd qcom-gpu
 echo        build.cmd install-fw -WindowsDirectory "W:\Windows" [-BluetoothAddress "XX:XX:XX:XX:XX:XX"] [-WhatIf] [-Force]
 echo all builds every driver.
@@ -222,6 +255,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -294,7 +328,7 @@ vulkan = source / 'src/freedreno/vulkan'
 copy(local / 'tu_knl_windows.cc', vulkan / 'tu_knl_windows.cc')
 abi = (root / 'src/qcom-gpu/wddm/abi.h').read_text().replace('#include "../uapi.h"', '#include "qcom_gpu_uapi.h"')
 for backend in [vulkan, source / 'src/freedreno/drm']:
-    for name in ['a830_windows.h', 'a830_host.h']:
+    for name in ['a830_windows.h', 'a830_host.h', 'a830_native.h', 'a830_completion.h']:
         copy(local / name, backend / name)
     copy(root / 'src/qcom-gpu/uapi.h', backend / 'qcom_gpu_uapi.h')
     write(backend / 'a830_wddm_abi.h', abi)
@@ -411,9 +445,10 @@ for name in ['hlsl', 'preproc']:
         run('flex', '-o', umd_build / (name + '.yy.c'), shader / (name + '.l'))
 includes = [umd_build, shader_source / 'include', shader_source / 'include/private', shader,
             source / 'include', source / 'src', source / 'src/compiler/spirv', vulkan,
-            local, root / 'src/qcom-gpu/wddm', umd]
+            local, root / 'src/qcom-gpu/wddm', umd, build / 'src',
+            source / 'src/gallium/include', source / 'src/gallium/auxiliary', source / 'src/freedreno/drm']
 args = ['/nologo', '/O2', '/MD', '/DNDEBUG', '/D_CRT_SECURE_NO_WARNINGS', '/D_USE_MATH_DEFINES',
-        '/DLIBVKD3D_SHADER_SOURCE', '/DVKD3D_NO_TRACE_MESSAGES', '/DVKD3D_NO_DEBUG_MESSAGES', '/w']
+        '/DLIBVKD3D_SHADER_SOURCE', '/DVKD3D_NO_TRACE_MESSAGES', '/DVKD3D_NO_DEBUG_MESSAGES', '/DUSE_GCC_ATOMIC_BUILTINS', '/w']
 args += ['/I' + str(path) for path in includes]
 files = list(shader.glob('*.c'))
 files += [umd_build / (name + suffix) for name in ['hlsl', 'preproc'] for suffix in ['.tab.c', '.yy.c']]
@@ -424,7 +459,7 @@ def compile_file(path):
     obj = umd_build / (path.stem + '.obj')
     cpp = path.suffix == '.cpp'
     if cpp or not obj.exists() or obj.stat().st_mtime < path.stat().st_mtime:
-        flags = ['/clang:-ferror-limit=8', '/std:c++17', '/EHsc'] if cpp else ['/std:c11']
+        flags = ['/clang:-ferror-limit=8', '/std:c++17', '/EHa'] if cpp else ['/std:c11']
         options = [arg for arg in args if arg != '/w'] + ['/W4', '/WX', '/clang:-Wno-unused-parameter', '/clang:-Wno-missing-field-initializers'] if cpp else args
         result = subprocess.run(compiler + options + flags + ['/c', str(path), '/Fo' + str(obj)], capture_output=True, text=True)
         if result.returncode:
@@ -437,13 +472,37 @@ with ThreadPoolExecutor(max_workers=6) as pool:
     objects = list(pool.map(compile_file, files))
     objects += list(pool.map(compile_file, [
         umd / (name + '.cpp') for name in ['core', 'driver', 'pipeline', 'query', 'resource', 'shader', 'state']]))
+    objects += [compile_file(root / 'src/qcom-gpu/dx12/native.cpp')]
 definition = umd_build / 'a830_umd.def'
-write(definition, 'LIBRARY a830_umd\nEXPORTS\nOpenAdapter10\nOpenAdapter10_2\n')
+write(definition, 'LIBRARY a830_umd\nEXPORTS\nOpenAdapter10\nOpenAdapter10_2\nOpenAdapter12\n')
 run('lld-link', '/DLL', '/MACHINE:ARM64', '/OUT:' + str(umd_build / 'a830_umd.dll'),
     '/DEF:' + str(definition), '/MAP:' + str(umd_build / 'a830_umd.map'), *link,
     *objects, 'kernel32.lib', 'user32.lib', 'gdi32.lib', 'advapi32.lib', 'ucrt.lib',
     'vcruntime.lib', 'msvcrt.lib', 'oldnames.lib', 'uuid.lib')
 copy(umd_build / 'a830_umd.dll', package / 'a830_umd.dll')
+native_libs = ['src/gallium/auxiliary/libgallium.a', 'src/gallium/drivers/freedreno/libfreedreno.a',
+    'src/compiler/nir/libnir.a', 'src/compiler/spirv/libvtn.a', 'src/compiler/libcompiler.a',
+    'src/freedreno/common/libfreedreno_common.a', 'src/freedreno/drm/libfreedreno_drm.a',
+    'src/freedreno/ir2/libfreedreno_ir2.a', 'src/freedreno/ir3/libfreedreno_ir3.a',
+    'src/freedreno/isa/libir3encode.a', 'src/freedreno/isa/libir3decode.a', 'src/compiler/isaspec/libisaspec.a',
+    'src/freedreno/fdl/libfreedreno_layout.a', 'src/freedreno/perfcntrs/libfreedreno_perfcntrs.a',
+    'src/util/libmesa_util.a', 'src/util/libmesa_util_simd.a', 'src/util/libxmlconfig.a',
+    'src/c11/impl/libmesa_util_c11.a', 'src/util/blake3/libblake3.a', 'subprojects/zlib-1.3.1/libz.a']
+run('ninja', '-C', build, *native_libs)
+commands = subprocess.check_output(['ninja', '-C', str(build), '-t', 'commands', native_libs[1]], text=True).splitlines()
+native_args = shlex.split(next(c for c in commands if '/c ../source/src/gallium/drivers/freedreno/freedreno_resource.c' in c))
+native_args = [a for a in native_args[:native_args.index('/c')] if not a.startswith(('/Fo', '/Fd')) and a != '/showIncludes']
+native_object = umd_build / 'native_gpu.obj'
+subprocess.run([*native_args, '-I' + str(local), '-I' + str(source / 'src/freedreno/drm'),
+    '-I' + str(source / 'src/gallium/drivers'), '-I' + str(build / 'src/compiler/spirv'),
+    '/c', str(local / 'native_gpu.c'), '/Fo' + str(native_object)], cwd=build, check=True)
+native_def = umd_build / 'a830_gpu.def'
+write(native_def, 'LIBRARY a830_gpu\nEXPORTS\nA830GpuScreen\nA830GpuDestroyScreen\nA830GpuContext\nA830GpuResource\nA830GpuShader\nA830GpuShaderStreamOutput\nA830GpuStreamTarget\nA830GpuViews\nA830GpuClear\n')
+run('lld-link', '/DLL', '/MACHINE:ARM64', '/OUT:' + str(umd_build / 'a830_gpu.dll'),
+    '/DEF:' + str(native_def), *link, native_object, *[build / p for p in native_libs],
+    'kernel32.lib', 'user32.lib', 'gdi32.lib', 'advapi32.lib', 'shell32.lib', 'ole32.lib',
+    'uuid.lib', 'ws2_32.lib', 'synchronization.lib')
+copy(umd_build / 'a830_gpu.dll', package / 'a830_gpu.dll')
 copy(shader_source / 'COPYING', package / 'COPYING.vkd3d')
 cross_x64 = output / 'cross-x64.ini'
 write(cross_x64, cross.read_text().replace('aarch64', 'x86_64').replace("'arm64'", "'x86_64'").replace('/arm64', '/x64'))

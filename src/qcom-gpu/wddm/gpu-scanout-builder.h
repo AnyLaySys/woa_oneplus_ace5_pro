@@ -1,10 +1,10 @@
 #pragma once
-static unsigned A830CopyPacket(unsigned op,unsigned count) {
+static inline unsigned A830CopyPacket(unsigned op,unsigned count) {
     unsigned a=op,b=count;a^=a>>4;a^=a>>2;a^=a>>1;
     b^=b>>8;b^=b>>4;b^=b>>2;b^=b>>1;
     return 0x70000000u|(op<<16)|count|((~a&1)<<23)|((~b&1)<<15);
 }
-static unsigned A830BuildGpuCopy(unsigned *commands,unsigned capacity,
+static inline unsigned A830BuildGpuCopy(unsigned *commands,unsigned capacity,
     unsigned long long source,unsigned long long sourceBytes,unsigned sourcePitch,
     unsigned long long destination,unsigned long long destinationBytes,unsigned destinationPitch,
     unsigned width,unsigned height) {

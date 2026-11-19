@@ -6,6 +6,7 @@
    Cancel/Destroy can therefore discard unsubmitted work without stale pointers
    or releasing a packet that the GPU may still read. */
 typedef struct { LIST_ENTRY Entry; A830_DMA Dma; } A830_RENDERED;
+static BOOLEAN HardwareJob(const A830_DMA *dma){return dma->Operation==5 || dma->Operation==7;}
 static BOOLEAN TakeRendered(A830_ADAPTER *a,const A830_DMA *token,A830_DMA *out) {
     BOOLEAN found=FALSE;KIRQL old;KeAcquireSpinLock(&a->ContextLock,&old);
     for(PLIST_ENTRY e=a->Contexts.Flink;e!=&a->Contexts;e=e->Flink) {
@@ -103,8 +104,12 @@ VOID A830FinishJob(A830_JOB *job,BOOLEAN signal) {
     if(event){KeSetEvent(event,IO_NO_INCREMENT,FALSE);ObDereferenceObject(event);}
     if(c){ExReleaseRundownProtection(&c->Jobs);job->Dma.Context=NULL;}
 }
+static VOID CancelIncoming(A830_ADAPTER *a,const A830_DMA *dma) {
+    if(dma->Operation==7){A830_JOB job={0};job.Dma=*dma;A830FinishJob(&job,FALSE);}
+    else A830CancelRendered(a,dma);
+}
 VOID A830RecycleJob(A830_ADAPTER *a,A830_JOB *job) {
-    if(job->Dma.Operation!=5)InterlockedDecrement(&a->CpuBarriers);
+    if(!HardwareJob(&job->Dma))InterlockedDecrement(&a->CpuBarriers);
     if(job->Dynamic)ExFreePoolWithTag(job,GPU_TAG);
     else ExInterlockedInsertTailList(&a->Free,&job->Entry,&a->QueueLock);
 }
@@ -215,13 +220,15 @@ BOOLEAN A830InterruptComplete(PVOID context) {
         KeMemoryBarrier();ULONG slot=a->IrqRead%RTL_NUMBER_OF(a->IrqRecords);
         if(a->IrqRecords[slot].HardwareFence>completed)break;
         DXGKARGCB_NOTIFY_INTERRUPT_DATA notification={0};notification.InterruptType=DXGK_INTERRUPT_DMA_COMPLETED;
+        notification.Flags.EvaluateLegacyMonitoredFences=1;
         notification.DmaCompleted.SubmissionFenceId=a->IrqRecords[slot].Fence;
+        notification.DmaCompleted.NodeOrdinal=a->IrqRecords[slot].Node;
         A830_CONTEXT *c=a->IrqRecords[slot].Context;
         if(c) {
             A830_COMPLETION *page=(PVOID)c->CompletionBuffer.Cpu;
             InterlockedExchange64((volatile LONG64 *)&page->Completed,a->IrqRecords[slot].Sequence);
         }
-        A830PublishFence(&a->Completed,a->IrqRecords[slot].Fence);
+        A830PublishFence(&a->Completed[a->IrqRecords[slot].Node],a->IrqRecords[slot].Fence);
         a->Dxgk.DxgkCbNotifyInterrupt(a->Dxgk.DeviceHandle,&notification);
 
         InterlockedIncrement((volatile LONG *)&a->IrqRead);
@@ -261,10 +268,15 @@ static PLARGE_INTEGER WorkerTimeout(A830_ADAPTER *a,BOOLEAN dpu,ULONGLONG now,UL
    fully published records and never takes a PASSIVE/DISPATCH spin lock. */
 static NTSTATUS IssueJob(A830_ADAPTER *a,A830_JOB *job) {
     if(a->IrqWrite-a->IrqRead>=RTL_NUMBER_OF(a->IrqRecords))return STATUS_DEVICE_BUSY;
-    NTSTATUS status=A830Issue(job->Dma.Prepared,&job->HardwareFence);
+    NTSTATUS status;
+    if(job->Dma.Operation==7) {
+        GPU_IB ib={job->Dma.SourceShared,job->Dma.Bytes/4};
+        status=GpuSubmitRootBatch(&a->Hardware,&ib,1,job->Dma.DestinationShared,(ULONGLONG)job->Dma.Context);
+        if(NT_SUCCESS(status))job->HardwareFence=a->Hardware.Submitted;
+    } else status=A830Issue(job->Dma.Prepared,&job->HardwareFence);
     if(!NT_SUCCESS(status))return status;
     ULONG slot=a->IrqWrite%RTL_NUMBER_OF(a->IrqRecords);
-    a->IrqRecords[slot].HardwareFence=job->HardwareFence;a->IrqRecords[slot].Fence=job->Fence;
+    a->IrqRecords[slot].HardwareFence=job->HardwareFence;a->IrqRecords[slot].Fence=job->Fence;a->IrqRecords[slot].Node=job->Node;
     a->IrqRecords[slot].Context=job->Dma.Context;a->IrqRecords[slot].Sequence=job->Dma.Sequence;
     KeMemoryBarrier();a->IrqWrite++;
 
@@ -275,13 +287,14 @@ static NTSTATUS IssueJob(A830_ADAPTER *a,A830_JOB *job) {
 }
 NTSTATUS APIENTRY A830Submit(HANDLE adapter,const DXGKARG_SUBMITCOMMAND *p) {
     A830_ADAPTER *a=adapter;
+    ULONG node=p->hContext?((A830_CONTEXT *)p->hContext)->Node:p->NodeOrdinal;
     /* Publish the accepted WDDM fence before any command can complete.
        QueueLock also prevents an older concurrent caller from moving it back. */
     KIRQL publish;KeAcquireSpinLock(&a->QueueLock,&publish);
-    A830PublishFence(&a->LastSubmitted,p->SubmissionFenceId);
+    if(node<A830_NODE_COUNT)A830PublishFence(&a->LastSubmitted[node],p->SubmissionFenceId);
     KeReleaseSpinLock(&a->QueueLock,publish);
     /* SubmitCommand must never return an error: VidSch treats one as 0x119. */
-    if(p->EngineOrdinal || p->NodeOrdinal || p->DmaBufferPrivateDataSubmissionStartOffset ||
+    if(p->EngineOrdinal || node>=A830_NODE_COUNT || p->DmaBufferPrivateDataSubmissionStartOffset ||
        p->DmaBufferPrivateDataSubmissionEndOffset!=sizeof(A830_DMA) || p->DmaBufferPrivateDataSize<sizeof(A830_DMA)) {
         InterlockedExchange(&a->Failed,STATUS_INVALID_PARAMETER);KeSetEvent(&a->Wake,0,FALSE);return STATUS_SUCCESS;
     }
@@ -290,18 +303,18 @@ NTSTATUS APIENTRY A830Submit(HANDLE adapter,const DXGKARG_SUBMITCOMMAND *p) {
     if(!job){
         InterlockedExchange(&a->Failed,STATUS_INSUFFICIENT_RESOURCES);
         A830_DMA *dma=p->pDmaBufferPrivateData;
-        A830CancelRendered(a,dma);
-        InterlockedExchange(&a->FaultFence,(LONG)p->SubmissionFenceId);KeSetEvent(&a->Wake,0,FALSE);return STATUS_SUCCESS;
+        CancelIncoming(a,dma);
+        InterlockedExchange64(&a->FaultFence,((LONG64)node<<32)|p->SubmissionFenceId);KeSetEvent(&a->Wake,0,FALSE);return STATUS_SUCCESS;
     }
-    job->Dynamic=!entry;job->HardwareFence=0;job->Fence=p->SubmissionFenceId;
+    job->Dynamic=!entry;job->HardwareFence=0;job->Fence=p->SubmissionFenceId;job->Node=node;
     RtlCopyMemory(&job->Dma,p->pDmaBufferPrivateData,sizeof(job->Dma));
-    if(job->Dma.Context) {
+    if(job->Dma.Context && job->Dma.Operation!=7) {
         A830_DMA token=job->Dma;
         if(!TakeRendered(a,&token,&job->Dma)) {
             /* Context teardown/Cancel already owns this token. Do not access
                the context pointer or a prepared allocation after lookup fails. */
             job->Dma.Context=NULL;job->Dma.Prepared=NULL;job->Dma.Completion=NULL;job->Dma.Operation=0;
-            InterlockedExchange(&a->Failed,STATUS_DEVICE_REMOVED);InterlockedExchange(&a->FaultFence,(LONG)p->SubmissionFenceId);
+            InterlockedExchange(&a->Failed,STATUS_DEVICE_REMOVED);InterlockedExchange64(&a->FaultFence,((LONG64)node<<32)|p->SubmissionFenceId);
             if(job->Dynamic)ExFreePoolWithTag(job,GPU_TAG);else ExInterlockedInsertTailList(&a->Free,&job->Entry,&a->QueueLock);
             KeSetEvent(&a->Wake,0,FALSE);return STATUS_SUCCESS;
         }
@@ -313,33 +326,75 @@ NTSTATUS APIENTRY A830Submit(HANDLE adapter,const DXGKARG_SUBMITCOMMAND *p) {
     if(!NT_SUCCESS(pinned)) {
         A830FinishJob(job,FALSE);
         if(job->Dynamic)ExFreePoolWithTag(job,GPU_TAG);else ExInterlockedInsertTailList(&a->Free,&job->Entry,&a->QueueLock);
-        InterlockedExchange(&a->Failed,pinned);InterlockedExchange(&a->FaultFence,(LONG)p->SubmissionFenceId);KeSetEvent(&a->Wake,0,FALSE);return STATUS_SUCCESS;
+        InterlockedExchange(&a->Failed,pinned);InterlockedExchange64(&a->FaultFence,((LONG64)node<<32)|p->SubmissionFenceId);KeSetEvent(&a->Wake,0,FALSE);return STATUS_SUCCESS;
     }
-    if(job->Dma.Operation!=5)InterlockedIncrement(&a->CpuBarriers);
+    if(!HardwareJob(&job->Dma))InterlockedIncrement(&a->CpuBarriers);
     KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);
     NTSTATUS issued=STATUS_DEVICE_BUSY;
-    if(!a->Stopping && !a->Failed && job->Dma.Prepared && !a->CpuBarriers && !a->WorkerBusy && IsListEmpty(&a->Pending))
+    if(!a->Stopping && !a->Failed && (job->Dma.Prepared || job->Dma.Operation==7) && !a->CpuBarriers && !a->WorkerBusy && IsListEmpty(&a->Pending))
         issued=IssueJob(a,job);
     if(NT_SUCCESS(issued))InsertTailList(&a->Inflight,&job->Entry);
     else InsertTailList(&a->Pending,&job->Entry);
     KeReleaseSpinLock(&a->QueueLock,old);
     KeSetEvent(&a->Wake,IO_NO_INCREMENT,FALSE);return STATUS_SUCCESS;
 }
-typedef struct { A830_ADAPTER *Adapter; ULONG Fence; } A830_FENCE_SNAPSHOT;
+NTSTATUS APIENTRY A830SubmitVirtual(HANDLE adapter,const DXGKARG_SUBMITCOMMANDVIRTUAL *p) {
+    A830_ADAPTER *a=adapter;A830_CONTEXT *c=p->hContext;NTSTATUS status=STATUS_INVALID_PARAMETER;
+    ULONG node=c?c->Node:p->NodeOrdinal;
+    if(p->Flags.Paging) {
+        if(!c || c->Adapter!=a || node>=A830_NODE_COUNT || p->DmaBufferPrivateDataSize!=sizeof(A830_DMA))goto fail;
+        const A830_DMA *dma=p->pDmaBufferPrivateData;
+        if(!dma || (dma->Operation!=0 && dma->Operation!=2 && dma->Operation!=3 && dma->Operation!=8))goto fail;
+        DXGKARG_SUBMITCOMMAND submit={0};submit.pDmaBufferPrivateData=p->pDmaBufferPrivateData;submit.DmaBufferPrivateDataSize=p->DmaBufferPrivateDataSize;
+        submit.DmaBufferPrivateDataSubmissionEndOffset=sizeof(A830_DMA);submit.SubmissionFenceId=p->SubmissionFenceId;submit.Flags=p->Flags;submit.NodeOrdinal=node;
+        return A830Submit(a,&submit);
+    }
+    if(!c || c->Adapter!=a){status=STATUS_INVALID_HANDLE;goto fail;}
+    if(!c->Virtual || !c->AddressSpace || !c->CompletionBuffer.Cpu || node!=1){status=STATUS_INVALID_DEVICE_STATE;goto fail;}
+    if(!p->DmaBufferSize ||
+       ((p->DmaBufferSize|p->DmaBufferVirtualAddress)&3) || p->DmaBufferSize/4>0xfffff ||
+       p->DmaBufferVirtualAddress<GPU_CLIENT_VA_BASE || p->DmaBufferVirtualAddress>=0x8000000000ULL ||
+       p->DmaBufferSize>0x8000000000ULL-p->DmaBufferVirtualAddress){status=STATUS_INVALID_USER_BUFFER;goto fail;}
+    A830_PROCESS *process=c->AddressSpace;
+    KeWaitForSingleObject(&process->Lock,Executive,KernelMode,FALSE,NULL);
+    ULONGLONG root=process->Root;status=A830CopyKernelMappings(a,root);
+    KeReleaseMutex(&process->Lock,FALSE);if(!NT_SUCCESS(status))goto fail;
+    A830_DMA dma={0};dma.Operation=7;dma.Context=c;dma.SourceShared=p->DmaBufferVirtualAddress;
+    dma.DestinationShared=root;dma.Bytes=p->DmaBufferSize;dma.Completion=c->Completion;
+    KIRQL old;KeAcquireSpinLock(&c->TokenLock,&old);A830_COMPLETION *page=(PVOID)c->CompletionBuffer.Cpu;
+    if(c->Closing || page->Status || page->Submitted>=MAXLONG || !ExAcquireRundownProtection(&c->Jobs)) {
+        KeReleaseSpinLock(&c->TokenLock,old);status=STATUS_DEVICE_REMOVED;goto fail;
+    }
+    dma.Sequence=page->Submitted+1;InterlockedExchange64((volatile LONG64 *)&page->Submitted,dma.Sequence);
+    ObReferenceObject(dma.Completion);KeReleaseSpinLock(&c->TokenLock,old);
+    DXGKARG_SUBMITCOMMAND submit={0};submit.pDmaBufferPrivateData=&dma;submit.DmaBufferPrivateDataSize=sizeof(dma);
+    submit.DmaBufferPrivateDataSubmissionEndOffset=sizeof(dma);submit.SubmissionFenceId=p->SubmissionFenceId;submit.NodeOrdinal=node;
+    return A830Submit(a,&submit);
+fail:
+    if(node<A830_NODE_COUNT) {
+        A830PublishFence(&a->LastSubmitted[node],p->SubmissionFenceId);
+        InterlockedExchange64(&a->FaultFence,((LONG64)node<<32)|p->SubmissionFenceId);
+    }
+    InterlockedExchange(&a->Failed,status);KeSetEvent(&a->Wake,0,FALSE);return STATUS_SUCCESS;
+}
+typedef struct { A830_ADAPTER *Adapter; PULONG Boundaries; } A830_FENCE_SNAPSHOT;
 static BOOLEAN FreezeAtInterrupt(PVOID context) {
     A830_FENCE_SNAPSHOT *snapshot=context;A830_ADAPTER *a=snapshot->Adapter;
     /* Called with QueueLock and the hardware interrupt lock held. Stop
        completion notifications before taking the stable reset boundary. */
     InterlockedExchange(&a->Stopping,1);
-    snapshot->Fence=A830FenceLatest(a->LastSubmitted,a->Completed);
-    a->LastSubmitted=snapshot->Fence;return TRUE;
+    for(ULONG node=0;node<A830_NODE_COUNT;node++) {
+        snapshot->Boundaries[node]=A830FenceLatest(a->LastSubmitted[node],a->Completed[node]);
+        a->LastSubmitted[node]=snapshot->Boundaries[node];
+    }
+    return TRUE;
 }
-ULONG A830FreezeFences(A830_ADAPTER *a) {
-    A830_FENCE_SNAPSHOT snapshot={a,0};KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);
+VOID A830FreezeFences(A830_ADAPTER *a,ULONG boundaries[A830_NODE_COUNT]) {
+    A830_FENCE_SNAPSHOT snapshot={a,boundaries};KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);
     BOOLEAN result=FALSE;
     NTSTATUS status=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,FreezeAtInterrupt,&snapshot,0,&result);
-    if(!NT_SUCCESS(status)){InterlockedExchange(&a->Stopping,1);snapshot.Fence=A830FenceLatest(a->LastSubmitted,a->Completed);}
-    KeReleaseSpinLock(&a->QueueLock,old);return snapshot.Fence;
+    if(!NT_SUCCESS(status))FreezeAtInterrupt(&snapshot);
+    KeReleaseSpinLock(&a->QueueLock,old);
 }
 static BOOLEAN Notify(PVOID context) {
     A830_ADAPTER *a=context;
@@ -352,11 +407,14 @@ static VOID Signal(A830_ADAPTER *a) {
     NTSTATUS status=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,Notify,a,0,&result);
     if(!NT_SUCCESS(status))InterlockedExchange(&a->Failed,status);
 }
-static BOOLEAN TakePreemption(A830_ADAPTER *a,PULONG fence) {
+static BOOLEAN TakePreemption(A830_ADAPTER *a,PULONG node,PULONG fence) {
     if(!a->PreemptPending)return FALSE;
     KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);
     BOOLEAN ready=a->PreemptPending && IsListEmpty(&a->Pending) && IsListEmpty(&a->Inflight);
-    if(ready){*fence=a->Preemption;InterlockedExchange(&a->PreemptPending,0);}
+    if(ready) {
+        for(*node=0;*node<A830_NODE_COUNT;(*node)++)if(a->PreemptPending&(1L<<*node))break;
+        *fence=a->Preemption[*node];InterlockedAnd(&a->PreemptPending,~(1L<<*node));
+    }
     KeReleaseSpinLock(&a->QueueLock,old);return ready;
 }
 VOID A830Retire(A830_ADAPTER *a) {
@@ -365,7 +423,7 @@ VOID A830Retire(A830_ADAPTER *a) {
     for(;;) {
         PLIST_ENTRY entry=ExInterlockedRemoveHeadList(&a->Inflight,&a->QueueLock);if(!entry)break;
         A830_JOB *job=CONTAINING_RECORD(entry,A830_JOB,Entry);
-        if(!a->Stopping && !a->Failed && (job->HardwareFence>completed || (LONG)(job->Fence-a->Completed)>0)) {
+        if(!a->Stopping && !a->Failed && (job->HardwareFence>completed || A830FenceAfter(job->Fence,a->Completed[job->Node]))) {
             ExInterlockedInsertHeadList(&a->Inflight,entry,&a->QueueLock);break;
         }
         A830FinishJob(job,TRUE);A830RecycleJob(a,job);
@@ -382,6 +440,10 @@ static BOOLEAN NotifyVsync(PVOID context) {
 }
 static NTSTATUS Execute(A830_ADAPTER *a,const A830_DMA *dma) {
     if(dma->Operation==0)return STATUS_SUCCESS;
+    if(dma->Operation==8) {
+        if(!dma->Destination || ((ULONG_PTR)dma->Destination&7))return STATUS_INVALID_PARAMETER;
+        InterlockedExchange64((volatile LONG64 *)dma->Destination,(LONG64)dma->SourceShared);return STATUS_SUCCESS;
+    }
     if(dma->Operation==6) {
         NTSTATUS status=A830MapPresent(a,(A830_DMA *)dma);if(!NT_SUCCESS(status))return status;
         status=A830CopyPresent(dma);if(!NT_SUCCESS(status))return status;
@@ -439,10 +501,11 @@ VOID A830Worker(PVOID context) {
         A830DpuWork(a);
         A830BridgeCollectShared();
         if(a->Stopping)break;
-        LONG fault=InterlockedExchange(&a->FaultFence,0);
+        LONG64 fault=InterlockedExchange64(&a->FaultFence,0);
         if(fault) {
             RtlZeroMemory(&a->Notify,sizeof(a->Notify));a->Notify.InterruptType=DXGK_INTERRUPT_DMA_PAGE_FAULTED;
             a->Notify.DmaPageFaulted.FaultedFenceId=(ULONG)fault;
+            a->Notify.DmaPageFaulted.NodeOrdinal=(ULONG)((ULONGLONG)fault>>32);
             a->Notify.DmaPageFaulted.PageFaultFlags=DXGK_PAGE_FAULT_ENGINE_RESET_REQUIRED;
             a->Notify.DmaPageFaulted.FaultErrorCode.IsDeviceSpecificCode=1;
             a->Notify.DmaPageFaulted.FaultErrorCode.DeviceSpecificCode=(ULONG)a->Failed&0x7fffffffu;Signal(a);
@@ -473,10 +536,11 @@ VOID A830Worker(PVOID context) {
             if(a->Failed || a->Stopping)break;
             if(QcomGpuScanoutEnabled(a) && QcomGpuScanoutPump(a))break;
             if(a->PreemptPending && !IsListEmpty(&a->Inflight))break;
-            ULONG preemption;
-            if(TakePreemption(a,&preemption)) {
+            ULONG node,preemption;
+            while(TakePreemption(a,&node,&preemption)) {
                 RtlZeroMemory(&a->Notify,sizeof(a->Notify));a->Notify.InterruptType=DXGK_INTERRUPT_DMA_PREEMPTED;
-                a->Notify.DmaPreempted.PreemptionFenceId=preemption;a->Notify.DmaPreempted.LastCompletedFenceId=a->Completed;
+                a->Notify.DmaPreempted.PreemptionFenceId=preemption;a->Notify.DmaPreempted.LastCompletedFenceId=a->Completed[node];
+                a->Notify.DmaPreempted.NodeOrdinal=node;
                 Signal(a);
             }
             A830_JOB *job=A830TakePending(a);if(!job)break;
@@ -487,7 +551,7 @@ VOID A830Worker(PVOID context) {
             if(!IsListEmpty(&a->Inflight) && job->Dma.Operation!=5) {
                 ExInterlockedInsertHeadList(&a->Pending,entry,&a->QueueLock);break;
             }
-            if(job->Dma.Operation==5 && job->Dma.Prepared) {
+            if((job->Dma.Operation==5 && job->Dma.Prepared) || job->Dma.Operation==7) {
                 KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);
                 NTSTATUS issued=IssueJob(a,job);
                 KeReleaseSpinLock(&a->QueueLock,old);
@@ -501,6 +565,7 @@ VOID A830Worker(PVOID context) {
                 InterlockedExchange(&a->Failed,status);RtlZeroMemory(&a->Notify,sizeof(a->Notify));
                 a->Notify.InterruptType=DXGK_INTERRUPT_DMA_PAGE_FAULTED;
                 a->Notify.DmaPageFaulted.FaultedFenceId=job->Fence;
+                a->Notify.DmaPageFaulted.NodeOrdinal=job->Node;
                 a->Notify.DmaPageFaulted.FaultedPrimitiveAPISequenceNumber=MAXULONGLONG;
                 a->Notify.DmaPageFaulted.FaultedPipelineStage=DXGK_RENDER_PIPELINE_STAGE_UNKNOWN;
                 a->Notify.DmaPageFaulted.FaultedBindTableEntry=MAXULONG;
@@ -512,8 +577,9 @@ VOID A830Worker(PVOID context) {
                 A830RecycleJob(a,CONTAINING_RECORD(entry,A830_JOB,Entry));break;
             }
 
-            A830PublishFence(&a->Completed,job->Fence);RtlZeroMemory(&a->Notify,sizeof(a->Notify));
+            A830PublishFence(&a->Completed[job->Node],job->Fence);RtlZeroMemory(&a->Notify,sizeof(a->Notify));
             a->Notify.InterruptType=DXGK_INTERRUPT_DMA_COMPLETED;a->Notify.DmaCompleted.SubmissionFenceId=job->Fence;
+            a->Notify.DmaCompleted.NodeOrdinal=job->Node;
             Signal(a);
             A830FinishJob(job,TRUE);
             A830RecycleJob(a,CONTAINING_RECORD(entry,A830_JOB,Entry));

@@ -1,4 +1,5 @@
 #include "umd.h"
+#include "../a830_completion.h"
 
 void error(Device *d, HRESULT hr) {
  if (!d || SUCCEEDED(hr)) return;
@@ -273,8 +274,9 @@ static HRESULT WINAPI host_create(void *user,HANDLE event,HANDLE *context,void *
    A830_CONTEXT_QUERY q={A830_ABI_VERSION,0,0};D3DDDICB_ESCAPE e{};e.hDevice=d->runtime;e.hContext=d->context;e.pPrivateDriverData=&q;e.PrivateDriverDataSize=sizeof(q);
    hr=d->callbacks.pfnEscapeCb(d->adapter,&e);if(FAILED(hr))return hr;data.CompletionPage=q.CompletionPage;
  }
- *page=(void *)(uintptr_t)data.CompletionPage;d->completion=(volatile A830_COMPLETION *)*page;d->generation=d->completion?d->completion->Generation:0;
- return *page?S_OK:E_FAIL;
+ *page=(void *)(uintptr_t)data.CompletionPage;
+ A830_COMPLETION status;
+ return a830_read_completion((volatile A830_COMPLETION *)*page,&status) && !status.Status?S_OK:DXGI_ERROR_DEVICE_REMOVED;
 }
 static HRESULT WINAPI host_render(void *user,const void *commands,UINT size) {
  Device *d=(Device *)user;EnterCriticalSection(&d->lock);

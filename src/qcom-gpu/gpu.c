@@ -60,31 +60,53 @@ NTSTATUS GpuSubmitBatch(GPU *g,const GPU_COMMAND *entries,ULONG count) {
 }
 NTSTATUS GpuSubmitContextBatch(GPU *g,const GPU_COMMAND *entries,ULONG count,ULONGLONG cookie) {
     if(g->Fault)return (NTSTATUS)g->Fault;
-    if(!g->Online || !count || count>GPU_MAX_COMMANDS)return STATUS_INVALID_PARAMETER;
+    if(!g->Online || !entries || !count || count>GPU_MAX_COMMANDS)return STATUS_INVALID_PARAMETER;
+    GPU_IB ibs[GPU_MAX_COMMANDS];
     for(ULONG i=0;i<count;i++) {
         const GPU_COMMAND *s=entries+i;
         if(!s->Buffer || !s->Words || s->Words>0xFFFFF || (s->Offset&3))return STATUS_INVALID_PARAMETER;
         GPU_BO *bo=s->Buffer;
         if(!bo->Mdl || !bo->Address || s->Offset>bo->Size || s->Words>(bo->Size-s->Offset)/4)return STATUS_INVALID_PARAMETER;
+        ibs[i].Address=bo->Address+s->Offset;ibs[i].Words=s->Words;
     }
+    return GpuSubmitRootBatch(g,ibs,count,0,cookie);
+}
+NTSTATUS GpuSubmitRootBatch(GPU *g,const GPU_IB *entries,ULONG count,ULONGLONG root,ULONGLONG cookie) {
+    if(g->Fault)return (NTSTATUS)g->Fault;
+    if(!g->Online || !entries || !count || count>GPU_MAX_COMMANDS)return STATUS_INVALID_PARAMETER;
+    for(ULONG i=0;i<count;i++)if(!entries[i].Words || entries[i].Words>0xfffff ||
+        (entries[i].Address&3) || !entries[i].Address || entries[i].Address>=0x8000000000ULL ||
+        (ULONGLONG)entries[i].Words*4>0x8000000000ULL-entries[i].Address)return STATUS_INVALID_PARAMETER;
     KIRQL old;KeAcquireSpinLock(&g->RingLock,&old);
     if(!g->Online || !g->Ring.Mdl || !g->Ring.Cpu || !g->Memory.Mdl || !g->Memory.Cpu){KeReleaseSpinLock(&g->RingLock,old);return STATUS_DEVICE_NOT_READY;}
     ULONG read=Gr(g,REG_A6XX_CP_RB_RPTR)&8191;
     ULONG space=(read-g->WriteIndex-1)&8191;
+    ULONGLONG defaultRoot=g->Vm[0].Tables.Physical;if(!root)root=defaultRoot;
+    if(!root || (root&4095) || (root>>44)){KeReleaseSpinLock(&g->RingLock,old);return STATUS_INVALID_PARAMETER;}
+    BOOLEAN changed=root!=(g->LastRoot?g->LastRoot:defaultRoot);
     BOOLEAN switched=(!g->LastContextValid || cookie!=g->LastContextCookie);
-    GPU_U32 contextWords[GPU_CONTEXT_PREAMBLE_MAX_WORDS];
-    ULONG n=switched?GpuBuildContextPreamble(contextWords,RTL_NUMBER_OF(contextWords),g->Memory.Address,(ULONG)g->Submitted):0;
-    if(switched && !n){KeReleaseSpinLock(&g->RingLock,old);return STATUS_INVALID_PARAMETER;}
-    if(space<4*count+48+n || g->Submitted>=MAXULONG-1){KeReleaseSpinLock(&g->RingLock,old);return STATUS_DEVICE_BUSY;}
+    GPU_U32 contextWords[GPU_PAGETABLE_PREAMBLE_MAX_WORDS],restoreWords[GPU_PAGETABLE_PREAMBLE_MAX_WORDS];
+    ULONG n=changed?GpuBuildPageTablePreamble(contextWords,RTL_NUMBER_OF(contextWords),g->Memory.Address,(ULONG)g->Submitted,root):
+        switched?GpuBuildContextPreamble(contextWords,RTL_NUMBER_OF(contextWords),g->Memory.Address,(ULONG)g->Submitted):0;
+    if((changed || switched) && !n){KeReleaseSpinLock(&g->RingLock,old);return STATUS_INVALID_PARAMETER;}
+    ULONG restore=root!=defaultRoot?GpuBuildPageTablePreamble(restoreWords,RTL_NUMBER_OF(restoreWords),g->Memory.Address,(ULONG)g->Submitted+1,defaultRoot):0;
+    if(root!=defaultRoot && !restore){KeReleaseSpinLock(&g->RingLock,old);return STATUS_INVALID_PARAMETER;}
+    if(space<4*count+48*(restore?2:1)+n+restore || g->Submitted>=MAXULONG-(restore?2:1)){KeReleaseSpinLock(&g->RingLock,old);return STATUS_DEVICE_BUSY;}
     Emit(g,Packet(CP_THREAD_CONTROL,1));Emit(g,0x80000001);
     for(ULONG i=0;i<n;i++)Emit(g,contextWords[i]);
-    if(switched){g->LastContextCookie=cookie;g->LastContextValid=TRUE;}
+    if(switched || changed){g->LastContextCookie=cookie;g->LastContextValid=TRUE;}g->LastRoot=root;
     Emit(g,Packet(CP_THREAD_CONTROL,1));Emit(g,3);
     Emit(g,Packet(CP_SET_MARKER,1));Emit(g,0x101);
     for(ULONG i=0;i<count;i++) {
-        const GPU_COMMAND *s=entries+i;
-        ULONGLONG address=s->Buffer->Address+s->Offset;
-        Emit(g,Packet(CP_INDIRECT_BUFFER,3));Emit(g,(ULONG)address);Emit(g,(ULONG)(address>>32));Emit(g,s->Words);
+        const GPU_IB *s=entries+i;
+        Emit(g,Packet(CP_INDIRECT_BUFFER,3));Emit(g,(ULONG)s->Address);Emit(g,(ULONG)(s->Address>>32));Emit(g,s->Words);
+    }
+    /* Retire private-root work before restoring the default page table;
+       the published fence must also cover the restore. */
+    if(restore) {
+        Fence(g);
+        for(ULONG i=0;i<restore;i++)Emit(g,restoreWords[i]);
+        g->LastRoot=defaultRoot;g->LastContextValid=FALSE;
     }
     g->LastSubmitTime=KeQueryInterruptTime();
     Fence(g);KeReleaseSpinLock(&g->RingLock,old);return STATUS_SUCCESS;
@@ -173,7 +195,7 @@ static NTSTATUS Core(GPU *g) {
     return status;
 }
 static NTSTATUS StartLocked(GPU *g) {
-    KIRQL contextIrql;KeAcquireSpinLock(&g->RingLock,&contextIrql);g->LastContextValid=FALSE;g->LastContextCookie=0;KeReleaseSpinLock(&g->RingLock,contextIrql);
+    KIRQL contextIrql;KeAcquireSpinLock(&g->RingLock,&contextIrql);g->LastContextValid=FALSE;g->LastContextCookie=g->LastRoot=0;KeReleaseSpinLock(&g->RingLock,contextIrql);
     g->Fault=0;g->Submitted=0;g->Sequence=0;g->GmuResetReleased=FALSE;
     g->LastSubmitTime=g->PendingSince=g->RaisedAt=0;
     g->Stage=1;

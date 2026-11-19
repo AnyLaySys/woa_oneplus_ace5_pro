@@ -3,6 +3,7 @@
 #define A830_ABI_VERSION 4
 #define A830_RESOURCE_OWNED 2u
 #define A830_RESOURCE_PRIMARY 4u
+#define A830_RESOURCE_NATIVE 8u
 #define A830_SHARED_BASE 0xC8000000ULL
 #define A830_SHARED_END GPU_CLIENT_VA_BASE
 #define A830_OP_FILL 1
@@ -12,7 +13,9 @@ typedef struct { unsigned Version,Flags,Status,Chip; } A830_ADAPTER_INFO;
 typedef struct { unsigned Version,Reserved; GPU_U64 CompletionEvent,CompletionPage; } A830_CONTEXT_DATA;
 typedef struct { GPU_U64 Submitted,Completed; unsigned Status,Generation; } A830_COMPLETION;
 typedef struct { unsigned Version,Reserved; GPU_U64 CompletionPage; } A830_CONTEXT_QUERY;
+typedef struct { unsigned Version,Reserved;GPU_U64 Address,Value; } A830_FENCE_QUERY;
 typedef struct { unsigned Version,Size,Width,Height,Pitch,Format,Flags,Rotation; } A830_RESOURCE;
+typedef struct {A830_RESOURCE Resource;unsigned Type,Depth,Levels,DxgiFormat,Samples,Layout,BindFlags;GPU_U64 Offset;} A830_DX12_RESOURCE;
 static inline unsigned A830PixelBytes(unsigned format) {
     switch(format) {
     case D3DDDIFMT_A8R8G8B8:case D3DDDIFMT_X8R8G8B8:case D3DDDIFMT_A8B8G8R8:

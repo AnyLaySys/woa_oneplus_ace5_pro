@@ -10,6 +10,7 @@
 typedef struct { PMDL Mdl; PUCHAR Cpu; ULONGLONG Physical,Address; ULONG Size; BOOLEAN Contiguous,Cached; } GPU_BO;
 typedef struct { GPU_BO Tables; ULONG Used,Bank; } GPU_VM;
 typedef struct { GPU_BO *Buffer; ULONG Offset,Words; } GPU_COMMAND;
+typedef struct { ULONGLONG Address; ULONG Words; } GPU_IB;
 typedef VOID (*GPU_SYNCHRONIZE)(PVOID context);
 typedef struct {
     PUCHAR Registers,Gcc,Rsc,Db,Thermal;
@@ -30,6 +31,7 @@ typedef struct {
     ULONG CoolingBand,DownSamples;
     BOOLEAN LastContextValid;
     ULONGLONG LastContextCookie;
+    ULONGLONG LastRoot;
     ULONGLONG LastSubmitTime,PendingSince,PendingCompleted,RaisedAt;
 } GPU;
 VOID GpuInitialize(GPU *gpu,GPU_SYNCHRONIZE synchronize,PVOID host);
@@ -60,6 +62,7 @@ VOID GpuStop(GPU *gpu);
 NTSTATUS GpuSubmit(GPU *gpu,GPU_BO *bo,ULONG offset,ULONG words);
 NTSTATUS GpuSubmitBatch(GPU *gpu,const GPU_COMMAND *entries,ULONG count);
 NTSTATUS GpuSubmitContextBatch(GPU *gpu,const GPU_COMMAND *entries,ULONG count,ULONGLONG cookie);
+NTSTATUS GpuSubmitRootBatch(GPU *gpu,const GPU_IB *entries,ULONG count,ULONGLONG root,ULONGLONG cookie);
 NTSTATUS GpuWait(GPU *gpu,ULONGLONG fence,ULONGLONG timeout);
 VOID GpuSmc(ULONGLONG *registers);
 NTSTATUS GpuGmuStart(GPU *gpu);

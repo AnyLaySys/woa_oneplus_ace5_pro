@@ -11,7 +11,7 @@ NTSTATUS QchInputSave(BOOLEAN Suspended){
     if(NT_SUCCESS(Status))InputSaved=Suspended;return Status;
 }
 static KSPIN_LOCK Lock;
-static PDEVICE_OBJECT Control;
+static PDEVICE_OBJECT Control,SensorControl;
 static BOOLEAN ControlDeleted;
 static PDRIVER_DISPATCH Prev[IRP_MJ_MAXIMUM_FUNCTION+1];
 static PDRIVER_UNLOAD PrevUnload;
@@ -78,9 +78,21 @@ BOOLEAN QchBatteryGuard(QCH_LINK *C)
 }
 
 static ULONG Age(ULONGLONG Now,ULONGLONG At){return At&&At<=Now?(ULONG)min(Now-At,0xffffffffull):0xffffffffu;}
+static NTSTATUS SensorRead(PIO_STACK_LOCATION S,PIRP Irp,ULONG *Bytes) {
+    if(S->Parameters.DeviceIoControl.InputBufferLength!=sizeof(ULONG))return STATUS_INVALID_PARAMETER;
+    if(S->Parameters.DeviceIoControl.OutputBufferLength<sizeof(QCOM_ROTATION))return STATUS_BUFFER_TOO_SMALL;
+    ULONG sensor=*(ULONG*)Irp->AssociatedIrp.SystemBuffer;NTSTATUS Status=QcomSensorQuery(sensor,Irp->AssociatedIrp.SystemBuffer);
+    if(NT_SUCCESS(Status))*Bytes=sizeof(QCOM_ROTATION);return Status;
+}
 static NTSTATUS Dispatch(PDEVICE_OBJECT Device,PIRP Irp)
 {
     PIO_STACK_LOCATION S=IoGetCurrentIrpStackLocation(Irp);
+    if(Device==SensorControl) {
+        NTSTATUS Status=STATUS_INVALID_DEVICE_REQUEST;ULONG Bytes=0;
+        if(S->MajorFunction==IRP_MJ_CREATE || S->MajorFunction==IRP_MJ_CLOSE || S->MajorFunction==IRP_MJ_CLEANUP)Status=STATUS_SUCCESS;
+        else if(S->MajorFunction==IRP_MJ_DEVICE_CONTROL && S->Parameters.DeviceIoControl.IoControlCode==QCOM_SENSOR_READ)Status=SensorRead(S,Irp,&Bytes);
+        Irp->IoStatus.Status=Status;Irp->IoStatus.Information=Bytes;IoCompleteRequest(Irp,IO_NO_INCREMENT);return Status;
+    }
     if(Device!=Control)return Prev[S->MajorFunction](Device,Irp);
     if(S->MajorFunction==IRP_MJ_CLEANUP)QcomRpcDetach(S->FileObject);
     NTSTATUS Status=STATUS_INVALID_DEVICE_REQUEST;ULONG Bytes=0;
@@ -96,11 +108,6 @@ static NTSTATUS Dispatch(PDEVICE_OBJECT Device,PIRP Irp)
             RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer,&V,Bytes);Status=STATUS_SUCCESS;
         }
     }
-    if(S->MajorFunction==IRP_MJ_DEVICE_CONTROL && (S->Parameters.DeviceIoControl.IoControlCode==QCOM_LIGHT_READ || S->Parameters.DeviceIoControl.IoControlCode==QCOM_ORIENTATION_READ)){
-        if(S->Parameters.DeviceIoControl.InputBufferLength)Status=STATUS_INVALID_PARAMETER;
-        else if(S->Parameters.DeviceIoControl.OutputBufferLength<sizeof(QCOM_LIGHT))Status=STATUS_BUFFER_TOO_SMALL;
-        else {if(S->Parameters.DeviceIoControl.IoControlCode==QCOM_LIGHT_READ)QcomLightQuery(Irp->AssociatedIrp.SystemBuffer);else QcomOrientationQuery(Irp->AssociatedIrp.SystemBuffer);Bytes=sizeof(QCOM_LIGHT);Status=STATUS_SUCCESS;}
-    }
     if(S->MajorFunction==IRP_MJ_DEVICE_CONTROL && S->Parameters.DeviceIoControl.IoControlCode==QH_VOLUME) {
         if(S->Parameters.DeviceIoControl.InputBufferLength)Status=STATUS_INVALID_PARAMETER;
         else if(S->Parameters.DeviceIoControl.OutputBufferLength<sizeof(ULONG))Status=STATUS_BUFFER_TOO_SMALL;
@@ -115,15 +122,13 @@ VOID QchRemove(VOID)
     if(Control && !ControlDeleted) {
         UNICODE_STRING Link=RTL_CONSTANT_STRING(L"\\DosDevices\\AlsCharge");
         IoDeleteSymbolicLink(&Link);ControlDeleted=TRUE;IoDeleteDevice(Control);
+        UNICODE_STRING SensorLink=RTL_CONSTANT_STRING(L"\\DosDevices\\QcomSensorData");IoDeleteSymbolicLink(&SensorLink);
+        if(SensorControl)IoDeleteDevice(SensorControl);
     }
 }
 static VOID Unload(PDRIVER_OBJECT Driver)
 {
-    QchDiscardAuth();
-    UNICODE_STRING Link=RTL_CONSTANT_STRING(L"\\DosDevices\\AlsCharge");
-    IoDeleteSymbolicLink(&Link);
-    if(Control && !ControlDeleted) IoDeleteDevice(Control);
-    Control=NULL;
+    QchRemove();Control=SensorControl=NULL;
     if(InputKey){ZwClose(InputKey);InputKey=NULL;}
     if(CredentialPath.Buffer){ExFreePoolWithTag(CredentialPath.Buffer,'aChQ');RtlZeroMemory(&CredentialPath,sizeof(CredentialPath));}
     if(PrevUnload) PrevUnload(Driver);
@@ -182,9 +187,15 @@ NTSTATUS QchInit(PDRIVER_OBJECT Driver,PUNICODE_STRING RegistryPath)
     if(!NT_SUCCESS(Status))goto Failed;
     Status=IoCreateSymbolicLink(&Link,&Name);
     if(!NT_SUCCESS(Status)){IoDeleteDevice(Control);Control=NULL;goto Failed;}
+    UNICODE_STRING SensorName=RTL_CONSTANT_STRING(L"\\Device\\QcomSensorData"),SensorLink=RTL_CONSTANT_STRING(L"\\DosDevices\\QcomSensorData");
+    UNICODE_STRING SensorSddl=RTL_CONSTANT_STRING(L"D:P(A;;GR;;;SY)(A;;GR;;;BA)(A;;GR;;;UD)");
+    static const GUID SensorGuid={0x9a123600,0x2026,0x1119,{0xa1,0x61,0x53,0x45,0x4e,0x53,0x4f,0x52}};
+    Status=IoCreateDeviceSecure(Driver,0,&SensorName,FILE_DEVICE_UNKNOWN,FILE_DEVICE_SECURE_OPEN,FALSE,&SensorSddl,&SensorGuid,&SensorControl);
+    if(NT_SUCCESS(Status))Status=IoCreateSymbolicLink(&SensorLink,&SensorName);
+    if(!NT_SUCCESS(Status)){if(SensorControl){IoDeleteDevice(SensorControl);SensorControl=NULL;}IoDeleteSymbolicLink(&Link);IoDeleteDevice(Control);Control=NULL;goto Failed;}
     for(ULONG I=0;I<=IRP_MJ_MAXIMUM_FUNCTION;I++){Prev[I]=Driver->MajorFunction[I];Driver->MajorFunction[I]=Dispatch;}
     PrevUnload=Driver->DriverUnload;Driver->DriverUnload=Unload;
-    ControlDeleted=FALSE;Control->Flags&=~DO_DEVICE_INITIALIZING;return STATUS_SUCCESS;
+    ControlDeleted=FALSE;Control->Flags&=~DO_DEVICE_INITIALIZING;SensorControl->Flags&=~DO_DEVICE_INITIALIZING;return STATUS_SUCCESS;
 Failed:
     if(CredentialPath.Buffer){ExFreePoolWithTag(CredentialPath.Buffer,'aChQ');RtlZeroMemory(&CredentialPath,sizeof(CredentialPath));}
     ZwClose(InputKey);InputKey=NULL;return Status;

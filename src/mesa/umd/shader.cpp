@@ -1,28 +1,12 @@
 #include "umd.h"
 
-static std::vector<uint32_t> signature(const D3D10DDIARG_SIGNATURE_ENTRY *entries,UINT count,unsigned stage,bool output) {
- std::vector<uint32_t> words(2+count*6);words[0]=count;words[1]=8;
- for(UINT i=0;i<count;i++) {
-   UINT sys=entries[i].SystemValue,reg=entries[i].Register;
-   std::string name="TEXCOORD";
-   if(sys==D3D10_SB_NAME_POSITION)name="SV_Position";
-   else if(sys==D3D10_SB_NAME_VERTEX_ID)name="SV_VertexID";
-   else if(sys==D3D10_SB_NAME_INSTANCE_ID)name="SV_InstanceID";
-   else if(sys==D3D10_SB_NAME_IS_FRONT_FACE)name="SV_IsFrontFace";
-   else if(sys==D3D10_SB_NAME_PRIMITIVE_ID)name="SV_PrimitiveID";
-   if(stage==1 && output && (!sys || sys==64)){name="SV_Target";sys=64;}
-   UINT at=2+i*6;words[at]=(UINT)words.size()*4;words[at+1]=(name=="TEXCOORD" || name=="SV_Target")?reg:0;
-   words[at+2]=sys;words[at+3]=(sys==D3D10_SB_NAME_VERTEX_ID || sys==D3D10_SB_NAME_INSTANCE_ID || sys==D3D10_SB_NAME_IS_FRONT_FACE || sys==D3D10_SB_NAME_PRIMITIVE_ID)?1:3;
-   words[at+4]=reg;words[at+5]=entries[i].Mask|((output?0:entries[i].Mask)<<8);
-   size_t offset=words.size()*4;words.resize(words.size()+(name.size()+4)/4);memcpy((char *)words.data()+offset,name.c_str(),name.size()+1);
- }
- return words;
-}
+#include "../signature.h"
+
 bool shader_create(Device *d,Shader *s,const UINT *code,const D3D10DDIARG_STAGE_IO_SIGNATURES *io,unsigned stage) {
 
  if(!code || code[1]<2 || code[1]>1048576){error(d,E_INVALIDARG);return false;}
- auto input=signature(io?io->pInputSignature:nullptr,io?io->NumInputSignatureEntries:0,stage,false);
- auto output=signature(io?io->pOutputSignature:nullptr,io?io->NumOutputSignatureEntries:0,stage,true);
+ auto input=A830Signature(io?io->pInputSignature:nullptr,io?io->NumInputSignatureEntries:0,stage==1,false);
+ auto output=A830Signature(io?io->pOutputSignature:nullptr,io?io->NumOutputSignatureEntries:0,stage==1,true);
  vkd3d_shader_dxbc_section_desc sections[3]={{0x4e475349,{input.data(),input.size()*4}},{0x4e47534f,{output.data(),output.size()*4}},{0x52444853,{code,(size_t)code[1]*4}}};
  vkd3d_shader_code dxbc{},spirv{};
  int result=vkd3d_shader_serialize_dxbc(3,sections,&dxbc,nullptr);

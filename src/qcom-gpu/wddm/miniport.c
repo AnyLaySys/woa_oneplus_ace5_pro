@@ -89,6 +89,7 @@ NTSTATUS A830AdapterStop(PVOID context) {
 static NTSTATUS Start(PVOID context,PDXGK_START_INFO start,PDXGKRNL_INTERFACE dxgk,PULONG sources,PULONG children) {
     UNREFERENCED_PARAMETER(start);
     A830_ADAPTER *a=context;a->Dxgk=*dxgk;*sources=0;*children=0;
+    InterlockedExchange(&a->Failed,0);
 
     NTSTATUS displayStatus=A830DisplayStart(a);
 
@@ -137,8 +138,10 @@ static BOOLEAN Interrupt(PVOID context,ULONG message) {
     for(ULONG i=0;i<4+RTL_NUMBER_OF(a->Hardware.Vm);i++)if(GpuInterrupt(&a->Hardware,i))handled=TRUE;
     if(handled && a->Hardware.Fault && !InterlockedCompareExchange(&a->Failed,(LONG)a->Hardware.Fault,0)) {
         KeMemoryBarrier();
-        ULONG fence=a->IrqRead!=a->IrqWrite?a->IrqRecords[a->IrqRead%RTL_NUMBER_OF(a->IrqRecords)].Fence:a->LastSubmitted;
-        if(fence)InterlockedExchange(&a->FaultFence,(LONG)fence);
+        if(a->IrqRead!=a->IrqWrite) {
+            ULONG slot=a->IrqRead%RTL_NUMBER_OF(a->IrqRecords);
+            InterlockedExchange64(&a->FaultFence,((LONG64)a->IrqRecords[slot].Node<<32)|a->IrqRecords[slot].Fence);
+        }
     }
     if(handled)A830InterruptComplete(a);
     if(handled)a->Dxgk.DxgkCbQueueDpc(a->Dxgk.DeviceHandle);return handled;
@@ -243,14 +246,56 @@ static NTSTATUS Interface(PVOID context,PQUERY_INTERFACE query) {
 }
 static NTSTATUS APIENTRY CreateDevice(HANDLE adapter,DXGKARG_CREATEDEVICE *p) {
     A830_DEVICE *d=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*d),GPU_TAG);if(!d)return STATUS_INSUFFICIENT_RESOURCES;
-    d->Adapter=adapter;p->hDevice=d;return STATUS_SUCCESS;
+    d->Adapter=adapter;d->Process=p->hKmdProcess;p->hDevice=d;return STATUS_SUCCESS;
+}
+static NTSTATUS APIENTRY CreateProcess(HANDLE adapter,DXGKARG_CREATEPROCESS *p) {
+    A830_ADAPTER *a=adapter;
+    if(p->Flags.VirtualMachineProcess || p->Flags.VirtualMachineWorkerProcess)return STATUS_NOT_SUPPORTED;
+    A830_PROCESS *process=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*process),GPU_TAG);if(!process)return STATUS_INSUFFICIENT_RESOURCES;
+    process->Owner=PsGetCurrentProcess();ObReferenceObject(process->Owner);KeInitializeMutex(&process->Lock,0);
+    process->System=p->Flags.SystemProcess!=0;
+    if(!process->System && a->Dxgk.DxgkCbReserveGpuVirtualAddressRange) {
+        DXGKARGCB_RESERVEGPUVIRTUALADDRESSRANGE range={0};range.hDxgkProcess=p->hDxgkProcess;
+        range.BaseAddress=0x40000000;range.SizeInBytes=0xC0000000;range.Alignment=0x200000;
+        NTSTATUS status=a->Dxgk.DxgkCbReserveGpuVirtualAddressRange(a->Dxgk.DeviceHandle,&range);
+        process->Reserved=NT_SUCCESS(status) && range.StartVirtualAddress==range.BaseAddress;
+    }
+    p->hKmdProcess=process;return STATUS_SUCCESS;
+}
+static NTSTATUS APIENTRY DestroyProcess(HANDLE adapter,HANDLE handle) {
+    UNREFERENCED_PARAMETER(adapter);A830_PROCESS *process=handle;
+    ObDereferenceObject(process->Owner);ExFreePoolWithTag(process,GPU_TAG);return STATUS_SUCCESS;
+}
+static SIZE_T APIENTRY RootSize(HANDLE adapter,DXGKARG_GETROOTPAGETABLESIZE *p) {
+    UNREFERENCED_PARAMETER(adapter);if(p->PhysicalAdapterIndex || p->NumberOfPte>512)return 0;
+    p->NumberOfPte=512;return PAGE_SIZE;
+}
+static VOID APIENTRY SetRoot(HANDLE adapter,const DXGKARG_SETROOTPAGETABLE *p) {
+    A830_ADAPTER *a=adapter;A830_CONTEXT *c=p->hContext;NTSTATUS status=STATUS_INVALID_PARAMETER;ULONGLONG physical;
+    if(!c || c->Adapter!=a){status=STATUS_INVALID_HANDLE;goto fail;}
+    if(p->NumEntries!=512){status=STATUS_INVALID_BUFFER_SIZE;goto fail;}
+    status=A830PhysicalAddress(a,p->Address.SegmentId,p->Address.SegmentOffset,&physical);
+    if(!NT_SUCCESS(status))goto fail;
+    if(!physical || (physical&4095) || physical>>44){status=STATUS_INVALID_ADDRESS;goto fail;}
+    if(c->System){InterlockedExchange64((volatile LONG64 *)&a->PagingRoot,physical);return;}
+    if(!c->Virtual || !c->AddressSpace){status=STATUS_INVALID_DEVICE_STATE;goto fail;}
+    A830_PROCESS *process=c->AddressSpace;
+    KeWaitForSingleObject(&process->Lock,Executive,KernelMode,FALSE,NULL);
+    status=A830CopyKernelMappings(a,physical);if(NT_SUCCESS(status))process->Root=physical;
+    KeReleaseMutex(&process->Lock,FALSE);
+    if(NT_SUCCESS(status))return;
+fail:
+    InterlockedExchange(&a->Failed,status);KeSetEvent(&a->Wake,0,FALSE);
 }
 static NTSTATUS APIENTRY DestroyDevice(HANDLE device){ExFreePoolWithTag(device,GPU_TAG);return STATUS_SUCCESS;}
 static NTSTATUS APIENTRY CreateContext(HANDLE device,DXGKARG_CREATECONTEXT *p) {
 
-    A830_DEVICE *d=device;if(p->NodeOrdinal || p->EngineAffinity>1 || p->Flags.VirtualAddressing)return STATUS_NOT_SUPPORTED;
+    A830_DEVICE *d=device;if(p->NodeOrdinal>=A830_NODE_COUNT || p->EngineAffinity>1 ||
+        (p->NodeOrdinal==1 && !p->Flags.VirtualAddressing) ||
+        (p->Flags.VirtualAddressing && !p->Flags.SystemContext && (!d->Process || !d->Process->Reserved || p->PrivateDriverDataSize!=sizeof(A830_CONTEXT_DATA))))return STATUS_NOT_SUPPORTED;
     A830_CONTEXT *c=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*c),GPU_TAG);if(!c)return STATUS_INSUFFICIENT_RESOURCES;
-    c->Adapter=d->Adapter;c->Process=PsGetCurrentProcess();ObReferenceObject(c->Process);ExInitializeRundownProtection(&c->Jobs);KeInitializeSpinLock(&c->TokenLock);InitializeListHead(&c->Rendered);
+    c->Adapter=d->Adapter;c->Process=PsGetCurrentProcess();c->AddressSpace=d->Process;c->Virtual=p->Flags.VirtualAddressing!=0;c->System=p->Flags.SystemContext!=0;c->Node=p->NodeOrdinal;
+    ObReferenceObject(c->Process);ExInitializeRundownProtection(&c->Jobs);KeInitializeSpinLock(&c->TokenLock);InitializeListHead(&c->Rendered);
     if(p->PrivateDriverDataSize) {
         if(p->PrivateDriverDataSize!=sizeof(A830_CONTEXT_DATA) || !p->pPrivateDriverData) {
 
@@ -271,6 +316,7 @@ static NTSTATUS APIENTRY CreateContext(HANDLE device,DXGKARG_CREATECONTEXT *p) {
     }
     p->hContext=c;RtlZeroMemory(&p->ContextInfo,sizeof(p->ContextInfo));
     p->ContextInfo.DmaBufferSize=A830_DMA_BYTES;p->ContextInfo.DmaBufferPrivateDataSize=sizeof(A830_DMA);
+    p->ContextInfo.Caps.NoPatchingRequired=c->Virtual || c->System;
     p->ContextInfo.AllocationListSize=128;p->ContextInfo.PatchLocationListSize=128;
     return STATUS_SUCCESS;
 }
@@ -304,20 +350,21 @@ static NTSTATUS APIENTRY Describe(HANDLE adapter,DXGKARG_DESCRIBEALLOCATION *p) 
     return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY Fence(HANDLE adapter,DXGKARG_QUERYCURRENTFENCE *p) {
-    A830_ADAPTER *a=adapter;if(p->NodeOrdinal || p->EngineOrdinal)return STATUS_INVALID_PARAMETER;
-    p->CurrentFence=a->Completed;return STATUS_SUCCESS;
+    A830_ADAPTER *a=adapter;if(p->NodeOrdinal>=A830_NODE_COUNT || p->EngineOrdinal)return STATUS_INVALID_PARAMETER;
+    p->CurrentFence=a->Completed[p->NodeOrdinal];return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY Preempt(HANDLE adapter,const DXGKARG_PREEMPTCOMMAND *p) {
-    A830_ADAPTER *a=adapter;if(p->NodeOrdinal || p->EngineOrdinal)return STATUS_INVALID_PARAMETER;
-    a->Preemption=p->PreemptionFenceId;InterlockedExchange(&a->PreemptPending,1);KeSetEvent(&a->Wake,IO_NO_INCREMENT,FALSE);return STATUS_SUCCESS;
+    A830_ADAPTER *a=adapter;if(p->NodeOrdinal>=A830_NODE_COUNT || p->EngineOrdinal)return STATUS_INVALID_PARAMETER;
+    a->Preemption[p->NodeOrdinal]=p->PreemptionFenceId;InterlockedOr(&a->PreemptPending,1L<<p->NodeOrdinal);KeSetEvent(&a->Wake,IO_NO_INCREMENT,FALSE);return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY Metadata(HANDLE adapter,UINT node,DXGKARG_GETNODEMETADATA *p) {
-    UNREFERENCED_PARAMETER(adapter);if(node)return STATUS_INVALID_PARAMETER;
+    UNREFERENCED_PARAMETER(adapter);if(node>=A830_NODE_COUNT)return STATUS_INVALID_PARAMETER;
     RtlZeroMemory(p,sizeof(*p));p->EngineType=DXGK_ENGINE_TYPE_3D;
+    p->GpuMmuSupported=node==1;
     return RtlStringCchCopyW(p->FriendlyName,RTL_NUMBER_OF(p->FriendlyName),L"Qualcomm Adreno 830");
 }
-static NTSTATUS ResetToFence(A830_ADAPTER *a,PULONG aborted) {
-    ULONG boundary=A830FreezeFences(a);StopWorker(a);
+static NTSTATUS ResetToFence(A830_ADAPTER *a,ULONG aborted[A830_NODE_COUNT]) {
+    ULONG boundary[A830_NODE_COUNT];A830FreezeFences(a,boundary);StopWorker(a);
     NTSTATUS status;
     if(a->BridgeAttached)status=A830BridgeReset();
     else {GpuStop(&a->Hardware);status=GpuStart(&a->Hardware);}
@@ -328,30 +375,30 @@ static NTSTATUS ResetToFence(A830_ADAPTER *a,PULONG aborted) {
     if(NT_SUCCESS(status)) {
         /* All WDDM work up to this snapshot has now been quiesced/aborted.
            Do not use Hardware.Submitted: scanout copies have private fences. */
-        a->Completed=boundary;*aborted=boundary;
+        for(ULONG node=0;node<A830_NODE_COUNT;node++)a->Completed[node]=aborted[node]=boundary[node];
     }
     InterlockedExchange(&a->Failed,NT_SUCCESS(status)?0:status);InterlockedExchange(&a->PreemptPending,0);
     return status;
 }
 static NTSTATUS APIENTRY Reset(HANDLE adapter) {
-    ULONG aborted=0;return ResetToFence(adapter,&aborted);
+    ULONG aborted[A830_NODE_COUNT]={0};return ResetToFence(adapter,aborted);
 }
 static NTSTATUS APIENTRY Restart(HANDLE adapter) {
     A830_ADAPTER *a=adapter;if(a->Failed)return (NTSTATUS)a->Failed;
     return StartWorker(a);
 }
 static NTSTATUS APIENTRY EngineGroup(HANDLE adapter,DXGKARG_QUERYDEPENDENTENGINEGROUP *p) {
-    UNREFERENCED_PARAMETER(adapter);if(p->NodeOrdinal || p->EngineOrdinal)return STATUS_INVALID_PARAMETER;
-    p->DependentNodeOrdinalMask=1;return STATUS_SUCCESS;
+    UNREFERENCED_PARAMETER(adapter);if(p->NodeOrdinal>=A830_NODE_COUNT || p->EngineOrdinal)return STATUS_INVALID_PARAMETER;
+    p->DependentNodeOrdinalMask=(1u<<A830_NODE_COUNT)-1;return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY EngineStatus(HANDLE adapter,DXGKARG_QUERYENGINESTATUS *p) {
-    A830_ADAPTER *a=adapter;if(p->NodeOrdinal || p->EngineOrdinal)return STATUS_INVALID_PARAMETER;
+    A830_ADAPTER *a=adapter;if(p->NodeOrdinal>=A830_NODE_COUNT || p->EngineOrdinal)return STATUS_INVALID_PARAMETER;
     p->EngineStatus.Value=0;p->EngineStatus.Responsive=!a->Failed;return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY ResetEngine(HANDLE adapter,DXGKARG_RESETENGINE *p) {
-    A830_ADAPTER *a=adapter;if(p->NodeOrdinal || p->EngineOrdinal)return STATUS_INVALID_PARAMETER;
-    ULONG aborted=0;NTSTATUS status=ResetToFence(a,&aborted);
-    if(NT_SUCCESS(status))p->LastAbortedFenceId=aborted;
+    A830_ADAPTER *a=adapter;if(p->NodeOrdinal>=A830_NODE_COUNT || p->EngineOrdinal)return STATUS_INVALID_PARAMETER;
+    ULONG aborted[A830_NODE_COUNT]={0};NTSTATUS status=ResetToFence(a,aborted);
+    if(NT_SUCCESS(status))p->LastAbortedFenceId=aborted[p->NodeOrdinal];
     return NT_SUCCESS(status)?Restart(a):status;
 }
 DRIVER_INITIALIZE DriverEntry;
@@ -372,6 +419,9 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT object,PUNICODE_STRING path) {
     d.DxgkDdiOpenAllocation=Open;d.DxgkDdiCloseAllocation=Close;d.DxgkDdiDescribeAllocation=Describe;
     d.DxgkDdiGetStandardAllocationDriverData=A830StandardAllocation;
     d.DxgkDdiCreateContext=CreateContext;d.DxgkDdiDestroyContext=DestroyContext;
+    d.DxgkDdiCreateProcess=CreateProcess;d.DxgkDdiDestroyProcess=DestroyProcess;
+    d.DxgkDdiGetRootPageTableSize=RootSize;d.DxgkDdiSetRootPageTable=SetRoot;
+    d.DxgkDdiSubmitCommandVirtual=A830SubmitVirtual;
     d.DxgkDdiRender=A830Render;d.DxgkDdiRenderKm=A830Render;d.DxgkDdiPatch=A830Patch;d.DxgkDdiSubmitCommand=A830Submit;
     d.DxgkDdiEscape=A830Escape;
     d.DxgkDdiBuildPagingBuffer=A830Paging;d.DxgkDdiPreemptCommand=Preempt;d.DxgkDdiQueryCurrentFence=Fence;

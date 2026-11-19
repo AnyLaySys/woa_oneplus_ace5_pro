@@ -1,0 +1,56 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=%ProviderString%
+DriverVer=11/19/2026,26.11.19.59
+CatalogFile=qcom_cam.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DriverCopy=13
+
+[SourceDisksNames]
+1=%DiskDesc%,,,
+
+[SourceDisksFiles]
+qcom_cam.sys=1
+qcom_cam_capture.exe=1
+qcom_cam_check.exe=1
+
+[Manufacturer]
+%ManufacturerString%=Qualcomm,NT$ARCH$.10.0...22000
+
+[Qualcomm.NT$ARCH$.10.0...22000]
+%DeviceDesc%=qcom_cam,ACPI\HMRC0906
+
+[qcom_cam.NT]
+CopyFiles=DriverCopy
+
+[qcom_cam.NT.Services]
+AddService=qcom_cam,0x2,Service
+
+[Service]
+DisplayName=%ServiceDesc%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\qcom_cam.sys
+
+[qcom_cam.NT.Wdf]
+KmdfService=qcom_cam,Wdf
+
+[Wdf]
+KmdfLibraryVersion=$KMDFVERSION$
+
+[DriverCopy]
+qcom_cam.sys
+qcom_cam_capture.exe
+qcom_cam_check.exe
+
+[Strings]
+ProviderString="AnyLaySys"
+ManufacturerString="Qualcomm"
+DeviceDesc="Qualcomm SM8750 Camera Controller (Sony IMX906)"
+ServiceDesc="Qualcomm Camera Driver"
+DiskDesc="AnyLaySys Camera Driver"
