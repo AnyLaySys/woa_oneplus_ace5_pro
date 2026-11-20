@@ -1,5 +1,6 @@
 #include "cam.h"
 #include <acpiioct.h>
+#include "trace-regs.h"
 
 DRIVER_INITIALIZE DriverEntry;
 static EVT_WDF_DRIVER_DEVICE_ADD AddDevice;
@@ -9,12 +10,11 @@ static EVT_WDF_DEVICE_D0_ENTRY Start;
 static EVT_WDF_DEVICE_D0_EXIT Stop;
 static EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL Control;
 static EVT_WDF_OBJECT_CONTEXT_CLEANUP Cleanup;
-static EVT_WDF_DEVICE_FILTER_RESOURCE_REQUIREMENTS FilterResources;
 
 static const ULONG Bases[]={0x00100000,0x0ade0000,0x01760000,0x0ac7b000,0x0adb3000,0x0ad27000,0x0ac86000,0x0ac04000,0x0ad90000,
-    0x15000000,0x0f100000,0x0c400000,0x0c42d000,0x0c440000,0x0c500000,0x16520000,0x81c60000,0x0adcb000};
+    0x15000000,0x0f100000,0x0c400000,0x0c42d000,0x0c440000,0x0c500000,0x16520000,0x81c60000,0x0adcb000,0x0ac7f000,0x017d2000,0x017d1000};
 static const ULONG Sizes[]={0x100000,0x20000,0x6000,0x1000,0x2000,0x3000,0x10000,0x1000,0x9000,
-    0x100000,0x100000,0x3000,0x4000,0x80000,0x400000,0x10000,0x20000,0x5000};
+    0x100000,0x100000,0x3000,0x4000,0x80000,0x400000,0x10000,0x20000,0x5000,0x1000,0x1000,0x1000};
 C_ASSERT(RTL_NUMBER_OF(Bases)==CamRegionCount);
 
 static BOOLEAN Dedicated(ULONG region) {return region>=CamCc&&region<=CamNoc;}
@@ -34,21 +34,6 @@ static VOID FirmwareStatus(CAM *c) {
        result->Argument[0].Type==ACPI_METHOD_ARGUMENT_INTEGER)c->Trace.FirmwareQos=result->Argument[0].Argument;
 }
 
-static NTSTATUS FilterResources(WDFDEVICE device,WDFIORESREQLIST requirements) {
-    UNREFERENCED_PARAMETER(device);
-    for(ULONG i=0;i<WdfIoResourceRequirementsListGetCount(requirements);i++) {
-        WDFIORESLIST list=WdfIoResourceRequirementsListGetIoResList(requirements,i);
-        for(ULONG j=WdfIoResourceListGetCount(list);j>0;j--) {
-            PIO_RESOURCE_DESCRIPTOR r=WdfIoResourceListGetDescriptor(list,j-1);
-            if(r->Type!=CmResourceTypeMemory)continue;
-            for(ULONG n=0;n<CamRegionCount;n++)if(!Dedicated(n)&&r->u.Memory.MinimumAddress.QuadPart==Bases[n]&&r->u.Memory.Length==Sizes[n]) {
-                WdfIoResourceListRemove(list,j-1);break;
-            }
-        }
-    }
-    return STATUS_SUCCESS;
-}
-
 static NTSTATUS Prepare(WDFDEVICE device,WDFCMRESLIST raw,WDFCMRESLIST resources) {
     UNREFERENCED_PARAMETER(raw);CAM *c=CamContext(device);ULONG count=0;
     for(ULONG i=0;i<WdfCmResourceListGetCount(resources);i++) {
@@ -64,7 +49,7 @@ static NTSTATUS Prepare(WDFDEVICE device,WDFCMRESLIST raw,WDFCMRESLIST resources
     if(count!=CamNoc-CamCc+1)return STATUS_DEVICE_CONFIGURATION_ERROR;
     for(ULONG n=0;n<CamRegionCount;n++)if(!Dedicated(n)) {
         PHYSICAL_ADDRESS address;address.QuadPart=Bases[n];
-        c->Base[n]=MmMapIoSpaceEx(address,Sizes[n],PAGE_READWRITE|PAGE_NOCACHE);
+        c->Base[n]=MmMapIoSpaceEx(address,Sizes[n],(n==CamDb?PAGE_READONLY:PAGE_READWRITE)|PAGE_NOCACHE);
         if(!c->Base[n])return STATUS_INSUFFICIENT_RESOURCES;
     }
     FirmwareStatus(c);
@@ -77,13 +62,14 @@ static NTSTATUS Release(WDFDEVICE device,WDFCMRESLIST resources) {
     NTSTATUS status=CamCaptureStop(c);
     if(NT_SUCCESS(status))status=CamPowerOff(c);
     CamDmaFree(c);
-    if(!c->DmaActive)for(ULONG i=0;i<CamRegionCount;i++)if(c->Base[i]){MmUnmapIoSpace(c->Base[i],Sizes[i]);c->Base[i]=NULL;}
+    if(NT_SUCCESS(status)&&!c->DmaActive&&!c->CdmPending&&!c->ScmPending&&!c->CrmPending)
+        for(ULONG i=0;i<CamRegionCount;i++)if(c->Base[i]){MmUnmapIoSpace(c->Base[i],Sizes[i]);c->Base[i]=NULL;}
     WdfWaitLockRelease(c->Lock);return status;
 }
 
 static NTSTATUS Start(WDFDEVICE device,WDF_POWER_DEVICE_STATE previous) {
     UNREFERENCED_PARAMETER(previous);CAM *c=CamContext(device);
-    if(c->Faulted||c->DmaActive)return STATUS_DEVICE_HARDWARE_ERROR;
+    if(c->Faulted||c->DmaActive||c->CdmPending)return STATUS_DEVICE_HARDWARE_ERROR;
     InterlockedExchange(&c->Online,1);return STATUS_SUCCESS;
 }
 
@@ -96,7 +82,7 @@ static NTSTATUS Stop(WDFDEVICE device,WDF_POWER_DEVICE_STATE next) {
 
 static VOID Cleanup(WDFOBJECT object) {
     CAM *c=CamContext(object);CamDmaFree(c);
-    if(!c->DmaActive&&c->PowerState){ExFreePoolWithTag(c->PowerState,'pCcQ');c->PowerState=NULL;}
+    if(!c->DmaActive&&!c->CdmPending&&c->PowerState){ExFreePoolWithTag(c->PowerState,'pCcQ');c->PowerState=NULL;}
 }
 
 static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input,ULONG code) {
@@ -115,6 +101,70 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         QCAM_TRACE *trace;status=WdfRequestRetrieveOutputBuffer(request,sizeof(*trace),(PVOID *)&trace,NULL);
         if(NT_SUCCESS(status)){*trace=c->Trace;trace->Size=sizeof(*trace);trace->Abi=QCAM_ABI;bytes=sizeof(*trace);}goto done;
     }
+    if(code==QCAM_FRAME_DIAGNOSTIC) {
+        if(input||c->DmaActive||c->RxActive||c->ScmPending||c->CdmPending){status=STATUS_DEVICE_BUSY;goto done;}
+        if(!c->Frame||!c->FrameMdl){status=STATUS_DEVICE_NOT_READY;goto done;}
+        PVOID buffer;status=WdfRequestRetrieveOutputBuffer(request,QCAM_FRAME_BYTES,&buffer,NULL);
+        if(NT_SUCCESS(status)){KeFlushIoBuffers(c->FrameMdl,TRUE,TRUE);RtlCopyMemory(buffer,c->Frame,QCAM_FRAME_BYTES);bytes=QCAM_FRAME_BYTES;}
+        goto done;
+    }
+    if(code==QCAM_TBU_PROBE) {
+        if(input||output){status=STATUS_INVALID_PARAMETER;goto done;}
+        c->ProbeLimit=0;c->PipelineLimit=1;
+        QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,1000,0,4980000000ULL};
+        status=CamCaptureStart(c,&options);
+        if(NT_SUCCESS(status)) {
+            const ULONG regions[]={CamHfTbu,CamSfTbu};
+            for(ULONG n=0;n<2;n++) {
+                PUCHAR base=c->Base[regions[n]];
+                for(ULONG i=0;i<RTL_NUMBER_OF(CamTbuTraceRegs);i++)
+                    c->Trace.Tbu[n][i]=i?CamRead64(base,CamTbuTraceRegs[i]):CamRead(base,0);
+            }
+            c->Diag.Step=167;c->Diag.Region=CamHfTbu;c->Diag.Offset=0;
+            c->Diag.Mask=MAXULONG;c->Diag.Observed=(ULONG)c->Trace.Tbu[0][0];
+        }
+        QCAM_DIAG diag=c->Diag;NTSTATUS stopped=CamCaptureStop(c);
+        if(NT_SUCCESS(stopped))stopped=CamPowerOff(c);
+        c->Diag=diag;c->PipelineLimit=0;
+        if(NT_SUCCESS(status))status=stopped;c->Diag.Status=status;goto done;
+    }
+    if(code==QCAM_CLOCK_MEASURE) {
+        if(input||output){status=STATUS_INVALID_PARAMETER;goto done;}
+        c->ProbeLimit=0;c->PipelineLimit=1;
+        QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,1000,0,4980000000ULL};
+        status=CamCaptureStart(c,&options);
+        if(NT_SUCCESS(status))status=CamMeasureClocks(c);
+        QCAM_DIAG diag=c->Diag;NTSTATUS stopped=CamCaptureStop(c);
+        if(NT_SUCCESS(stopped))stopped=CamPowerOff(c);
+        c->Diag=diag;c->PipelineLimit=0;
+        if(NT_SUCCESS(status))status=stopped;c->Diag.Status=status;goto done;
+    }
+    if(code==QCAM_CDM_CONFIG) {
+        if(input||output){status=STATUS_INVALID_PARAMETER;goto done;}
+        c->ProbeLimit=0;c->PipelineLimit=1;
+        QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,1000,0,4980000000ULL};
+        status=CamCaptureStart(c,&options);
+        if(NT_SUCCESS(status))status=CamCdmConfigure(c);
+        QCAM_DIAG diag=c->Diag;NTSTATUS stopped=CamCaptureStop(c);
+        if(NT_SUCCESS(stopped))stopped=CamPowerOff(c);
+        c->Diag=diag;c->PipelineLimit=0;
+        if(NT_SUCCESS(status))status=stopped;c->Diag.Status=status;goto done;
+    }
+    if(code==QCAM_CDM_PROBE) {
+        if(input||output){status=STATUS_INVALID_PARAMETER;goto done;}
+        c->ProbeLimit=0;status=CamPowerOn(c);
+        if(NT_SUCCESS(status)) {
+            for(ULONG i=0;i<RTL_NUMBER_OF(CamCdmTraceRegs);i++)c->Trace.Cdm[i]=CamRead(c->Base[CamCdm],CamCdmTraceRegs[i]);
+            c->Diag.Step=160;c->Diag.Region=CamCdm;c->Diag.Offset=0;c->Diag.Observed=c->Trace.Cdm[0];
+            if(!c->Trace.Cdm[0]||c->Trace.Cdm[0]==MAXULONG)status=STATUS_REVISION_MISMATCH;
+        }
+        QCAM_DIAG diag=c->Diag;NTSTATUS off=CamPowerOff(c);c->Diag=diag;
+        if(NT_SUCCESS(status))status=off;c->Diag.Status=status;goto done;
+    }
+    if(code==QCAM_SCM_WAITQ_PROBE||code==QCAM_SCM_WAITQ_CONTEXT) {
+        if(input||output){status=STATUS_INVALID_PARAMETER;goto done;}
+        status=code==QCAM_SCM_WAITQ_PROBE?CamScmWaitqProbe(c):CamScmWaitqContext(c);goto done;
+    }
     if(code==QCAM_SCM_PROBE) {
         if(input||output){status=STATUS_INVALID_PARAMETER;goto done;}
         status=CamScmProbe(c);goto done;
@@ -126,17 +176,19 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         QCAM_DIAG diag=c->Diag;NTSTATUS off=CamPowerOff(c);c->Diag=diag;
         if(NT_SUCCESS(status))status=off;c->Diag.Status=status;goto done;
     }
-    if(code==QCAM_SCM_QOS_PROBE) {
+    if(code==QCAM_SCM_QOS_PROBE||code==QCAM_SCM_QOS_DIAGNOSTIC||code==QCAM_SCM_QOS_RAW) {
         if(input||output){status=STATUS_INVALID_PARAMETER;goto done;}
-        c->ProbeLimit=0;c->PipelineLimit=0;status=CamPowerOn(c);
-        if(NT_SUCCESS(status))status=CamBusOn(c);
-        if(NT_SUCCESS(status))status=CamScmQos(c);
+        c->ProbeLimit=0;c->PipelineLimit=1;
+        QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,1000,0,4980000000ULL};
+        status=CamCaptureStart(c,&options);
+        if(NT_SUCCESS(status))status=code==QCAM_SCM_QOS_RAW?CamScmQosRaw(c):
+            code==QCAM_SCM_QOS_DIAGNOSTIC?CamScmQosDiagnostic(c):CamScmQos(c);
         if(c->Powered&&!c->ScmPending)CamBusSnapshot(c);
         QCAM_DIAG diag=c->Diag;
         NTSTATUS stopped=CamCaptureStop(c);
         if(NT_SUCCESS(stopped))stopped=CamPowerOff(c);
         c->Diag=diag;
-        if(NT_SUCCESS(status))status=stopped;c->Diag.Status=status;goto done;
+        if(NT_SUCCESS(status))status=stopped;c->PipelineLimit=0;c->Diag.Status=status;goto done;
     }
     if(code==QCAM_DMA_ROUTES) {
         QCAM_DMA_ROUTE_INFO *routes;
@@ -144,6 +196,8 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         if(NT_SUCCESS(status)) {
             RtlZeroMemory(routes,sizeof(*routes));routes->Size=sizeof(*routes);routes->Abi=QCAM_ABI;
             PUCHAR b=c->Base[CamSmmu];routes->Id0=CamRead(b,0x20);routes->Id1=CamRead(b,0x24);routes->Global=CamRead(b,0);
+            routes->FaultStatus=CamRead(b,0x48);
+            for(ULONG i=0;i<3;i++)routes->FaultSyndrome[i]=CamRead(b,0x50+i*4);
             if(!(routes->Id0&(1u<<27))||(routes->Id0&0x100))status=STATUS_NOT_SUPPORTED;
             else {
                 routes->Count=min(routes->Id0&255,RTL_NUMBER_OF(routes->Smr));
@@ -186,13 +240,14 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         if(!NT_SUCCESS(status)||NT_SUCCESS(off))c->Diag=diag;c->ProbeLimit=0;
         if(NT_SUCCESS(status))status=off;c->Info.Status=status;c->Diag.Status=status;goto done;
     }
-    if(code==QCAM_CAPTURE) {
-        c->ProbeLimit=0;c->PipelineLimit=0;
+    if(code==QCAM_CAPTURE||code==QCAM_CAPTURE_DIAGNOSTIC) {
+        c->ProbeLimit=0;c->PipelineLimit=code==QCAM_CAPTURE_DIAGNOSTIC?6:0;
         QCAM_CAPTURE_OPTIONS *source;PVOID buffer;
         status=WdfRequestRetrieveInputBuffer(request,sizeof(*source),(PVOID *)&source,NULL);
         if(!NT_SUCCESS(status))goto done;
         QCAM_CAPTURE_OPTIONS o=*source;
         if(input!=sizeof(o)||o.Size!=sizeof(o)||o.Abi!=QCAM_ABI||o.TimeoutMs<100||o.TimeoutMs>30000||o.SettleCount>255||o.DataRate<182400000||o.DataRate>13680000000ULL){status=STATUS_INVALID_PARAMETER;goto done;}
+        if(code==QCAM_CAPTURE_DIAGNOSTIC&&o.TimeoutMs>1000){status=STATUS_INVALID_PARAMETER;goto done;}
         if(output<QCAM_FRAME_BYTES){status=STATUS_BUFFER_TOO_SMALL;goto done;}
         status=WdfRequestRetrieveOutputBuffer(request,QCAM_FRAME_BYTES,&buffer,NULL);
         if(!NT_SUCCESS(status))goto done;
@@ -220,18 +275,22 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         if(NT_SUCCESS(status)&&!NT_SUCCESS(off)){status=off;bytes=0;}
         c->Info.Status=status;
         c->Diag.Status=status;
+        c->PipelineLimit=0;
     }
     if(code==QCAM_PIPELINE_PROBE) {
         QCAM_PROBE_OPTIONS *o;
         status=WdfRequestRetrieveInputBuffer(request,sizeof(*o),(PVOID *)&o,NULL);
         if(!NT_SUCCESS(status))goto done;
-        if(input!=sizeof(*o)||o->Size!=sizeof(*o)||o->Abi!=QCAM_ABI||!o->Limit||o->Limit>3){status=STATUS_INVALID_PARAMETER;goto done;}
+        if(input!=sizeof(*o)||o->Size!=sizeof(*o)||o->Abi!=QCAM_ABI||!o->Limit||o->Limit>5){status=STATUS_INVALID_PARAMETER;goto done;}
         c->ProbeLimit=0;c->PipelineLimit=o->Limit;
+        if(c->PipelineLimit==3)c->ReceiverVerified=FALSE;
         QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,5000,0,4980000000ULL};
         status=CamCaptureStart(c,&options);
         if(NT_SUCCESS(status)&&c->PipelineLimit==3) {
             CamDelay(100000);CamSnapshot(c);
             if(!c->Info.Packets)status=STATUS_IO_TIMEOUT;
+            else if(c->Info.CsidRxIrq&0x25fff000u)status=STATUS_DATA_ERROR;
+            c->ReceiverVerified=NT_SUCCESS(status);
         }
         NTSTATUS stopped=CamCaptureStop(c);
         if(NT_SUCCESS(status))status=stopped;
@@ -254,8 +313,6 @@ static NTSTATUS AddDevice(WDFDRIVER driver,PWDFDEVICE_INIT init) {
     WDF_PNPPOWER_EVENT_CALLBACKS p;WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&p);
     p.EvtDevicePrepareHardware=Prepare;p.EvtDeviceReleaseHardware=Release;p.EvtDeviceD0Entry=Start;p.EvtDeviceD0Exit=Stop;
     WdfDeviceInitSetPnpPowerEventCallbacks(init,&p);
-    WDF_FDO_EVENT_CALLBACKS fdo;WDF_FDO_EVENT_CALLBACKS_INIT(&fdo);
-    fdo.EvtDeviceFilterRemoveResourceRequirements=FilterResources;WdfFdoInitSetEventCallbacks(init,&fdo);
     WDF_OBJECT_ATTRIBUTES a;WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&a,CAM);
     a.ExecutionLevel=WdfExecutionLevelPassive;a.SynchronizationScope=WdfSynchronizationScopeNone;a.EvtCleanupCallback=Cleanup;
     WDFDEVICE device;status=WdfDeviceCreate(&init,&a,&device);if(!NT_SUCCESS(status))return status;

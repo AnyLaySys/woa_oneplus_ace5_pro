@@ -26,18 +26,18 @@ static __inline VOID BatDelay (VOID)
 
 static __inline VOID BatPinIdle (_In_ PBAT_DEVICE Dev, _In_ ULONG Pin)
 {
-    BatWr (Dev->Tlmm, Pin * BAT_TLMM_STRIDE, BAT_TLMM_FUNC_GPIO);
+    BatWr (Dev->Tlmm, (Pin-BAT_GPIO_SDA) * BAT_TLMM_STRIDE, BAT_TLMM_FUNC_GPIO);
 }
 
 static __inline VOID BatPinLow (_In_ PBAT_DEVICE Dev, _In_ ULONG Pin)
 {
-    BatWr (Dev->Tlmm, Pin * BAT_TLMM_STRIDE + 4, 0);
-    BatWr (Dev->Tlmm, Pin * BAT_TLMM_STRIDE, BAT_TLMM_FUNC_GPIO | BAT_TLMM_OE);
+    BatWr (Dev->Tlmm, (Pin-BAT_GPIO_SDA) * BAT_TLMM_STRIDE + 4, 0);
+    BatWr (Dev->Tlmm, (Pin-BAT_GPIO_SDA) * BAT_TLMM_STRIDE, BAT_TLMM_FUNC_GPIO | BAT_TLMM_OE);
 }
 
 static __inline ULONG BatPinGet (_In_ PBAT_DEVICE Dev, _In_ ULONG Pin)
 {
-    return BatRd (Dev->Tlmm, Pin * BAT_TLMM_STRIDE + 4) & BAT_TLMM_IN;
+    return BatRd (Dev->Tlmm, (Pin-BAT_GPIO_SDA) * BAT_TLMM_STRIDE + 4) & BAT_TLMM_IN;
 }
 
 static __inline VOID BatSclRelease (_In_ PBAT_DEVICE Dev)

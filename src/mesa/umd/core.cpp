@@ -1,4 +1,5 @@
 #include "umd.h"
+#include "module.h"
 #include "../a830_completion.h"
 
 void error(Device *d, HRESULT hr) {
@@ -293,7 +294,7 @@ bool initialize(Device *d) {
 
  HMODULE self=nullptr;WCHAR path[MAX_PATH];
  if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCWSTR)(uintptr_t)initialize,&self) || !GetModuleFileNameW(self,path,MAX_PATH))return false;
- WCHAR *tail=wcsrchr(path,L'\\');if(!tail)return false;tail[1]=0;wcscat(path,L"vulkan_freedreno.dll");
+ WCHAR *tail=wcsrchr(path,L'\\');if(!tail)return false;tail[1]=0;wcscat(path,A830_MODULE(L"vulkan_freedreno"));
  d->module=LoadLibraryExW(path,nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);if(!d->module){error(d,E_FAIL);return false;}
  auto set=(A830_SET_HOST)GetProcAddress(d->module,"A830SetHost");
  auto gpa=(PFN_vkGetInstanceProcAddr)GetProcAddress(d->module,"vk_icdGetInstanceProcAddr");

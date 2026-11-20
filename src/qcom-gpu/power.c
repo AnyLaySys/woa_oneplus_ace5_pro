@@ -1,5 +1,5 @@
 #include "gpu.h"
-#include "rpmh-lock.h"
+#include "../platform/lock.h"
 
 static USHORT Half(GPU *g,ULONG offset) {
     return (USHORT)(GpuRead(g->Db,offset&~3u)>>((offset&3)*8));
@@ -84,11 +84,11 @@ static NTSTATUS RscWriteLocked(GPU *g,ULONG address,ULONG value) {
 }
 NTSTATUS GpuRscWrite(GPU *g,ULONG address,ULONG value) {
     if(!g || !g->Rsc)return STATUS_INVALID_PARAMETER;
-    RPMH_LOCK_GUARD guard={0};NTSTATUS status=RpmhLockAcquire(&guard);
+    PLATFORM_LOCK_GUARD guard={0};NTSTATUS status=PlatformLockAcquire(&guard,FALSE);
     if(status!=STATUS_SUCCESS)return status;
     __try {status=RscWriteLocked(g,address,value);}
     __finally {
-        NTSTATUS released=RpmhLockRelease(&guard);
+        NTSTATUS released=PlatformLockRelease(&guard);
         if(NT_SUCCESS(status) && !NT_SUCCESS(released))status=released;
     }
     return status;

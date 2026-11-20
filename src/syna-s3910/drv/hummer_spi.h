@@ -26,9 +26,9 @@ struct hsp_cfg
 
 typedef struct _HSP_CTX
 {
+    WDFDEVICE Device;
     PUCHAR Se;
     PUCHAR Gpi;
-    PUCHAR Tlmm;
     PUCHAR Gcc;
     PUCHAR Smmu;
 
@@ -72,7 +72,6 @@ HspInit (
     _In_  WDFDEVICE Device,
     _In_  PUCHAR   Se,
     _In_  PUCHAR   Gpi,
-    _In_  PUCHAR   Tlmm,
     _In_  PUCHAR   Gcc,
     _In_  PUCHAR   Smmu
     );
@@ -88,7 +87,7 @@ HspStartDma (
     );
 
 NTSTATUS
-HspResetAndConfigurePins (_In_ PUCHAR Tlmm);
+HspResetAndConfigurePins (_In_ PUCHAR Pins,_In_ PUCHAR Reset);
 
 NTSTATUS
 HspConfigureSmmu (_Inout_ PHSP_CTX Ctx);

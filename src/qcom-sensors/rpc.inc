@@ -10,12 +10,12 @@ typedef struct {
     ULONG Offset[16],Result,Pid;BOOLEAN Sent,ReleaseSent;ULONGLONG Release;
 } RPC_CALL;
 static struct {
-    FAST_MUTEX Lock;PSIA_LINK Link;PKEVENT Work;volatile LONG64 FastUntil;ULONG Rcid,Count,Iid[8],Size[8],LocalIid;
+    KMUTEX Lock;PSIA_LINK Link;PKEVENT Work;volatile LONG64 FastUntil;ULONG Rcid,Count,Iid[8],Size[8],LocalIid;
     BOOLEAN Opening,Acked,Requested,Free[8],Closing;ULONGLONG Sequence;
     RPC_CALL Call[2];
 } Rpc;
 VOID QcomRpcInit(VOID) {
-    ExInitializeFastMutex(&Rpc.Lock);for(ULONG i=0;i<RTL_NUMBER_OF(Rpc.Call);i++)KeInitializeEvent(&Rpc.Call[i].Event,NotificationEvent,FALSE);
+    KeInitializeMutex(&Rpc.Lock,0);for(ULONG i=0;i<RTL_NUMBER_OF(Rpc.Call);i++)KeInitializeEvent(&Rpc.Call[i].Event,NotificationEvent,FALSE);
 }
 BOOLEAN QcomRpcFast(VOID) {
     if(KeQueryInterruptTime()>=(ULONGLONG)InterlockedCompareExchange64(&Rpc.FastUntil,0,0))return FALSE;
@@ -34,7 +34,7 @@ NTSTATUS QcomRpcInvoke(PIRP irp,PULONG bytes) {
         if(a->Offset<base || a->Offset>limit || a->Length>limit-a->Offset)return STATUS_INVALID_PARAMETER;
         used=(used+127)&~127u;if(a->Length>RPC_DATA-used)return STATUS_BUFFER_TOO_SMALL;used+=a->Length;
     }
-    ExAcquireFastMutex(&Rpc.Lock);RPC_CALL *c=NULL;NTSTATUS status=STATUS_DEVICE_BUSY;
+    KeWaitForSingleObject(&Rpc.Lock,Executive,KernelMode,FALSE,NULL);RPC_CALL *c=NULL;NTSTATUS status=STATUS_DEVICE_BUSY;
     if(!Rpc.Link || Rpc.Closing){status=STATUS_DEVICE_NOT_CONNECTED;goto done;}
     for(ULONG i=0;i<RTL_NUMBER_OF(Rpc.Call);i++)if(Rpc.Call[i].Release)goto done;
     for(ULONG i=0;i<RTL_NUMBER_OF(Rpc.Call);i++)if((!Rpc.Call[i].File || Rpc.Call[i].File==p->FileObject) && !InterlockedCompareExchange(&Rpc.Call[i].State,-1,0)){c=&Rpc.Call[i];break;}
@@ -59,9 +59,9 @@ NTSTATUS QcomRpcInvoke(PIRP irp,PULONG bytes) {
     KIRQL level;IoAcquireCancelSpinLock(&level);
     if(irp->Cancel){IoReleaseCancelSpinLock(level);status=STATUS_CANCELLED;goto reset;}
     IoSetCancelRoutine(irp,RpcCancel);InterlockedExchange(&c->State,1);IoReleaseCancelSpinLock(level);
-    InterlockedExchange64(&Rpc.FastUntil,(LONG64)(KeQueryInterruptTime()+1000000));if(Rpc.Work)KeSetEvent(Rpc.Work,IO_NO_INCREMENT,FALSE);ExReleaseFastMutex(&Rpc.Lock);
+    InterlockedExchange64(&Rpc.FastUntil,(LONG64)(KeQueryInterruptTime()+1000000));if(Rpc.Work)KeSetEvent(Rpc.Work,IO_NO_INCREMENT,FALSE);KeReleaseMutex(&Rpc.Lock,FALSE);
     KeWaitForSingleObject(&c->Event,Executive,KernelMode,FALSE,NULL);
-    IoAcquireCancelSpinLock(&level);IoSetCancelRoutine(irp,NULL);IoReleaseCancelSpinLock(level);ExAcquireFastMutex(&Rpc.Lock);
+    IoAcquireCancelSpinLock(&level);IoSetCancelRoutine(irp,NULL);IoReleaseCancelSpinLock(level);KeWaitForSingleObject(&Rpc.Lock,Executive,KernelMode,FALSE,NULL);
     status=Rpc.Closing || !Rpc.Link?STATUS_DEVICE_NOT_CONNECTED:irp->Cancel?STATUS_CANCELLED:STATUS_SUCCESS;
     if(NT_SUCCESS(status) && InterlockedCompareExchange(&c->State,0,0)==3) {
         q->Result=c->Result;*bytes=base;
@@ -75,7 +75,7 @@ NTSTATUS QcomRpcInvoke(PIRP irp,PULONG bytes) {
 reset:
     InterlockedExchange(&c->State,0);
 done:
-    ExReleaseFastMutex(&Rpc.Lock);return status;
+    KeReleaseMutex(&Rpc.Lock,FALSE);return status;
 }
 static VOID RpcRelease(RPC_CALL *c) {
     if(!c->Data || !c->Pid || c->Release)return;
@@ -84,9 +84,9 @@ static VOID RpcRelease(RPC_CALL *c) {
     c->ReleaseSent=FALSE;KeMemoryBarrier();c->Release=(++Rpc.Sequence<<16)|((ULONGLONG)(c-Rpc.Call+3)<<8)|2;
 }
 VOID QcomRpcDetach(PFILE_OBJECT file) {
-    ExAcquireFastMutex(&Rpc.Lock);
+    KeWaitForSingleObject(&Rpc.Lock,Executive,KernelMode,FALSE,NULL);
     for(ULONG i=0;i<RTL_NUMBER_OF(Rpc.Call);i++)if(Rpc.Call[i].File==file){RpcRelease(&Rpc.Call[i]);KeSetEvent(&Rpc.Call[i].Event,IO_NO_INCREMENT,FALSE);}
-    ExReleaseFastMutex(&Rpc.Lock);
+    KeReleaseMutex(&Rpc.Lock,FALSE);
 }
 static BOOLEAN RpcSend(PSIA_LINK l,const RPC_MESSAGE *message) {
     if(!Rpc.Acked || !Rpc.Rcid)return FALSE;ULONG i;
@@ -153,26 +153,26 @@ static BOOLEAN RpcHandle(PSIA_LINK l,USHORT cmd,USHORT p1,ULONG p2,ULONG tail,co
     if(cmd==GLINK_CMD_CLOSE){SiaGlinkCmd(l,GLINK_CMD_CLOSE_ACK,p1,0);Rpc.Rcid=0;Rpc.Acked=FALSE;Rpc.Closing=TRUE;for(ULONG i=0;i<RTL_NUMBER_OF(Rpc.Call);i++)KeSetEvent(&Rpc.Call[i].Event,IO_NO_INCREMENT,FALSE);return TRUE;}return FALSE;
 }
 static VOID RpcStart(PSIA_DEVICE d) {
-    ExAcquireFastMutex(&Rpc.Lock);Rpc.Link=d->Link;Rpc.Work=&d->WorkEvent;Rpc.FastUntil=0;Rpc.Closing=FALSE;Rpc.Opening=FALSE;Rpc.Acked=FALSE;Rpc.Rcid=Rpc.Count=0;Rpc.Requested=FALSE;ExReleaseFastMutex(&Rpc.Lock);
+    KeWaitForSingleObject(&Rpc.Lock,Executive,KernelMode,FALSE,NULL);Rpc.Link=d->Link;Rpc.Work=&d->WorkEvent;Rpc.FastUntil=0;Rpc.Closing=FALSE;Rpc.Opening=FALSE;Rpc.Acked=FALSE;Rpc.Rcid=Rpc.Count=0;Rpc.Requested=FALSE;KeReleaseMutex(&Rpc.Lock,FALSE);
 }
 static VOID RpcStop(PSIA_DEVICE d) {
-    PSIA_LINK l=d->Link;ExAcquireFastMutex(&Rpc.Lock);Rpc.Closing=TRUE;
+    PSIA_LINK l=d->Link;KeWaitForSingleObject(&Rpc.Lock,Executive,KernelMode,FALSE,NULL);Rpc.Closing=TRUE;
     for(ULONG i=0;i<RTL_NUMBER_OF(Rpc.Call);i++) {
         RPC_CALL *c=&Rpc.Call[i];KeSetEvent(&c->Event,IO_NO_INCREMENT,FALSE);if(!c->Data || !c->Pid)continue;
         RpcRelease(c);
     }
-    ExReleaseFastMutex(&Rpc.Lock);
+    KeReleaseMutex(&Rpc.Lock,FALSE);
     for(ULONG tick=0;tick<1000;tick++) {
         BOOLEAN busy=FALSE;for(ULONG i=0;i<RTL_NUMBER_OF(Rpc.Call);i++)busy|=Rpc.Call[i].Sent || Rpc.Call[i].Release!=0;
         if(!busy)break;
         RpcPoll(l);SiaLinkPoll(d);SiaSleep(1);
     }
     if(Rpc.Acked)SiaGlinkCmd(l,GLINK_CMD_CLOSE,RPC_CID,0);
-    ExAcquireFastMutex(&Rpc.Lock);Rpc.Link=NULL;Rpc.Work=NULL;
+    KeWaitForSingleObject(&Rpc.Lock,Executive,KernelMode,FALSE,NULL);Rpc.Link=NULL;Rpc.Work=NULL;
     for(ULONG i=0;i<RTL_NUMBER_OF(Rpc.Call);i++) {
         RPC_CALL *c=&Rpc.Call[i];if(!c->Data)continue;
         if(!c->Sent && !c->Release){c->File=NULL;MmFreeContiguousMemorySpecifyCache(c->Data,RPC_SIZE,MmNonCached);c->Data=NULL;SiaDspMemoryRelease(FALSE);}
         else d->RetainedDma=TRUE;
     }
-    ExReleaseFastMutex(&Rpc.Lock);
+    KeReleaseMutex(&Rpc.Lock,FALSE);
 }

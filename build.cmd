@@ -18,9 +18,12 @@ if /i "%NAME%"=="qcom-battery" (set "NAME=qcom-battery"& set "TARGET=qcom_batter
 if /i "%NAME%"=="qcom-cpupower" (set "NAME=qcom-cpupower"& set "TARGET=qcom_cpupower")
 if /i "%NAME%"=="qcom-keys" (set "NAME=qcom-keys"& set "TARGET=qcom_keys")
 if /i "%NAME%"=="qcom-sensors" (set "NAME=qcom-sensors"& set "TARGET=qcom_sensors")
+if /i "%NAME%"=="qcom-nfc" (set "NAME=qcom-nfc"& set "TARGET=qcom_nfc")
 if /i "%NAME%"=="qcom-cam" (set "NAME=qcom-cam"& set "TARGET=qcom_cam")
 if /i "%NAME%"=="qcom-gpu" (set "NAME=qcom-gpu"& set "TARGET=qcom_gpu")
 if not defined TARGET goto invalid
+set "DRIVER_EXT=sys"
+if /i "%NAME%"=="qcom-nfc" set "DRIVER_EXT=dll"
 set "CREDENTIAL="
 if /i "%NAME%"=="qcom-audio" (
   set "CREDENTIAL=%ROOT%\fw\charge\credential.bin"
@@ -63,7 +66,7 @@ if defined GPU_PACKAGE call :build_gpu_renderer
 if errorlevel 1 exit /b 1
 if defined GPU_PACKAGE (
   if not exist "%BIN%" mkdir "%BIN%"
-  for %%F in (a830_umd.dll a830_gpu.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll freedreno_icd.json freedreno_icd_x64.json msvcp140.dll vcruntime140.dll) do (
+  for %%F in (a830_umd.dll a830_umd_arm64.dll a830_umd_x64.dll a830_gpu.dll a830_gpu_x64.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll freedreno_icd.json freedreno_icd_x64.json msvcp140.dll vcruntime140.dll) do (
     if not exist "%GPU_RENDER_PACKAGE%\%%F" (
       echo ERROR GPU renderer output is missing: %GPU_RENDER_PACKAGE%\%%F
       exit /b 1
@@ -77,12 +80,12 @@ if defined GPU_PACKAGE (
 "%MSB%" "%PROJECT%" /t:Rebuild /p:Configuration=Release /p:Platform=ARM64 /p:WindowsTargetPlatformVersion=10.0.26100.0 /p:OutDir="%BIN%/" /p:IntDir="%WORK%\obj/" /p:SkipPackageVerification=true /p:SignMode=Off /v:minimal
 if errorlevel 1 exit /b 1
 if defined GPU_PACKAGE for %%E in (sys inf cat) do if exist "%DST%\*.%%E" del /q "%DST%\*.%%E"
-copy /y "%BIN%\%TARGET%.sys" "%DST%\%TARGET%.sys" >nul
+copy /y "%BIN%\%TARGET%.%DRIVER_EXT%" "%DST%\%TARGET%.%DRIVER_EXT%" >nul
 if errorlevel 1 exit /b 1
 copy /y "%BIN%\%TARGET%.inf" "%DST%\%TARGET%.inf" >nul
 if errorlevel 1 exit /b 1
 if defined GPU_PACKAGE (
-  for %%F in (a830_umd.dll a830_gpu.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll) do (
+  for %%F in (a830_umd.dll a830_umd_arm64.dll a830_umd_x64.dll a830_gpu.dll a830_gpu_x64.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll) do (
     copy /y "%BIN%\%%F" "%DST%\%%F" >nul
     if errorlevel 1 exit /b 1
     "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%%F"
@@ -93,7 +96,7 @@ if defined GPU_PACKAGE (
     if errorlevel 1 exit /b 1
   )
 )
-"%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%TARGET%.sys"
+"%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%TARGET%.%DRIVER_EXT%"
 if errorlevel 1 exit /b 1
 if /i "%NAME%"=="qcom-cam" (
   for %%F in (qcom_cam_video.sys qcom_cam_video.inf) do (
@@ -152,7 +155,7 @@ dir "%DST%" /b
 exit /b 0
 
 :build_all
-for %%D in (syna-s3910 qcom-audio qcom-bluetooth qcom-wcn7861 qcom-battery qcom-cpupower qcom-keys qcom-sensors qcom-cam qcom-gpu) do (
+for %%D in (syna-s3910 qcom-audio qcom-bluetooth qcom-wcn7861 qcom-battery qcom-cpupower qcom-keys qcom-sensors qcom-nfc qcom-cam qcom-gpu) do (
   echo.
   echo Building %%D...
   call "%~f0" %%D
@@ -237,6 +240,7 @@ echo        build.cmd qcom-battery
 echo        build.cmd qcom-cpupower
 echo        build.cmd qcom-keys
 echo        build.cmd qcom-sensors
+echo        build.cmd qcom-nfc
 echo        build.cmd qcom-cam
 echo        build.cmd qcom-gpu
 echo        build.cmd install-fw -WindowsDirectory "W:\Windows" [-BluetoothAddress "XX:XX:XX:XX:XX:XX"] [-WhatIf] [-Force]
@@ -417,98 +421,125 @@ if not shader_source.exists():
     with tarfile.open(archive) as archive_file:
         archive_file.extractall(output, filter='data')
 umd = local / 'umd'
-umd_build = output / 'umd-arm64'
-umd_build.mkdir(parents=True, exist_ok=True)
-write(umd_build / 'config.h', f"""#define PACKAGE_VERSION "{vkd3d_version}"
-#define PACKAGE_STRING "vkd3d {vkd3d_version}"
-#define HAVE_BUILTIN_CLZ 1
-#define HAVE_BUILTIN_POPCOUNT 1
-#define HAVE_BUILTIN_ADD_OVERFLOW 1
-#define HAVE_ATOMIC_EXCHANGE_N 1
-#define HAVE_SYNC_ADD_AND_FETCH 1
-#define HAVE_SYNC_BOOL_COMPARE_AND_SWAP 1
-#define HAVE_SPIRV_UNIFIED1_SPIRV_H 1
-#define HAVE_SPIRV_UNIFIED1_GLSL_STD_450_H 1
-#define HAVE_STDINT_H 1
-#define HAVE_INTTYPES_H 1
-""")
-write(umd_build / 'unistd.h', '#pragma once\n#include <io.h>\n#include <process.h>\n#define isatty _isatty\n#define fileno _fileno\n#define getpid _getpid\n')
-write(umd_build / 'vkd3d_version.h', '#define VKD3D_VCS_ID "' + vkd3d_version + '"\n')
-spirv = umd_build / 'spirv/unified1'
-spirv.mkdir(parents=True, exist_ok=True)
-for name in ['spirv.h', 'GLSL.std.450.h']:
-    copy(source / 'src/compiler/spirv' / name, spirv / name)
-shader = shader_source / 'libs/vkd3d-shader'
-for name in ['hlsl', 'preproc']:
-    if not (umd_build / (name + '.tab.c')).exists():
-        run('bison', '-d', '-o', umd_build / (name + '.tab.c'), shader / (name + '.y'))
-        run('flex', '-o', umd_build / (name + '.yy.c'), shader / (name + '.l'))
-includes = [umd_build, shader_source / 'include', shader_source / 'include/private', shader,
-            source / 'include', source / 'src', source / 'src/compiler/spirv', vulkan,
-            local, root / 'src/qcom-gpu/wddm', umd, build / 'src',
-            source / 'src/gallium/include', source / 'src/gallium/auxiliary', source / 'src/freedreno/drm']
-args = ['/nologo', '/O2', '/MD', '/DNDEBUG', '/D_CRT_SECURE_NO_WARNINGS', '/D_USE_MATH_DEFINES',
-        '/DLIBVKD3D_SHADER_SOURCE', '/DVKD3D_NO_TRACE_MESSAGES', '/DVKD3D_NO_DEBUG_MESSAGES', '/DUSE_GCC_ATOMIC_BUILTINS', '/w']
-args += ['/I' + str(path) for path in includes]
-files = list(shader.glob('*.c'))
-files += [umd_build / (name + suffix) for name in ['hlsl', 'preproc'] for suffix in ['.tab.c', '.yy.c']]
-files += [shader_source / 'libs/vkd3d-common' / (name + '.c') for name in ['debug', 'memory', 'error', 'utf8']]
+def build_forwarder(directory, target, definitions):
+    directory.mkdir(parents=True, exist_ok=True)
+    objects = []
+    for arch, triple, machine in [('arm64', 'aarch64', 'arm64'), ('x64', 'arm64ec', 'x64')]:
+        definition = directory / (arch + '.def')
+        write(definition, definitions[arch])
+        obj = directory / (arch + '.obj')
+        run(*[arg.replace('aarch64-pc-windows-msvc', triple + '-pc-windows-msvc') for arg in compiler],
+            '/c', '/Zl', '/GS-', '/Fo' + str(obj), local / 'd3d12_forward.c')
+        library = directory / (arch + '.lib')
+        run('lld-link', '/lib', '/machine:' + machine, '/def:' + str(definition), '/out:' + str(library))
+        objects += [obj, library]
+    run('lld-link', '/dll', '/noentry', '/nodefaultlib', '/machine:arm64x',
+        '/defarm64native:' + str(directory / 'arm64.def'), '/def:' + str(directory / 'x64.def'),
+        *objects, '/out:' + str(target), '/implib:' + str(directory / 'forward.lib'))
 
 
-def compile_file(path):
-    obj = umd_build / (path.stem + '.obj')
-    cpp = path.suffix == '.cpp'
-    if cpp or not obj.exists() or obj.stat().st_mtime < path.stat().st_mtime:
-        flags = ['/clang:-ferror-limit=8', '/std:c++17', '/EHa'] if cpp else ['/std:c11']
-        options = [arg for arg in args if arg != '/w'] + ['/W4', '/WX', '/clang:-Wno-unused-parameter', '/clang:-Wno-missing-field-initializers'] if cpp else args
-        result = subprocess.run(compiler + options + flags + ['/c', str(path), '/Fo' + str(obj)], capture_output=True, text=True)
-        if result.returncode:
-            print(result.stdout + result.stderr, flush=True)
-            raise RuntimeError(str(path))
-    return obj
+def build_native(arch, build, compiler, link):
+    umd_build = output / ('umd-' + arch)
+    suffix = '_x64' if arch == 'x64' else ''
+    machine = 'X64' if arch == 'x64' else 'ARM64'
+    umd_build.mkdir(parents=True, exist_ok=True)
+    write(umd_build / 'config.h', f"""#define PACKAGE_VERSION "{vkd3d_version}"
+    #define PACKAGE_STRING "vkd3d {vkd3d_version}"
+    #define HAVE_BUILTIN_CLZ 1
+    #define HAVE_BUILTIN_POPCOUNT 1
+    #define HAVE_BUILTIN_ADD_OVERFLOW 1
+    #define HAVE_ATOMIC_EXCHANGE_N 1
+    #define HAVE_SYNC_ADD_AND_FETCH 1
+    #define HAVE_SYNC_BOOL_COMPARE_AND_SWAP 1
+    #define HAVE_SPIRV_UNIFIED1_SPIRV_H 1
+    #define HAVE_SPIRV_UNIFIED1_GLSL_STD_450_H 1
+    #define HAVE_STDINT_H 1
+    #define HAVE_INTTYPES_H 1
+    """)
+    write(umd_build / 'unistd.h', '#pragma once\n#include <io.h>\n#include <process.h>\n#define isatty _isatty\n#define fileno _fileno\n#define getpid _getpid\n')
+    write(umd_build / 'vkd3d_version.h', '#define VKD3D_VCS_ID "' + vkd3d_version + '"\n')
+    spirv = umd_build / 'spirv/unified1'
+    spirv.mkdir(parents=True, exist_ok=True)
+    for name in ['spirv.h', 'GLSL.std.450.h']:
+        copy(source / 'src/compiler/spirv' / name, spirv / name)
+    shader = shader_source / 'libs/vkd3d-shader'
+    for name in ['hlsl', 'preproc']:
+        if not (umd_build / (name + '.tab.c')).exists():
+            run('bison', '-d', '-o', umd_build / (name + '.tab.c'), shader / (name + '.y'))
+            run('flex', '-o', umd_build / (name + '.yy.c'), shader / (name + '.l'))
+    includes = [umd_build, shader_source / 'include', shader_source / 'include/private', shader,
+                source / 'include', source / 'src', source / 'src/compiler/spirv', vulkan,
+                local, root / 'src/qcom-gpu/wddm', umd, build / 'src',
+                source / 'src/gallium/include', source / 'src/gallium/auxiliary', source / 'src/freedreno/drm']
+    args = ['/nologo', '/O2', '/MT' if arch == 'x64' else '/MD', '/DNDEBUG', '/D_CRT_SECURE_NO_WARNINGS', '/D_USE_MATH_DEFINES',
+            '/DLIBVKD3D_SHADER_SOURCE', '/DVKD3D_NO_TRACE_MESSAGES', '/DVKD3D_NO_DEBUG_MESSAGES', '/DUSE_GCC_ATOMIC_BUILTINS', '/w']
+    args += ['/I' + str(path) for path in includes]
+    files = list(shader.glob('*.c'))
+    files += [umd_build / (name + suffix) for name in ['hlsl', 'preproc'] for suffix in ['.tab.c', '.yy.c']]
+    files += [shader_source / 'libs/vkd3d-common' / (name + '.c') for name in ['debug', 'memory', 'error', 'utf8']]
 
 
-with ThreadPoolExecutor(max_workers=6) as pool:
-    objects = list(pool.map(compile_file, files))
-    objects += list(pool.map(compile_file, [
-        umd / (name + '.cpp') for name in ['core', 'driver', 'pipeline', 'query', 'resource', 'shader', 'state']]))
-    objects += [compile_file(root / 'src/qcom-gpu/dx12/native.cpp')]
-definition = umd_build / 'a830_umd.def'
-write(definition, 'LIBRARY a830_umd\nEXPORTS\nOpenAdapter10\nOpenAdapter10_2\nOpenAdapter12\n')
-run('lld-link', '/DLL', '/MACHINE:ARM64', '/OUT:' + str(umd_build / 'a830_umd.dll'),
-    '/DEF:' + str(definition), '/MAP:' + str(umd_build / 'a830_umd.map'), *link,
-    *objects, 'kernel32.lib', 'user32.lib', 'gdi32.lib', 'advapi32.lib', 'ucrt.lib',
-    'vcruntime.lib', 'msvcrt.lib', 'oldnames.lib', 'uuid.lib')
-copy(umd_build / 'a830_umd.dll', package / 'a830_umd.dll')
-native_libs = ['src/gallium/auxiliary/libgallium.a', 'src/gallium/drivers/freedreno/libfreedreno.a',
-    'src/compiler/nir/libnir.a', 'src/compiler/spirv/libvtn.a', 'src/compiler/libcompiler.a',
-    'src/freedreno/common/libfreedreno_common.a', 'src/freedreno/drm/libfreedreno_drm.a',
-    'src/freedreno/ir2/libfreedreno_ir2.a', 'src/freedreno/ir3/libfreedreno_ir3.a',
-    'src/freedreno/isa/libir3encode.a', 'src/freedreno/isa/libir3decode.a', 'src/compiler/isaspec/libisaspec.a',
-    'src/freedreno/fdl/libfreedreno_layout.a', 'src/freedreno/perfcntrs/libfreedreno_perfcntrs.a',
-    'src/util/libmesa_util.a', 'src/util/libmesa_util_simd.a', 'src/util/libxmlconfig.a',
-    'src/c11/impl/libmesa_util_c11.a', 'src/util/blake3/libblake3.a', 'subprojects/zlib-1.3.1/libz.a']
-run('ninja', '-C', build, *native_libs)
-commands = subprocess.check_output(['ninja', '-C', str(build), '-t', 'commands', native_libs[1]], text=True).splitlines()
-native_args = shlex.split(next(c for c in commands if '/c ../source/src/gallium/drivers/freedreno/freedreno_resource.c' in c))
-native_args = [a for a in native_args[:native_args.index('/c')] if not a.startswith(('/Fo', '/Fd')) and a != '/showIncludes']
-native_object = umd_build / 'native_gpu.obj'
-subprocess.run([*native_args, '-I' + str(local), '-I' + str(source / 'src/freedreno/drm'),
-    '-I' + str(source / 'src/gallium/drivers'), '-I' + str(build / 'src/compiler/spirv'),
-    '/c', str(local / 'native_gpu.c'), '/Fo' + str(native_object)], cwd=build, check=True)
-native_def = umd_build / 'a830_gpu.def'
-write(native_def, 'LIBRARY a830_gpu\nEXPORTS\nA830GpuScreen\nA830GpuDestroyScreen\nA830GpuContext\nA830GpuResource\nA830GpuShader\nA830GpuShaderStreamOutput\nA830GpuStreamTarget\nA830GpuViews\nA830GpuClear\n')
-run('lld-link', '/DLL', '/MACHINE:ARM64', '/OUT:' + str(umd_build / 'a830_gpu.dll'),
-    '/DEF:' + str(native_def), *link, native_object, *[build / p for p in native_libs],
-    'kernel32.lib', 'user32.lib', 'gdi32.lib', 'advapi32.lib', 'shell32.lib', 'ole32.lib',
-    'uuid.lib', 'ws2_32.lib', 'synchronization.lib')
-copy(umd_build / 'a830_gpu.dll', package / 'a830_gpu.dll')
+    def compile_file(path):
+        obj = umd_build / (path.stem + '.obj')
+        cpp = path.suffix == '.cpp'
+        if cpp or not obj.exists() or obj.stat().st_mtime < path.stat().st_mtime:
+            flags = ['/clang:-ferror-limit=8', '/std:c++17', '/EHa'] if cpp else ['/std:c11']
+            options = [arg for arg in args if arg != '/w'] + ['/W4', '/WX', '/clang:-Wno-unused-parameter', '/clang:-Wno-missing-field-initializers'] if cpp else args
+            result = subprocess.run(compiler + options + flags + ['/c', str(path), '/Fo' + str(obj)], capture_output=True, text=True)
+            if result.returncode:
+                print(result.stdout + result.stderr, flush=True)
+                raise RuntimeError(str(path))
+        return obj
+
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        objects = list(pool.map(compile_file, files))
+        objects += list(pool.map(compile_file, [
+            umd / (name + '.cpp') for name in ['core', 'driver', 'pipeline', 'query', 'resource', 'shader', 'state']]))
+        objects += [compile_file(root / 'src/qcom-gpu/dx12/native.cpp')]
+    definition = umd_build / 'a830_umd.def'
+    write(definition, 'LIBRARY a830_umd\nEXPORTS\nOpenAdapter10\nOpenAdapter10_2\nOpenAdapter12\n')
+    run('lld-link', '/DLL', '/MACHINE:' + machine, '/OUT:' + str(umd_build / ('a830_umd_' + arch + '.dll')),
+        '/DEF:' + str(definition), '/MAP:' + str(umd_build / 'a830_umd.map'), *link,
+        *objects, 'kernel32.lib', 'user32.lib', 'gdi32.lib', 'advapi32.lib', 'oldnames.lib', 'uuid.lib')
+    copy(umd_build / ('a830_umd_' + arch + '.dll'), package / ('a830_umd_' + arch + '.dll'))
+    native_libs = ['src/gallium/auxiliary/libgallium.a', 'src/gallium/drivers/freedreno/libfreedreno.a',
+        'src/compiler/nir/libnir.a', 'src/compiler/spirv/libvtn.a', 'src/compiler/libcompiler.a',
+        'src/freedreno/common/libfreedreno_common.a', 'src/freedreno/drm/libfreedreno_drm.a',
+        'src/freedreno/ir2/libfreedreno_ir2.a', 'src/freedreno/ir3/libfreedreno_ir3.a',
+        'src/freedreno/isa/libir3encode.a', 'src/freedreno/isa/libir3decode.a', 'src/compiler/isaspec/libisaspec.a',
+        'src/freedreno/fdl/libfreedreno_layout.a', 'src/freedreno/perfcntrs/libfreedreno_perfcntrs.a',
+        'src/util/libmesa_util.a', 'src/util/libmesa_util_simd.a', 'src/util/libxmlconfig.a',
+        'src/c11/impl/libmesa_util_c11.a', 'src/util/blake3/libblake3.a', 'subprojects/zlib-1.3.1/libz.a']
+    run('ninja', '-C', build, *native_libs)
+    commands = subprocess.check_output(['ninja', '-C', str(build), '-t', 'commands', native_libs[1]], text=True).splitlines()
+    native_args = shlex.split(next(c for c in commands if '/c ../source/src/gallium/drivers/freedreno/freedreno_resource.c' in c))
+    native_args = [a for a in native_args[:native_args.index('/c')] if not a.startswith(('/Fo', '/Fd')) and a != '/showIncludes']
+    native_object = umd_build / 'native_gpu.obj'
+    subprocess.run([*native_args, '-I' + str(local), '-I' + str(source / 'src/freedreno/drm'),
+        '-I' + str(source / 'src/gallium/drivers'), '-I' + str(build / 'src/compiler/spirv'),
+        '/c', str(local / 'native_gpu.c'), '/Fo' + str(native_object)], cwd=build, check=True)
+    native_def = umd_build / 'a830_gpu.def'
+    write(native_def, 'LIBRARY a830_gpu\nEXPORTS\nA830GpuScreen\nA830GpuDestroyScreen\nA830GpuContext\nA830GpuResource\nA830GpuShader\nA830GpuShaderStreamOutput\nA830GpuStreamTarget\nA830GpuViews\nA830GpuClear\n')
+    run('lld-link', '/DLL', '/MACHINE:' + machine, '/OUT:' + str(umd_build / ('a830_gpu' + suffix + '.dll')),
+        '/DEF:' + str(native_def), *link, native_object, *[build / p for p in native_libs],
+        'kernel32.lib', 'user32.lib', 'gdi32.lib', 'advapi32.lib', 'shell32.lib', 'ole32.lib',
+        'uuid.lib', 'ws2_32.lib', 'synchronization.lib')
+    copy(umd_build / ('a830_gpu' + suffix + '.dll'), package / ('a830_gpu' + suffix + '.dll'))
+
+
+build_native('arm64', build, compiler, link)
 copy(shader_source / 'COPYING', package / 'COPYING.vkd3d')
 cross_x64 = output / 'cross-x64.ini'
 write(cross_x64, cross.read_text().replace('aarch64', 'x86_64').replace("'arm64'", "'x86_64'").replace('/arm64', '/x64'))
 options_x64 = [option.replace('a830_gl', 'a830_gl_x64') for option in options] + ['-Db_vscrt=mt']
 build_x64 = output / 'x64'
 build_mesa(build_x64, cross_x64, options_x64, 'src/freedreno/vulkan/vulkan_freedreno.dll', 'src/gallium/targets/wgl/a830_gl_x64.dll', 'src/gallium/targets/libgl-gdi/opengl32.dll')
+build_native('x64', build_x64, [arg.replace('aarch64', 'x86_64') for arg in compiler],
+             [arg.replace('/arm64', '/x64') for arg in link])
+build_forwarder(output / 'umd-forwarder', package / 'a830_umd.dll', {
+    arch: 'EXPORTS\n' + ''.join(name + '=a830_umd_' + arch + '.' + name + '\n'
+        for name in ['OpenAdapter10', 'OpenAdapter10_2', 'OpenAdapter12']) for arch in ['arm64', 'x64']})
 copy(build_x64 / 'src/gallium/targets/wgl/a830_gl_x64.dll', package / 'a830_gl_x64.dll')
 copy(build_x64 / 'src/freedreno/vulkan/vulkan_freedreno.dll', package / 'vulkan_freedreno_x64.dll')
 write(package / 'freedreno_icd_x64.json', (package / 'freedreno_icd.json').read_text().replace('vulkan_freedreno.dll', 'vulkan_freedreno_x64.dll'))
@@ -575,24 +606,15 @@ exports = {
         'D3D12PIXReportCounter', 'D3D12SerializeRootSignature', 'D3D12SerializeVersionedRootSignature',
         'GetBehaviorValue', 'SetAppCompatStringPointer', 'D3D12DeviceRemovedExtendedData']}
 translated = set(exports['x64'][2:4] + exports['x64'][6:10] + exports['x64'][14:16])
-objects = []
-for arch, target, machine in [('arm64', 'aarch64', 'arm64'), ('x64', 'arm64ec', 'x64')]:
-    definition = forwarder / (arch + '.def')
+definitions = {}
+for arch in ['arm64', 'x64']:
     entries = []
     for ordinal, name in enumerate(exports[arch], 99):
         module = 'qcom_d3d12_' + arch if name in translated else 'qcom_d3d12_system'
         entries.append('    ' + (name or 'Ordinal99') + '=' + module + '.' + (name or '#99') +
             ' @' + str(ordinal) + ('' if name else ' NONAME'))
-    write(definition, 'EXPORTS\n' + '\n'.join(entries) + '\n')
-    obj = forwarder / (arch + '.obj')
-    run(*[arg.replace('aarch64-pc-windows-msvc', target + '-pc-windows-msvc') for arg in compiler],
-        '/c', '/Zl', '/GS-', '/Fo' + str(obj), local / 'd3d12_forward.c')
-    library = forwarder / (arch + '.lib')
-    run('lld-link', '/lib', '/machine:' + machine, '/def:' + str(definition), '/out:' + str(library))
-    objects += [obj, library]
-run('lld-link', '/dll', '/noentry', '/nodefaultlib', '/machine:arm64x',
-    '/defarm64native:' + str(forwarder / 'arm64.def'), '/def:' + str(forwarder / 'x64.def'),
-    *objects, '/out:' + str(destination / 'd3d12.dll'), '/implib:' + str(forwarder / 'd3d12.lib'))
+    definitions[arch] = 'EXPORTS\n' + '\n'.join(entries) + '\n'
+build_forwarder(forwarder, destination / 'd3d12.dll', definitions)
 copy(local / 'install-d3d12.ps1', destination / 'install-d3d12.ps1')
 for name, path in [('vkd3d', d3d12_source / 'LICENSE'), ('dxvk', dxgi_source / 'LICENSE'),
     ('dxil-spirv', d3d12_source / 'subprojects/dxil-spirv/LICENSE.MIT'),

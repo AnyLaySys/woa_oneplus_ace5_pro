@@ -62,7 +62,7 @@
     <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-07'">37</SiaRevision>
     <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-08'">10</SiaRevision>
     <SiaRevision Condition="'$(SiaRevision)' == '' and '$(SiaVersionDate)' == '2026-11-09'">2</SiaRevision>
-    <SiaRevision Condition="'$(SiaRevision)' == ''">70</SiaRevision>
+    <SiaRevision Condition="'$(SiaRevision)' == ''">71</SiaRevision>
 
     <SiaDriverDate>$([System.DateTime]::Parse('$(SiaVersionDate)').ToString('MM/dd/yyyy'))</SiaDriverDate>
 

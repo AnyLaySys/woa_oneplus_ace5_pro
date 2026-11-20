@@ -15,7 +15,6 @@
 #define SIA_GCC_PHYS        0x00100000ull
 #define SIA_GCC_SIZE        0x00060000u
 #define SIA_TLMM_PHYS       0x0F100000ull
-#define SIA_TLMM_SIZE       0x000A6000u
 
 #define SIA_GPR_HEADER      24u
 #define SIA_GPR_MAX         512u
@@ -73,10 +72,11 @@ typedef struct _SIA_PCM {
 } SIA_PCM, *PSIA_PCM;
 
 typedef struct _SIA_DEVICE {
+    PDEVICE_OBJECT Pdo;
     PUCHAR Se;
     SIZE_T SeSize;
     PUCHAR Gcc;
-    PUCHAR Tlmm;
+    PUCHAR Pins[5];
     PSIA_LINK Link;
     HANDLE Thread;
     KEVENT WorkEvent;
@@ -119,10 +119,10 @@ VOID QcomRpcInit(VOID);
 VOID QcomRpcDetach(PFILE_OBJECT file);
 NTSTATUS QcomRpcInvoke(PIRP Irp,PULONG bytes);
 ULONG SiaVolumeLimits(VOID);
-VOID SiaDspMemoryInit(VOID);
 NTSTATUS SiaDspMemoryAcquire(VOID);
 VOID SiaDspMemoryRelease(BOOLEAN retain);
-NTSTATUS SiaHardwareStart (PSIA_DEVICE Dev, PCM_PARTIAL_RESOURCE_DESCRIPTOR Resource);
+NTSTATUS SiaHardwareStart (PSIA_DEVICE Dev,PDEVICE_OBJECT Device,PCM_PARTIAL_RESOURCE_DESCRIPTOR Resource);
+PUCHAR SiaPin(PSIA_DEVICE Dev,ULONG pin);
 VOID SiaHardwareStop (PSIA_DEVICE Dev);
 NTSTATUS SiaStreamStart (PSIA_DEVICE Dev, BOOLEAN Capture);
 VOID SiaStreamStop (PSIA_DEVICE Dev, BOOLEAN Capture);

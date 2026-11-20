@@ -16,14 +16,7 @@ static NTSTATUS HapticOff(KEYS *k) {
 }
 static VOID HapticPrepare(KEYS *k) {
     k->HapticDue=0;k->HapticPhase=k->HapticRepeat=0;
-    for(UCHAR i=0;i<2;i++)k->HapticObserve[i]=k->HapticChannel[i]=NULL;
-    for(ULONG i=0;i<k->Apids;i++) {
-        ULONG map=Read(k->Base[0],0x2000+4*i),ppid=(map>>8)&0xfff;
-        if(ppid<0x7f0 || ppid>0x7f1)continue;
-        ULONG n=ppid-0x7f0,owner=Read(k->Base[1],4*i)&7;
-        k->HapticObserve[n]=k->Base[2]+0x20*i;
-        if(!owner)k->HapticChannel[n]=k->Base[3]+0x1000*i;
-    }
+    for(ULONG i=0;i<2;i++)if(k->HapticChannel[i]&&k->HapticInterrupt[i])Write(k->HapticChannel[i],0x100,0);
     UCHAR cfg=0,ptn=0;
     NTSTATUS status=HapticRead(k,0,1,&cfg);
     if(NT_SUCCESS(status))status=HapticRead(k,1,1,&ptn);

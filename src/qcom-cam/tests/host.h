@@ -33,10 +33,10 @@ typedef int32_t NTSTATUS;
 #define RTL_NUMBER_OF(a) (sizeof(a)/sizeof((a)[0]))
 #define RtlZeroMemory(p,n) memset(p,0,n)
 #define RtlCopyMemory(d,s,n) memcpy(d,s,n)
-enum { CamCci,CamCpas,CamCrm };
+enum { CamCci,CamCpas,CamCrm,CamCc,CamGcc,CamSmmu };
 #include "uapi.h"
 typedef struct {
-    PUCHAR Base[3]; QCAM_INFO Info; BOOLEAN Faulted,Powered,DmaActive,RxActive,ScmAvailable,ScmPending,CrmPending;
+    PUCHAR Base[6]; QCAM_INFO Info; BOOLEAN Faulted,Powered,DmaActive,RxActive,ScmAvailable,ScmPending,CdmPending,CrmPending,ReceiverVerified,ScmWaitqKnown,ScmFastWaitq;
     QCAM_DIAG Diag; QCAM_TRACE Trace;
 } CAM;
 ULONG CamRead(PUCHAR base,ULONG offset);
@@ -44,9 +44,14 @@ VOID CamWrite(PUCHAR base,ULONG offset,ULONG value);
 VOID CamDelay(ULONG us);
 ULONGLONG KeQueryInterruptTime(void);
 NTSTATUS CamWait(PUCHAR base,ULONG offset,ULONG mask,ULONG value,ULONG us);
+NTSTATUS CamSave(CAM *c,PUCHAR base,ULONG offset,ULONG value);
 NTSTATUS CamCciInit(CAM *c);
 NTSTATUS CamCciRead(CAM *c,UCHAR slave,USHORT address,PUCHAR buffer,ULONG bytes);
 NTSTATUS CamCciWrite(CAM *c,UCHAR slave,USHORT address,const UCHAR *buffer,ULONG bytes);
 NTSTATUS CamScmProbe(CAM *c);
 NTSTATUS CamScmQos(CAM *c);
+NTSTATUS CamScmQosDiagnostic(CAM *c);
+NTSTATUS CamScmWaitqProbe(CAM *c);
+NTSTATUS CamScmWaitqContext(CAM *c);
+NTSTATUS CamScmQosRaw(CAM *c);
 NTSTATUS CamScmIoProbe(CAM *c);

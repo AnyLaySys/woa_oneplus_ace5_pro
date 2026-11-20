@@ -23,7 +23,7 @@ NTSTATUS GpuPoll(PUCHAR base,ULONG offset,ULONG mask,ULONG value,ULONG timeout) 
 }
 VOID GpuUnbind(GPU *g) {
     if(g->Registers)MmUnmapIoSpace(g->Registers,GPU_WINDOW);
-    if(g->Gcc)MmUnmapIoSpace(g->Gcc,0x1F5000);
+    if(g->Gcc)MmUnmapIoSpace(g->Gcc,0x72000);
     if(g->Rsc)MmUnmapIoSpace(g->Rsc,0x10000);
     if(g->Db)MmUnmapIoSpace(g->Db,0x20000);
     if(g->Thermal)MmUnmapIoSpace(g->Thermal,4096);
@@ -34,9 +34,9 @@ NTSTATUS GpuBind(GPU *g,PHYSICAL_ADDRESS registers,ULONG length) {
     if(registers.QuadPart!=0x03D00000 || length!=GPU_WINDOW)return STATUS_DEVICE_CONFIGURATION_ERROR;
     PHYSICAL_ADDRESS p;
     g->Registers=MmMapIoSpaceEx(registers,length,PAGE_READWRITE|PAGE_NOCACHE);
-    p.QuadPart=0x100000;g->Gcc=MmMapIoSpaceEx(p,0x1F5000,PAGE_READWRITE|PAGE_NOCACHE);
+    p.QuadPart=0x100000;g->Gcc=MmMapIoSpaceEx(p,0x72000,PAGE_READWRITE|PAGE_NOCACHE);
     p.QuadPart=0x16520000;g->Rsc=MmMapIoSpaceEx(p,0x10000,PAGE_READWRITE|PAGE_NOCACHE);
-    p.QuadPart=0x81C60000;g->Db=MmMapIoSpaceEx(p,0x20000,PAGE_READWRITE|PAGE_NOCACHE);
+    p.QuadPart=0x81C60000;g->Db=MmMapIoSpaceEx(p,0x20000,PAGE_READONLY|PAGE_NOCACHE);
     p.QuadPart=0x0C22A000;g->Thermal=MmMapIoSpaceEx(p,4096,PAGE_READONLY|PAGE_NOCACHE);
     if(!g->Registers || !g->Gcc || !g->Rsc || !g->Db || !g->Thermal){GpuUnbind(g);return STATUS_INSUFFICIENT_RESOURCES;}
     g->Stage=1;return STATUS_SUCCESS;

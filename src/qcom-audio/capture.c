@@ -158,7 +158,7 @@ NTSTATUS SiaMicStart(PSIA_DEVICE Dev, PSIA_MIC *Context, VOID (*Service)(PSIA_DE
     Status=STATUS_DEVICE_CONFIGURATION_ERROR;
     if(SiaRead32(Mic->Bus,0)!=0x02010000)goto failed;
     Mic->BusConfig=SiaRead32(Mic->Bus,4);
-    Mic->Reset[0]=SiaRead32(Dev->Tlmm,101*0x1000);Mic->Reset[1]=SiaRead32(Dev->Tlmm,101*0x1000+4);
+    Mic->Reset[0]=SiaRead32(SiaPin(Dev,101),0);Mic->Reset[1]=SiaRead32(SiaPin(Dev,101),4);
     for(ULONG I=0;I<4;I++){Mic->Pin[I]=SiaRead32(Mic->Pins,Pins[I]*0x1000);SiaWrite32(Mic->Pins,Pins[I]*0x1000,(Mic->Pin[I]&~0x3ffu)|(I==1?6:4));}
     for(ULONG I=0;I<2;I++)Mic->TxClock[I]=SiaRead32(Mic->Tx,I*4);
     const ULONG VaReg[]={0,4,8,0x80};
@@ -222,7 +222,7 @@ VOID SiaMicStop(PSIA_DEVICE Dev, PSIA_MIC Mic)
     if(!Mic)return;
     if(Mic->ResetReleased){
         SiaWrite32(Mic->Bus,4,0);
-        SiaWrite32(Dev->Tlmm,101*0x1000+4,Mic->Reset[1]);SiaWrite32(Dev->Tlmm,101*0x1000,Mic->Reset[0]);
+        SiaWrite32(SiaPin(Dev,101),4,Mic->Reset[1]);SiaWrite32(SiaPin(Dev,101),0,Mic->Reset[0]);
         for(ULONG I=0;I<3;I++)SiaWrite32(Mic->Tx,0x400+I*0x80,4);
         for(ULONG I=0;I<2;I++)SiaWrite32(Mic->Tx,I*4,Mic->TxClock[I]);
         const ULONG VaReg[]={0,4,8,0x80}, Pins[]={0,1,2,14};

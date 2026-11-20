@@ -29,8 +29,8 @@ typedef struct {
     volatile LONG Stopping;
     BOOLEAN Ready,RetryInit;
     UCHAR InitAttempts;
-    ULONG PanelMaxX,PanelMaxY,MappedCount,MappedSize[7];
-    PVOID MappedBase[7];
+    ULONG PanelMaxX,PanelMaxY,MappedCount,MappedSize[8];
+    PVOID MappedBase[8];
     UCHAR Reply[HSP_DATA_BYTES];
     WDFIOTARGET Haptics;
     TAP Tap;

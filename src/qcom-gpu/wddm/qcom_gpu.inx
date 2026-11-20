@@ -14,7 +14,10 @@ DefaultDestDir=13
 [SourceDisksFiles]
 qcom_gpu.sys=1
 a830_umd.dll=1
+a830_umd_arm64.dll=1
+a830_umd_x64.dll=1
 a830_gpu.dll=1
+a830_gpu_x64.dll=1
 a830_gl.dll=1
 a830_gl_x64.dll=1
 vulkan_freedreno.dll=1
@@ -39,7 +42,10 @@ HKR,,FriendlyName,0x00000000,%Device%
 [Driver.Files]
 qcom_gpu.sys
 a830_umd.dll
+a830_umd_arm64.dll
+a830_umd_x64.dll
 a830_gpu.dll
+a830_gpu_x64.dll
 a830_gl.dll
 a830_gl_x64.dll
 vulkan_freedreno.dll

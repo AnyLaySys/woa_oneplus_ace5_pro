@@ -1,5 +1,5 @@
 #include "hummer_rpmh.h"
-#include "../../qcom-gpu/rpmh-lock.h"
+#include "../../platform/lock.h"
 
 #define HR_TCS_OFF        0xD00u
 #define HR_TCS_STRIDE     0x2A0u
@@ -430,13 +430,13 @@ HrpmhVoteLdo (
 {
     if (Ctx == NULL || !Ctx->Initialized || Ctx->Faulted) return STATUS_INVALID_DEVICE_STATE;
     if ((Id != 4 || MilliVolts != 1800) && (Id != 16 || MilliVolts != 3104)) return STATUS_INVALID_PARAMETER;
-    RPMH_LOCK_GUARD Guard = {0};
-    NTSTATUS Status = RpmhLockAcquire(&Guard);
+    PLATFORM_LOCK_GUARD Guard = {0};
+    NTSTATUS Status = PlatformLockAcquire(&Guard,FALSE);
     if (Status != STATUS_SUCCESS) return Status;
     __try {
         Status = VoteLdoLocked(Ctx, Id, MilliVolts);
     } __finally {
-        NTSTATUS Released = RpmhLockRelease(&Guard);
+        NTSTATUS Released = PlatformLockRelease(&Guard);
         if (NT_SUCCESS(Status) && !NT_SUCCESS(Released)) Status = Released;
     }
     return Status;

@@ -1,9 +1,9 @@
 #include "cam.h"
-#include "../qcom-gpu/rpmh-lock.h"
+#include "../platform/lock.h"
 #include "rpmh-message.h"
 
 typedef struct { ULONG Address,Original[3],Count; BOOLEAN Changed; } VOTE;
-typedef struct { ULONG Major,Count; BOOLEAN Fault; VOTE Votes[16]; } POWER;
+typedef struct { ULONG Major,Count; BOOLEAN Fault; VOTE Votes[18]; } POWER;
 
 static USHORT Db16(PUCHAR b,ULONG off) { return (USHORT)(CamRead(b,off&~3u)>>(8*(off&3))); }
 
@@ -29,7 +29,7 @@ static NTSTATUS Find(CAM *c,const CHAR *name,ULONG *address,ULONG *aux,ULONG *le
 static NTSTATUS Commands(CAM *c,ULONG address,ULONG *values,ULONG count,BOOLEAN write) {
     POWER *p=c->PowerState;PUCHAR r=c->Base[CamRsc];
     if(p->Fault||!count||count>3)return STATUS_INVALID_DEVICE_STATE;
-    RPMH_LOCK_GUARD guard={0};NTSTATUS status=RpmhLockAcquire(&guard);
+    PLATFORM_LOCK_GUARD guard={0};NTSTATUS status=PlatformLockAcquire(&guard,FALSE);
     if(status!=STATUS_SUCCESS)return status;
     ULONG wait=p->Major==3?0x20:0x10,control=wait+4,state=wait+8,enable=wait+12;
     ULONG msg=p->Major==3?0x34:0x30,stride=p->Major==3?24:20,slot=MAXULONG,irq=CamRead(r,0xd00);
@@ -80,7 +80,7 @@ cleanup:
         else {p->Fault=TRUE;status=clear;}
     } else p->Fault=TRUE;
 out:
-    NTSTATUS released=RpmhLockRelease(&guard);return NT_SUCCESS(status)?released:status;
+    NTSTATUS released=PlatformLockRelease(&guard);return NT_SUCCESS(status)?released:status;
 }
 
 static NTSTATUS Vote(CAM *c,const CHAR *name,ULONG voltage,BOOLEAN arc) {
@@ -121,7 +121,8 @@ static NTSTATUS Bcm(CAM *c,const CHAR *name,BOOLEAN enableOnly) {
     ULONG x=(v->Original[0]>>14)&0x3fff,y=v->Original[0]&0x3fff;
     ULONG vote=enableOnly?1:(ULONG)min((2000000000ULL*width/32+unit-1)/unit,0x3fffULL);
     ULONG value=0x60000000u|(x<<14)|(enableOnly?(y|1u):max(y,vote));
-    ULONG slot=name[0]=='M'&&name[1]=='M'?(name[2]=='0'?0:1):2;
+    ULONG slot=name[0]=='M'&&name[1]=='M'?(name[2]=='0'?0:1):name[0]=='C'?3:
+        name[0]=='M'?5:name[2]=='0'?4:2;
     c->Trace.BusVotes[slot][0]=v->Original[0];c->Trace.BusVotes[slot][1]=value;
     v->Original[0]|=0x40000000u;v->Changed=TRUE;p->Count++;
     status=Commands(c,address,&value,1,TRUE);
@@ -149,6 +150,9 @@ NTSTATUS CamRailsOn(CAM *c) {
     if(!NT_SUCCESS(status))return status;
     c->Diag.Step=121;status=Bcm(c,"MM1",TRUE);
     if(NT_SUCCESS(status)){c->Diag.Step=122;status=Bcm(c,"SH1",TRUE);}
+    if(NT_SUCCESS(status)){c->Diag.Step=123;status=Bcm(c,"CN0",TRUE);}
+    if(NT_SUCCESS(status)){c->Diag.Step=124;status=Bcm(c,"SH0",FALSE);}
+    if(NT_SUCCESS(status)){c->Diag.Step=125;status=Bcm(c,"MC0",FALSE);}
     return status;
 }
 

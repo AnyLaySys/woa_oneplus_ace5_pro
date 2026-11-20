@@ -8,7 +8,7 @@ Signature="$WINDOWS NT$"
 Class=Net
 ClassGuid={4d36e972-e325-11ce-bfc1-08002be10318}
 Provider=%ProviderString%
-DriverVer=11/07/2026,26.11.7.62
+DriverVer=11/20/2026,26.11.20.63
 CatalogFile=wcn7861.cat
 PnpLockdown=1
 

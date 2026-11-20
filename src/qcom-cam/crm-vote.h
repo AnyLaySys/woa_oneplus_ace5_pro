@@ -1,5 +1,14 @@
 #pragma once
 
+static NTSTATUS CamCrmStates(PUCHAR base,ULONG offset,const ULONG values[2]) {
+    for(ULONG i=0;i<2;i++) {
+        CamWrite(base,offset+4+i*4,values[i]);
+        NTSTATUS status=CamWait(base,offset+4+i*4,0x3fffffffu,values[i]&0x3fffffffu,1000);
+        if(!NT_SUCCESS(status))return status;
+    }
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS CamCrmTransfer(PUCHAR base,ULONG offset,ULONG value) {
     ULONG irq=offset==0x21c?0x24c:offset+0x10;
     CamWrite(base,irq+4,1);

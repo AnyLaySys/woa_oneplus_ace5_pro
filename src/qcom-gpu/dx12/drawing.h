@@ -109,6 +109,7 @@ HRESULT apply_pipeline(Queue *q,bool compute) {
 }
 HRESULT draw(Queue *q,UINT count,UINT instances,UINT first,INT bias,UINT base_instance,bool indexed) {
     if(!count || !instances)return S_OK;bool execute=true;HRESULT hr=predicate(q,execute);if(FAILED(hr) || !execute)return hr;
+    if(q->state->topology==MESA_PRIM_UNKNOWN)return E_INVALIDARG;
     hr=apply_pipeline(q,false);if(FAILED(hr))return hr;
     hr=bind_stream_targets(q);if(FAILED(hr))return hr;
     pipe_draw_info info{};info.mode=static_cast<BYTE>(q->state->topology);info.instance_count=instances;info.start_instance=base_instance;

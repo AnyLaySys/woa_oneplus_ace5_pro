@@ -1,4 +1,5 @@
 #include "cam.h"
+#include "scm-ready.h"
 
 VOID CamScmSlow(ULONGLONG *registers);
 
@@ -51,26 +52,63 @@ NTSTATUS CamScmProbe(CAM *c) {
     c->ScmAvailable=NT_SUCCESS(status);c->Diag.Status=status;return status;
 }
 
-NTSTATUS CamScmQos(CAM *c) {
+NTSTATUS CamScmWaitqProbe(CAM *c) {
+    if(c->ScmPending||c->CdmPending||c->CrmPending)return STATUS_DEVICE_BUSY;
+    ULONGLONG registers[8]={0xc2002404};
+    c->Diag.Step=163;c->Diag.Region=MAXULONG;c->Diag.Address=(ULONG)registers[0];
+    c->Diag.Count=0;c->Diag.Phase=0;RtlCopyMemory(c->Diag.Resource,"scm-wait",8);
+    CamScmSlow(registers);RtlCopyMemory(c->Trace.ScmWaitq,registers,sizeof(registers));
+    c->Diag.Observed=(ULONG)registers[0];c->Diag.Mask=MAXULONG;c->Diag.Expected=0;
+    if(registers[0]==1){c->ScmPending=TRUE;return STATUS_DEVICE_BUSY;}
+    if(registers[0]==2||registers[0]==3){c->ScmPending=TRUE;return STATUS_DEVICE_BUSY;}
+    c->ScmWaitqKnown=TRUE;c->ScmFastWaitq=registers[0]==0;
+    NTSTATUS status=c->ScmFastWaitq?STATUS_SUCCESS:STATUS_NOT_SUPPORTED;
+    c->Diag.Status=status;return status;
+}
+
+NTSTATUS CamScmWaitqContext(CAM *c) {
+    if(!c->ScmWaitqKnown||!c->ScmFastWaitq)return STATUS_NOT_SUPPORTED;
+    if(c->CdmPending||c->CrmPending)return STATUS_DEVICE_BUSY;
+    ULONGLONG registers[8]={0xc2002403};
+    c->Diag.Step=165;c->Diag.Region=MAXULONG;c->Diag.Address=(ULONG)registers[0];
+    c->Diag.Count=0;c->Diag.Phase=0;RtlCopyMemory(c->Diag.Resource,"scm-ctx",8);
+    CamScmSlow(registers);RtlCopyMemory(c->Trace.ScmWaitq,registers,sizeof(registers));
+    c->Diag.Observed=(ULONG)registers[0];c->Diag.Mask=MAXULONG;c->Diag.Expected=0;
+    NTSTATUS status=registers[0]==1?STATUS_DEVICE_BUSY:registers[0]?STATUS_NOT_SUPPORTED:STATUS_SUCCESS;
+    c->Diag.Status=status;return status;
+}
+
+static NTSTATUS Qos(CAM *c,BOOLEAN diagnostic,BOOLEAN complete) {
     if(!c->Powered)return STATUS_DEVICE_NOT_READY;
     if(c->DmaActive||c->RxActive)return STATUS_DEVICE_BUSY;
-    if(c->ScmPending||c->CrmPending)return STATUS_DEVICE_BUSY;
-    if(!(CamRead(c->Base[CamCpas],0xf0)&1))return STATUS_DEVICE_NOT_READY;
+    if(c->ScmPending||c->CrmPending||c->CdmPending)return STATUS_DEVICE_BUSY;
+    if(!(CamRead(c->Base[CamCpas],0xf0)&1)||!(CamRead(c->Base[CamCpas],0xf8)&1))
+        if(!diagnostic||!CamScmDiagnosticReady(c))return STATUS_DEVICE_NOT_READY;
     NTSTATUS status=STATUS_SUCCESS;
     if(!c->ScmAvailable)status=CamScmProbe(c);
     if(!NT_SUCCESS(status))return status;
-    ULONGLONG waitq[8]={0xc2002404};CamScmSlow(waitq);
-    RtlCopyMemory(c->Trace.ScmWaitq,waitq,sizeof(waitq));
-    BOOLEAN fastWaitq=waitq[0]==0;
+    if(!c->ScmWaitqKnown) {
+        status=CamScmWaitqProbe(c);
+        if(!NT_SUCCESS(status)&&status!=STATUS_NOT_SUPPORTED)return status;
+    }
     ULONGLONG registers[8]={0x4200180a,0x83,0,0,0};
     c->Diag.Step=151;c->Diag.Region=MAXULONG;c->Diag.Offset=0;
     c->Diag.Address=(ULONG)registers[0];c->Diag.Count=3;c->Diag.Slot=MAXULONG;
-    c->Diag.Phase=1;RtlCopyMemory(c->Diag.Resource,"scm-qos",8);
+    c->Diag.Phase=complete?1:2;RtlCopyMemory(c->Diag.Resource,"scm-qos",8);
     CamScmSlow(registers);
-    status=Complete(c,registers,fastWaitq);
+    RtlCopyMemory(c->Trace.ScmReturn,registers,sizeof(registers));
+    if(complete)status=Complete(c,registers,c->ScmFastWaitq);
+    else {
+        c->ScmPending=registers[0]==1||registers[0]==2||registers[0]==3;
+        status=c->ScmPending?STATUS_DEVICE_BUSY:registers[0]?STATUS_IO_DEVICE_ERROR:STATUS_SUCCESS;
+    }
     c->Diag.Observed=(ULONG)registers[0];c->Diag.Mask=MAXULONG;c->Diag.Expected=0;
     c->Diag.Status=status;return status;
 }
+
+NTSTATUS CamScmQos(CAM *c) {return Qos(c,FALSE,TRUE);}
+NTSTATUS CamScmQosDiagnostic(CAM *c) {return Qos(c,TRUE,TRUE);}
+NTSTATUS CamScmQosRaw(CAM *c) {return Qos(c,TRUE,FALSE);}
 
 NTSTATUS CamScmIoProbe(CAM *c) {
     if(c->ScmPending)return STATUS_DEVICE_BUSY;

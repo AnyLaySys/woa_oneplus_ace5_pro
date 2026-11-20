@@ -1,4 +1,5 @@
 #include "sia9177.h"
+#include "../platform/acpi.h"
 
 #define GENI_FORCE_DEFAULT_REG      0x020u
 #define GENI_OUTPUT_CTRL            0x024u
@@ -52,7 +53,6 @@
 #define M_OPCODE_SHIFT              27u
 #define GENI_PROTO_I2C              3u
 
-#define GCC_VOTE                    0x52008u
 #define GCC_VOTE_S_AHB              (1u << 7)
 #define GCC_VOTE_CORE               (1u << 8)
 #define GCC_VOTE_S4                 (1u << 14)
@@ -86,8 +86,8 @@ SiaGpioOutput (
     _In_ BOOLEAN High
     )
 {
-    SiaWr (Dev->Tlmm, Pin * TLMM_STRIDE + 4, High ? TLMM_OUT : 0);
-    SiaWr (Dev->Tlmm, Pin * TLMM_STRIDE, TLMM_OE | (2u << 6));
+    SiaWr (SiaPin(Dev,Pin), 4, High ? TLMM_OUT : 0);
+    SiaWr (SiaPin(Dev,Pin), 0, TLMM_OE | (2u << 6));
 }
 
 static
@@ -97,7 +97,6 @@ SiaClocksOn (
     )
 {
     ULONG Index;
-    ULONG Value;
 
     SiaWr (Dev->Gcc, GCC_S4_RCG + 4, 0);
     SiaWr (Dev->Gcc, GCC_S4_RCG, SiaRead32 (Dev->Gcc, GCC_S4_RCG) | 1u);
@@ -105,8 +104,8 @@ SiaClocksOn (
         KeStallExecutionProcessor (10);
     }
 
-    Value = SiaRead32 (Dev->Gcc, GCC_VOTE);
-    SiaWr (Dev->Gcc, GCC_VOTE, Value | GCC_VOTE_S_AHB | GCC_VOTE_CORE | GCC_VOTE_S4);
+    NTSTATUS VoteStatus=PlatformVote(Dev->Pdo,GCC_VOTE_S_AHB|GCC_VOTE_CORE|GCC_VOTE_S4);
+    if(!NT_SUCCESS(VoteStatus))return VoteStatus;
 
     for (Index = 0; Index < 200; Index++) {
         ULONG Ahb = SiaRead32 (Dev->Gcc, GCC_HALT_S_AHB);
@@ -129,7 +128,7 @@ SiaPinsOn (
     ULONG Pin;
 
     for (Pin = 72; Pin <= 73; Pin++) {
-        SiaWr (Dev->Tlmm, Pin * TLMM_STRIDE, (1u << 2) | 3u);
+        SiaWr (SiaPin(Dev,Pin), 0, (1u << 2) | 3u);
     }
 }
 

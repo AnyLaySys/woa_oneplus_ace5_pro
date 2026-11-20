@@ -3,7 +3,7 @@ Signature="$WINDOWS NT$"
 Class=Camera
 ClassGuid={CA3E7AB9-B4C3-4AE6-8251-579EF933890F}
 Provider=%ProviderString%
-DriverVer=11/19/2026,26.11.19.59
+DriverVer=11/20/2026,26.11.20.86
 CatalogFile=qcom_cam_video.cat
 PnpLockdown=1
 

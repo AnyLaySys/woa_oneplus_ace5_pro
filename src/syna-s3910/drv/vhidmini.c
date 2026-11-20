@@ -54,19 +54,26 @@ NTSTATUS EvtDeviceAdd(WDFDRIVER driver,PWDFDEVICE_INIT init) {
 }
 NTSTATUS OnPrepareHardware(WDFDEVICE device,WDFCMRESLIST raw,WDFCMRESLIST resources) {
     UNREFERENCED_PARAMETER(raw);
-    static const ULONG bases[]={0x00A90000,0x00A00000,0x0F100000,0x00100000,0x16520000,0x81C60000,0x15000000};
-    static const ULONG sizes[]={0x4000,0x60000,0x102000,0x1F4200,0x10000,0x20000,0x1000};
+    static const ULONG bases[]={0x00A90000,0x00A14000,0x0F130000,0x00100000,0x16520000,0x81C60000,0x15000000,0x0F1A1000};
+    static const ULONG sizes[]={0x4000,0x10000,0x4000,0x60000,0x10000,0x20000,0x1000,0x2000};
     PDEVICE_CONTEXT d=GetDeviceContext(device);d->MappedCount=0;
-    for(ULONG i=0;i<WdfCmResourceListGetCount(resources) && d->MappedCount<RTL_NUMBER_OF(bases);i++) {
+    for(ULONG i=0;i<WdfCmResourceListGetCount(resources);i++) {
         PCM_PARTIAL_RESOURCE_DESCRIPTOR r=WdfCmResourceListGetDescriptor(resources,i);
         if(r->Type!=CmResourceTypeMemory)continue;
         ULONG n=d->MappedCount;
-        if(r->u.Memory.Start.QuadPart!=bases[n] || r->u.Memory.Length<sizes[n])return STATUS_DEVICE_CONFIGURATION_ERROR;
-        d->MappedBase[n]=MmMapIoSpace(r->u.Memory.Start,r->u.Memory.Length,MmNonCached);
+        if(n>=2 || r->u.Memory.Start.QuadPart!=bases[n] || r->u.Memory.Length!=sizes[n])return STATUS_DEVICE_CONFIGURATION_ERROR;
+        d->MappedBase[n]=MmMapIoSpaceEx(r->u.Memory.Start,sizes[n],PAGE_READWRITE|PAGE_NOCACHE);
         if(!d->MappedBase[n])return STATUS_INSUFFICIENT_RESOURCES;
-        d->MappedSize[n]=r->u.Memory.Length;d->MappedCount++;
+        d->MappedSize[n]=sizes[n];d->MappedCount++;
     }
-    return d->MappedCount==RTL_NUMBER_OF(bases)?STATUS_SUCCESS:STATUS_DEVICE_CONFIGURATION_ERROR;
+    if(d->MappedCount!=2)return STATUS_DEVICE_CONFIGURATION_ERROR;
+    for(ULONG n=2;n<RTL_NUMBER_OF(bases);n++) {
+        PHYSICAL_ADDRESS address;address.QuadPart=bases[n];
+        d->MappedBase[n]=MmMapIoSpaceEx(address,sizes[n],(n==5?PAGE_READONLY:PAGE_READWRITE)|PAGE_NOCACHE);
+        if(!d->MappedBase[n])return STATUS_INSUFFICIENT_RESOURCES;
+        d->MappedSize[n]=sizes[n];d->MappedCount++;
+    }
+    return STATUS_SUCCESS;
 }
 static NTSTATUS Stop(PDEVICE_CONTEXT d) {
     InterlockedExchange(&d->Stopping,1);
@@ -242,7 +249,7 @@ static NTSTATUS S3910BringUp(PDEVICE_CONTEXT d) {
     d->RetryInit=FALSE;if(d->Spi)return STATUS_INVALID_DEVICE_STATE;
     PHSP_CTX spi=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*spi),'PSh9');
     if(!spi)return STATUS_INSUFFICIENT_RESOURCES;
-    NTSTATUS status=HspInit(spi,d->Device,d->MappedBase[0],d->MappedBase[1],d->MappedBase[2],d->MappedBase[3],d->MappedBase[6]);
+    NTSTATUS status=HspInit(spi,d->Device,d->MappedBase[0],d->MappedBase[1],d->MappedBase[3],d->MappedBase[6]);
     if(!NT_SUCCESS(status)){ExFreePoolWithTag(spi,'PSh9');return status;}
     d->Spi=spi;
     status=HrpmhInit(&d->Rpmh,d->MappedBase[4],d->MappedBase[5]);if(!NT_SUCCESS(status))goto fail;
@@ -251,7 +258,7 @@ static NTSTATUS S3910BringUp(PDEVICE_CONTEXT d) {
     status=HrpmhVoteLdo(&d->Rpmh,16,3104);if(!NT_SUCCESS(status))goto fail;
     d->RetryInit=FALSE;
     status=HspClocksOn(spi);if(!NT_SUCCESS(status))goto fail;
-    status=HspResetAndConfigurePins(d->MappedBase[2]);if(!NT_SUCCESS(status))goto fail;
+    status=HspResetAndConfigurePins(d->MappedBase[2],d->MappedBase[7]);if(!NT_SUCCESS(status))goto fail;
     status=HspConfigureSmmu(spi);if(!NT_SUCCESS(status))goto fail;
     status=HspStartDma(spi);if(!NT_SUCCESS(status))goto fail;
     d->Ready=TRUE;

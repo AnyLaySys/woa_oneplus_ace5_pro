@@ -1,6 +1,7 @@
 #include "cam.h"
 #include "wait.h"
 #include "rcg-restore.h"
+#include "../platform/lock.h"
 
 NTSTATUS CamRailsOn(CAM *c);
 NTSTATUS CamRailsOff(CAM *c);
@@ -113,7 +114,9 @@ static NTSTATUS Rcg(CAM *c,PUCHAR b,ULONG offset,ULONG cfg) {
     if(!NT_SUCCESS(status))return status;
     for(ULONG i=0;i<c->SavedCount;i++)if(c->Saved[i].Base==b&&c->Saved[i].Offset==offset){c->Saved[i].Rcg=TRUE;c->Saved[i].Config=original;break;}
     CamWrite(b,offset,CamRead(b,offset)|1);
-    status=CamWait(b,offset,1,0,10000);c->Diag.Observed=CamRead(b,offset);return status;
+    status=CamWait(b,offset,1,0,10000);
+    if(NT_SUCCESS(status)&&b==c->Base[CamCc])CamWrite(b,offset,CamRead(b,offset)&~2u);
+    c->Diag.Observed=CamRead(b,offset);return status;
 }
 
 static NTSTATUS Pll(CAM *c,ULONG offset,ULONG l,ULONG alpha,ULONG user) {
@@ -147,7 +150,7 @@ static NTSTATUS Domain(CAM *c,ULONG offset) {
 }
 
 NTSTATUS CamPowerOn(CAM *c) {
-    if(c->ScmPending)return STATUS_DEVICE_BUSY;
+    if(c->ScmPending||c->CdmPending)return STATUS_DEVICE_BUSY;
     if(c->Powered)return STATUS_SUCCESS;
     if(c->PowerState||c->Faulted)return STATUS_DEVICE_HARDWARE_ERROR;
     RtlZeroMemory(&c->Diag,sizeof(c->Diag));c->Diag.Step=100;
@@ -166,15 +169,15 @@ NTSTATUS CamPowerOn(CAM *c) {
     if(NT_SUCCESS(status))status=Domain(c,0x1134c);
     if(NT_SUCCESS(status)&&c->ProbeLimit==4)return STATUS_SUCCESS;
     if(NT_SUCCESS(status))status=Pll(c,0,0x3e,0x8000,0x8400);
-    if(NT_SUCCESS(status))status=Pll(c,0x3000,0x32,0,0x400);
     if(NT_SUCCESS(status)&&c->ProbeLimit==5)return STATUS_SUCCESS;
-    const ULONG rcgs[]={0x1126c,0x11068,0x100a4,0x112c0,0x112e8,0x11018,0x100dc,0x10100,0x11364};
-    const ULONG cfgs[]={0x21f,0x105,0x105,0x105,0x202,0x601,0x203,0x20e,1};
+    const ULONG rcgs[]={0x1126c,0x100a4,0x100dc,0x10100,0x11364};
+    const ULONG cfgs[]={0x10021f,0x100105,0x100203,0x10020e,0x100001};
     for(ULONG i=0;i<RTL_NUMBER_OF(rcgs)&&NT_SUCCESS(status);i++)status=Rcg(c,cc,rcgs[i],cfgs[i]);
     if(NT_SUCCESS(status)&&c->ProbeLimit==6)return STATUS_SUCCESS;
     if(NT_SUCCESS(status))status=Domain(c,0x11004);
     if(NT_SUCCESS(status)&&c->ProbeLimit==7)return STATUS_SUCCESS;
-    const ULONG clocks[]={0x113ac,0x1139c,0x11360,0x11320,0x11324,0x11300,0x11310,0x11284,0x100bc,0x100c0,0x112d8,0x10020,0x11030,0x11040,0x11060,0x11044,0x11054,0x11064};
+    if(NT_SUCCESS(status))status=CamCrmOn(c);
+    const ULONG clocks[]={0x113ac,0x1139c,0x11360,0x11320,0x11324,0x11284,0x100bc,0x100c0,0x10020,0x11060,0x11064};
     for(ULONG i=0;i<RTL_NUMBER_OF(clocks)&&NT_SUCCESS(status);i++)status=Branch(c,cc,clocks[i]);
     if(NT_SUCCESS(status)&&c->ProbeLimit==8)return STATUS_SUCCESS;
     if(NT_SUCCESS(status))status=Rcg(c,mclk,0x401c,1);
@@ -195,8 +198,8 @@ NTSTATUS CamPowerOn(CAM *c) {
 }
 
 NTSTATUS CamPowerOff(CAM *c) {
-    if(c->ScmPending)return STATUS_DEVICE_BUSY;
-    if(c->DmaActive||c->RxActive)return STATUS_DEVICE_BUSY;
+    if(c->ScmPending||c->CdmPending)return STATUS_DEVICE_BUSY;
+    if(c->DmaActive||c->RxActive||c->BusOn)return STATUS_DEVICE_BUSY;
     NTSTATUS status=CamCrmOff(c);
     if(!NT_SUCCESS(status))return status;
     if(c->Powered&&c->Configured)status=CamSensorStream(c,FALSE);
@@ -208,6 +211,15 @@ NTSTATUS CamPowerOff(CAM *c) {
     c->Configured=FALSE;c->Powered=FALSE;
     while(c->SavedCount) {
         CAM_SAVE *s=&c->Saved[c->SavedCount-1];
+        if(s->Base==c->Base[CamSmmu]) {
+            PLATFORM_LOCK_GUARD guard={0};NTSTATUS locked=PlatformLockAcquire(&guard,TRUE);
+            if(locked!=STATUS_SUCCESS)return locked;
+            do {
+                s=&c->Saved[c->SavedCount-1];CamWrite(s->Base,s->Offset,s->Original);c->SavedCount--;
+            } while(c->SavedCount&&c->Saved[c->SavedCount-1].Base==c->Base[CamSmmu]);
+            NTSTATUS released=PlatformLockRelease(&guard);if(!NT_SUCCESS(released))return released;
+            continue;
+        }
         if(s->Rcg) {
             NTSTATUS restored=CamRcgRestore(s->Base,s->Offset,s->Config,s->Original);
             if(!NT_SUCCESS(restored)) {

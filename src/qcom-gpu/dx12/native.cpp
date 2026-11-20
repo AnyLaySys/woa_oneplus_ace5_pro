@@ -21,19 +21,20 @@
 #include "../../mesa/a830_completion.h"
 #include "../wddm/gpu-fence-builder.h"
 #include "../../mesa/a830_native.h"
+#include "../../mesa/umd/module.h"
 #include "pipe/p_screen.h"
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
 
 namespace {
 template<class T,class H> T *object(H h){return static_cast<T *>(h.pDrvPrivate);}
-struct Adapter { HANDLE runtime; };
+struct Adapter { HANDLE runtime;D3D12DDI_HRTTABLE command_table{}; };
 struct Queue;
 struct Resource;
 struct State;
 struct Recording { std::vector<std::function<HRESULT(Queue *)>> ops; };
 struct Device {
-    HANDLE adapter;
+    Adapter *adapter;
     D3D12DDI_HRTDEVICE runtime;
     D3DDDI_DEVICECALLBACKS kernel;
     D3D12DDI_CORELAYER_DEVICECALLBACKS_0003 core;
@@ -188,7 +189,8 @@ HRESULT APIENTRY create_list(D3D12DDI_HDEVICE hd,const D3D12DDIARG_CREATE_COMMAN
     Allocator *a=object<Allocator>(p->hDrvCommandAllocator);
     if(!a || a->device!=object<Device>(hd))return E_INVALIDARG;
     List *l=new(p->hDrvCommandList.pDrvPrivate) List{a->device,a,p->hRTCommandList,a->generation};
-    try {l->recording=std::make_shared<Recording>();}catch(const std::bad_alloc &){l->~List();return E_OUTOFMEMORY;}return S_OK;
+    try {l->recording=std::make_shared<Recording>();}catch(const std::bad_alloc &){l->~List();return E_OUTOFMEMORY;}
+    l->device->core.pfnSetCommandListDDITableCb(l->runtime,l->device->adapter->command_table);return S_OK;
 }
 void APIENTRY destroy_list(D3D12DDI_HDEVICE,D3D12DDI_HCOMMANDLIST h){object<List>(h)->~List();}
 void APIENTRY reset_list(D3D12DDI_HCOMMANDLIST h,const D3D12DDIARG_RESETCOMMANDLIST *p) {
@@ -222,6 +224,13 @@ HRESULT queue_status(Queue *q,UINT64 *completed=nullptr) {
     if(!a830_read_completion(q->page,&page) || page.Status || page.Generation!=q->generation)return DXGI_ERROR_DEVICE_REMOVED;
     if(completed)*completed=page.Completed;return S_OK;
 }
+void flush(Queue *q) {
+    pipe_fence_handle *fence=nullptr;q->draw->flush(q->draw,&fence,0);
+    if(fence) {
+        q->device->screen->fence_finish(q->device->screen,q->draw,fence,0);
+        q->device->screen->fence_reference(q->device->screen,&fence,nullptr);
+    }
+}
 HRESULT WINAPI host_allocate(void *user,unsigned bytes,unsigned,GPU_ALLOCATION *out){return allocate(static_cast<Device *>(user),bytes,*out);}
 void WINAPI host_free(void *user,const GPU_ALLOCATION *memory){GPU_ALLOCATION copy=*memory;release(static_cast<Device *>(user),copy);}
 HRESULT WINAPI host_create(void *device,void *queue,void **out) {
@@ -236,7 +245,7 @@ HRESULT WINAPI host_create(void *device,void *queue,void **out) {
         q->context=context.hContext;
         if(!data.CompletionPage) {
             A830_CONTEXT_QUERY query{A830_ABI_VERSION,0,0};D3DDDICB_ESCAPE e{};e.hDevice=d->runtime.handle;e.hContext=q->context;
-            e.pPrivateDriverData=&query;e.PrivateDriverDataSize=sizeof(query);hr=d->kernel.pfnEscapeCb(d->adapter,&e);data.CompletionPage=query.CompletionPage;
+            e.pPrivateDriverData=&query;e.PrivateDriverDataSize=sizeof(query);hr=d->kernel.pfnEscapeCb(d->adapter->runtime,&e);data.CompletionPage=query.CompletionPage;
         }
         q->page=reinterpret_cast<volatile A830_COMPLETION *>(static_cast<uintptr_t>(data.CompletionPage));
         A830_COMPLETION page;
@@ -266,7 +275,8 @@ HRESULT submit(Queue *q,const GPU_SUBMIT *commands,UINT count) {
     return hr;
 }
 HRESULT WINAPI host_submit(void *user,const GPU_SUBMIT *commands,unsigned count,UINT64 *fence) {
-    Queue *q=static_cast<Queue *>(user);HRESULT hr=submit(q,commands,count);*fence=q->submitted;return hr;
+    Queue *q=static_cast<Queue *>(user);HRESULT hr=submit(q,commands,count);*fence=q->submitted;
+    if(FAILED(hr))InterlockedCompareExchange(&q->failure,hr,0);return hr;
 }
 HRESULT WINAPI host_wait(void *user,UINT64 fence,UINT64 timeout) {
     Queue *q=static_cast<Queue *>(user);ULONGLONG start=GetTickCount64();
@@ -285,7 +295,7 @@ bool load_backend(Device *d) {
     HMODULE self=nullptr;WCHAR path[MAX_PATH];
     if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
        reinterpret_cast<LPCWSTR>(load_backend),&self) || !GetModuleFileNameW(self,path,MAX_PATH))return false;
-    WCHAR *tail=wcsrchr(path,L'\\');if(!tail)return false;tail[1]=0;if(wcscat_s(path,L"a830_gpu.dll"))return false;
+    WCHAR *tail=wcsrchr(path,L'\\');if(!tail)return false;tail[1]=0;if(wcscat_s(path,A830_MODULE(L"a830_gpu")))return false;
     d->backend=LoadLibraryExW(path,nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);if(!d->backend)return false;
 #define GPU_LOAD(field,name) d->field=reinterpret_cast<decltype(d->field)>(GetProcAddress(d->backend,name));if(!d->field)return false;
     GPU_LOAD(gpu_screen,"A830GpuScreen");GPU_LOAD(gpu_context,"A830GpuContext");
@@ -303,12 +313,13 @@ HRESULT APIENTRY create_fence(D3D12DDI_HDEVICE hd,D3D12DDI_HFENCE hf,const D3D12
     if(!hf.pDrvPrivate || !p || p->FenceCount!=1 || !p->Fences)return E_INVALIDARG;
     const auto &f=p->Fences[0];
     if((f.Flags&~D3D12DDI_FENCE_FLAG_BOTTOM_OF_PIPE) ||
-       !A830GpuFenceAddress(f.FenceValue.BaseAddress) || !A830GpuFenceAddress(f.FenceMonitoredValue.BaseAddress))return E_INVALIDARG;
+       ((f.FenceValue.BaseAddress || f.FenceMonitoredValue.BaseAddress) &&
+        (!A830GpuFenceAddress(f.FenceValue.BaseAddress) || !A830GpuFenceAddress(f.FenceMonitoredValue.BaseAddress))))return E_INVALIDARG;
     new(hf.pDrvPrivate) Fence{object<Device>(hd),f.FenceValue.BaseAddress};return S_OK;
 }
 void APIENTRY destroy_fence(D3D12DDI_HDEVICE,D3D12DDI_HFENCE h){object<Fence>(h)->~Fence();}
 HRESULT signal(Queue *q,UINT64 address,UINT64 value) {
-    q->draw->flush(q->draw,nullptr,0);
+    flush(q);
     UINT64 completed;HRESULT hr=queue_status(q,&completed);if(FAILED(hr))return hr;
     while(!q->retired.empty() && q->retired.front().fence<=completed){release(q->device,q->retired.front().memory);q->retired.pop_front();}
     UINT words[12];if(!A830BuildGpuSignal(words,12,address,value))return E_INVALIDARG;
@@ -325,7 +336,7 @@ HRESULT signal(Queue *q,UINT64 address,UINT64 value) {
 HRESULT fence_ready(Queue *q,UINT64 address,UINT64 value) {
     HRESULT hr=queue_status(q);if(FAILED(hr))return hr;
     A830_FENCE_QUERY query{A830_ABI_VERSION,0,address,0};D3DDDICB_ESCAPE escape{};escape.hDevice=q->device->runtime.handle;escape.hContext=q->context;
-    escape.pPrivateDriverData=&query;escape.PrivateDriverDataSize=sizeof(query);hr=q->device->kernel.pfnEscapeCb(q->device->adapter,&escape);
+    escape.pPrivateDriverData=&query;escape.PrivateDriverDataSize=sizeof(query);hr=q->device->kernel.pfnEscapeCb(q->device->adapter->runtime,&escape);
     return FAILED(hr)?hr:query.Value>=value?S_OK:S_FALSE;
 }
 HRESULT execute_work(Queue *q,const Work &work) {
@@ -334,7 +345,7 @@ HRESULT execute_work(Queue *q,const Work &work) {
         try {q->state=std::make_shared<State>();}catch(const std::bad_alloc &){return E_OUTOFMEMORY;}
         for(const auto &op:recording->ops){HRESULT hr=op(q);if(FAILED(hr))return hr;}
     }
-    q->draw->flush(q->draw,nullptr,0);return S_OK;
+    flush(q);return queue_status(q);
 }
 void CALLBACK queue_worker(PTP_CALLBACK_INSTANCE,void *context,PTP_WORK) {
     Queue *q=static_cast<Queue *>(context);
@@ -401,7 +412,7 @@ HRESULT APIENTRY create_queue(D3D12DDI_HDEVICE hd,const D3D12DDIARG_CREATECOMMAN
                 if(!data.CompletionPage) {
                     A830_CONTEXT_QUERY query{A830_ABI_VERSION,0,0};D3DDDICB_ESCAPE e{};
                     e.hDevice=d->runtime.handle;e.hContext=q->context;e.pPrivateDriverData=&query;e.PrivateDriverDataSize=sizeof(query);
-                    hr=d->kernel.pfnEscapeCb(d->adapter,&e);data.CompletionPage=query.CompletionPage;
+                    hr=d->kernel.pfnEscapeCb(d->adapter->runtime,&e);data.CompletionPage=query.CompletionPage;
                 }
                 q->page=reinterpret_cast<volatile A830_COMPLETION *>(static_cast<uintptr_t>(data.CompletionPage));
                 A830_COMPLETION page;
@@ -422,7 +433,7 @@ void APIENTRY destroy_queue(D3D12DDI_HDEVICE,D3D12DDI_HCOMMANDQUEUE h) {
     InterlockedExchange(&q->stopping,1);SetEvent(q->event);
     WaitForThreadpoolWorkCallbacks(q->worker,FALSE);CloseThreadpoolWork(q->worker);
     if(q->draw) {
-        q->draw->flush(q->draw,nullptr,0);release_samplers(q);
+        flush(q);release_samplers(q);
         delete_queue_shaders(q);
         q->draw->bind_vertex_elements_state(q->draw,nullptr);
         if(q->vertex_layout)q->draw->delete_vertex_elements_state(q->draw,q->vertex_layout);
@@ -483,7 +494,7 @@ void device_table(D3D12DDI_DEVICE_FUNCS_CORE_0003 *f) {
     f->pfnCalcPrivateFenceSize=fence_size;f->pfnCreateFence=create_fence;f->pfnDestroyFence=destroy_fence;
     f->pfnCalcPrivateCommandSignatureSize=signature_size;f->pfnCreateCommandSignature=create_signature;f->pfnDestroyCommandSignature=destroy_signature;
 }
-HRESULT APIENTRY fill_table(D3D12DDI_HADAPTER,D3D12DDI_TABLE_TYPE type,void *table,SIZE_T size,UINT,D3D12DDI_HRTTABLE) {
+HRESULT APIENTRY fill_table(D3D12DDI_HADAPTER ha,D3D12DDI_TABLE_TYPE type,void *table,SIZE_T size,UINT instance,D3D12DDI_HRTTABLE runtime) {
     if(!table)return E_INVALIDARG;
     switch(type) {
     case D3D12DDI_TABLE_TYPE_DEVICE_CORE:
@@ -510,6 +521,7 @@ HRESULT APIENTRY fill_table(D3D12DDI_HADAPTER,D3D12DDI_TABLE_TYPE type,void *tab
         f->pfnDiscardResource=discard_resource;f->pfnSetMarker=set_marker;f->pfnClearRootArguments=clear_roots;
         f->pfnSOSetTargets=set_stream_targets;
         f->pfnBlt=blt;f->pfnPresent=present;
+        if(!instance)object<Adapter>(ha)->command_table=runtime;
         return S_OK;
     }
     case D3D12DDI_TABLE_TYPE_COMMAND_QUEUE_3D: {
@@ -523,7 +535,7 @@ SIZE_T APIENTRY device_size(D3D12DDI_HADAPTER,const D3D12DDIARG_CALCPRIVATEDEVIC
 HRESULT APIENTRY create_device(D3D12DDI_HADAPTER ha,const D3D12DDIARG_CREATEDEVICE_0003 *p) {
     if(p->Interface!=D3D12DDI_INTERFACE_VERSION || !p->hDrvDevice.pDrvPrivate || !p->pKTCallbacks || !p->p12UMCallbacks)return E_INVALIDARG;
     const auto *c=p->p12UMCallbacks;
-    if(!c->pfnSetErrorCb || !c->pfnSetCommandListErrorCb || !c->pfnCreateContextCb || !c->pfnDestroyContextCb ||
+    if(!c->pfnSetErrorCb || !c->pfnSetCommandListErrorCb || !c->pfnSetCommandListDDITableCb || !c->pfnCreateContextCb || !c->pfnDestroyContextCb ||
        !c->pfnCreateContextVirtualCb || !p->pKTCallbacks->pfnAllocateCb || !p->pKTCallbacks->pfnDeallocate2Cb ||
        !p->pKTCallbacks->pfnMapGpuVirtualAddressCb || !p->pKTCallbacks->pfnFreeGpuVirtualAddressCb ||
        !p->pKTCallbacks->pfnLock2Cb || !p->pKTCallbacks->pfnUnlock2Cb || !p->pKTCallbacks->pfnMakeResidentCb ||
@@ -532,7 +544,7 @@ HRESULT APIENTRY create_device(D3D12DDI_HADAPTER ha,const D3D12DDIARG_CREATEDEVI
        !p->pKTCallbacks->pfnSubmitCommandCb || !p->pKTCallbacks->pfnEscapeCb || !c->pfnMakeResidentCb || !c->pfnEvictCb ||
        !c->pfnOfferAllocationsCb || !c->pfnReclaimAllocations2Cb)return E_INVALIDARG;
     Device *d;
-    try {d=new(p->hDrvDevice.pDrvPrivate) Device{object<Adapter>(ha)->runtime,p->hRTDevice,*p->pKTCallbacks,*c};}
+    try {d=new(p->hDrvDevice.pDrvPrivate) Device{object<Adapter>(ha),p->hRTDevice,*p->pKTCallbacks,*c};}
     catch(const std::bad_alloc &){return E_OUTOFMEMORY;}
     InitializeSRWLock(&d->memory_lock);
     HRESULT hr=d->kernel.pfnCreatePagingQueueCb(d->runtime.handle,&d->paging);

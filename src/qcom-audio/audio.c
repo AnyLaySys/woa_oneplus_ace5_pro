@@ -1,4 +1,5 @@
 #include "sia9177.h"
+#include "../platform/lock.h"
 
 #define SMMU_PHYS               0x15000000ull
 #define SMMU_MAP_SIZE           0x1000u
@@ -114,7 +115,7 @@ typedef struct {
     ULONG SmmuActiveS2cr;
 } SIA_MAPPING, *PSIA_MAPPING;
 static SIA_MAPPING DspMapping;
-static FAST_MUTEX DspMappingLock;
+
 static ULONG DspMappingUsers;
 
 static const ULONG SiaStreamMatches[SMMU_STREAMS] = { 0x80801001u, 0x80201041u };
@@ -471,19 +472,18 @@ AuSmmuRestore (
     Au->Smmu = NULL;
 }
 
-VOID SiaDspMemoryInit(VOID) { ExInitializeFastMutex(&DspMappingLock); }
 NTSTATUS SiaDspMemoryAcquire(VOID) {
-    ExAcquireFastMutex(&DspMappingLock);NTSTATUS status=STATUS_SUCCESS;
+    PLATFORM_LOCK_GUARD guard={0};NTSTATUS status=PlatformLockAcquire(&guard,TRUE);if(status!=STATUS_SUCCESS)return status;
     if(!DspMappingUsers) {
         RtlZeroMemory(&DspMapping,sizeof(DspMapping));status=AuSmmuSetup(&DspMapping);
         if(!NT_SUCCESS(status) && DspMapping.Smmu)AuSmmuRestore(&DspMapping);
     }
-    if(NT_SUCCESS(status))++DspMappingUsers;ExReleaseFastMutex(&DspMappingLock);return status;
+    if(NT_SUCCESS(status))++DspMappingUsers;NTSTATUS released=PlatformLockRelease(&guard);return NT_SUCCESS(status)?released:status;
 }
 VOID SiaDspMemoryRelease(BOOLEAN retain) {
-    ExAcquireFastMutex(&DspMappingLock);
+    PLATFORM_LOCK_GUARD guard={0};if(PlatformLockAcquire(&guard,TRUE)!=STATUS_SUCCESS)return;
     if(!retain && DspMappingUsers && !--DspMappingUsers)AuSmmuRestore(&DspMapping);
-    ExReleaseFastMutex(&DspMappingLock);
+    PlatformLockRelease(&guard);
 }
 
 static
@@ -495,15 +495,13 @@ AuPins (
     )
 {
     ULONG Pin;
-    ULONG Offset;
 
     for (Pin = TLMM_I2S_FIRST; Pin <= TLMM_I2S_LAST; Pin++) {
-        Offset = Pin * TLMM_STRIDE;
         if (On) {
-            Au->PinCtl[Pin - TLMM_I2S_FIRST] = SiaRead32 (Dev->Tlmm, Offset);
-            SiaWrite32 (Dev->Tlmm, Offset, (Au->PinCtl[Pin - TLMM_I2S_FIRST] & ~0x3FFu) | (1u << 2) | (1u << 6) | (Pin == TLMM_I2S_LAST ? 1u : 0u));
+            Au->PinCtl[Pin - TLMM_I2S_FIRST] = SiaRead32 (SiaPin(Dev,Pin), 0);
+            SiaWrite32 (SiaPin(Dev,Pin), 0, (Au->PinCtl[Pin - TLMM_I2S_FIRST] & ~0x3FFu) | (1u << 2) | (1u << 6) | (Pin == TLMM_I2S_LAST ? 1u : 0u));
         } else {
-            SiaWrite32 (Dev->Tlmm, Offset, Au->PinCtl[Pin - TLMM_I2S_FIRST]);
+            SiaWrite32 (SiaPin(Dev,Pin), 0, Au->PinCtl[Pin - TLMM_I2S_FIRST]);
         }
     }
     Au->PinsOn = On;

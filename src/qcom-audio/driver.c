@@ -1,4 +1,8 @@
+#include <ntifs.h>
 #include "sia9177.h"
+static const ULONG PinFirst[]={2,72,101,121,164};
+static const ULONG PinSizes[]={0x1000,0x2000,0x1000,0x4000,0x1000};
+PUCHAR SiaPin(PSIA_DEVICE Dev,ULONG pin){for(ULONG i=0;i<RTL_NUMBER_OF(PinFirst);i++)if(pin>=PinFirst[i]&&pin<PinFirst[i]+PinSizes[i]/0x1000)return Dev->Pins[i]+(pin-PinFirst[i])*0x1000;return NULL;}
 
 VOID
 SiaSleep (
@@ -74,11 +78,12 @@ SiaWorker (PVOID Context)
 }
 
 NTSTATUS
-SiaHardwareStart (PSIA_DEVICE Dev, PCM_PARTIAL_RESOURCE_DESCRIPTOR Resource)
+SiaHardwareStart (PSIA_DEVICE Dev,PDEVICE_OBJECT Device,PCM_PARTIAL_RESOURCE_DESCRIPTOR Resource)
 {
     PHYSICAL_ADDRESS Physical;
     OBJECT_ATTRIBUTES Attributes;
     RtlZeroMemory (Dev, sizeof (*Dev));
+    Dev->Pdo=IoGetDeviceAttachmentBaseRef(Device);
     Dev->Gain[0]=Dev->Gain[1]=SIA_GAIN_ONE;
     KeInitializeEvent (&Dev->WorkEvent, SynchronizationEvent, FALSE);
     for (ULONG Index = 0; Index < 2; Index++) {
@@ -90,9 +95,12 @@ SiaHardwareStart (PSIA_DEVICE Dev, PCM_PARTIAL_RESOURCE_DESCRIPTOR Resource)
     Dev->Se = MmMapIoSpaceEx (Resource->u.Memory.Start, Dev->SeSize, PAGE_READWRITE | PAGE_NOCACHE);
     Physical.QuadPart = SIA_GCC_PHYS;
     Dev->Gcc = MmMapIoSpaceEx (Physical, SIA_GCC_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
-    Physical.QuadPart = SIA_TLMM_PHYS;
-    Dev->Tlmm = MmMapIoSpaceEx (Physical, SIA_TLMM_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
-    if (!Dev->Se || !Dev->Gcc || !Dev->Tlmm) return STATUS_INSUFFICIENT_RESOURCES;
+    for(ULONG i=0;i<RTL_NUMBER_OF(PinFirst);i++) {
+        Physical.QuadPart=SIA_TLMM_PHYS+PinFirst[i]*0x1000;
+        Dev->Pins[i]=MmMapIoSpaceEx(Physical,PinSizes[i],PAGE_READWRITE|PAGE_NOCACHE);
+        if(!Dev->Pins[i])return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    if (!Dev->Se || !Dev->Gcc) return STATUS_INSUFFICIENT_RESOURCES;
     InitializeObjectAttributes (&Attributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
     return PsCreateSystemThread (&Dev->Thread, THREAD_ALL_ACCESS, &Attributes, NULL, NULL, SiaWorker, Dev);
 }
@@ -145,6 +153,7 @@ SiaHardwareStop (PSIA_DEVICE Dev)
     }
     if (Dev->Se) MmUnmapIoSpace (Dev->Se, Dev->SeSize);
     if (Dev->Gcc) MmUnmapIoSpace (Dev->Gcc, SIA_GCC_SIZE);
-    if (Dev->Tlmm) MmUnmapIoSpace (Dev->Tlmm, SIA_TLMM_SIZE);
-    Dev->Se = Dev->Gcc = Dev->Tlmm = NULL;
+    for(ULONG i=0;i<RTL_NUMBER_OF(PinSizes);i++)if(Dev->Pins[i]){MmUnmapIoSpace(Dev->Pins[i],PinSizes[i]);Dev->Pins[i]=NULL;}
+    Dev->Se = Dev->Gcc = NULL;
+    if(Dev->Pdo){ObDereferenceObject(Dev->Pdo);Dev->Pdo=NULL;}
 }

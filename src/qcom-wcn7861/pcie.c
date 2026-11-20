@@ -4,6 +4,7 @@
  * ath12k_pci_msi_alloc; wifi7/pci.c PEACH probe).
  */
 #include "wcn7861.h"
+#include "../platform/lock.h"
 
 ULONG
 WcnBarRead (
@@ -384,8 +385,9 @@ WcnSmrOverlaps (
  * mode (900E). Free slots are taken from the top so the touch driver, which
  * scans from the bottom, does not race for the same one.
  */
+static
 NTSTATUS
-WcnSmmuSetup (VOID)
+WcnSmmuSetupLocked (VOID)
 {
     const ULONG Id = WCN_SID_BASE;
     const ULONG Mask = 0x1;
@@ -463,4 +465,12 @@ WcnSmmuSetup (VOID)
 out:
     MmUnmapIoSpace ((PVOID)Smmu, PAGE_SIZE);
     return Status;
+}
+
+NTSTATUS WcnSmmuSetup(VOID) {
+    PLATFORM_LOCK_GUARD guard={0};NTSTATUS status=PlatformLockAcquire(&guard,TRUE);
+    if(status!=STATUS_SUCCESS)return status;
+    __try {status=WcnSmmuSetupLocked();}
+    __finally {NTSTATUS released=PlatformLockRelease(&guard);if(NT_SUCCESS(status))status=released;}
+    return status;
 }

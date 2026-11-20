@@ -1,4 +1,6 @@
 #include "hummer_spi.h"
+#include "../../platform/acpi.h"
+#include "../../platform/lock.h"
 
 #define HSP_C_CONFIG            0x00u
 #define HSP_C_R_LENGTH          0x04u
@@ -47,7 +49,7 @@
 #define HSP_TCE_EOT             2u
 #define HSP_TCE_EOB             4u
 
-#define HSP_EE_OFF              0x10000u
+#define HSP_EE_OFF              0x24000u
 
 #define HSP_CH_CNTXT(n, k)      (0x20000u + 0x4000u * (n) + 0x80u * (k))
 #define HSP_CH_QOS(n, k)        (0x2005Cu + 0x4000u * (n) + 0x80u * (k))
@@ -93,7 +95,6 @@
 
 #define HSP_TLMM_STRIDE         0x1000u
 #define HSP_OE_BIT              9u
-#define HSP_GCC_VOTE_ENABLE     0x52008u
 #define HSP_GCC_GPLL0_ENABLE    0x52020u
 #define HSP_VOTE_CORE_2X        (1u << 18)
 #define HSP_VOTE_CORE           (1u << 19)
@@ -336,8 +337,8 @@ HspClocksOn (
     Value = HspRd (Ctx->Gcc, HSP_GCC_GPLL0_ENABLE);
     HspWr (Ctx->Gcc, HSP_GCC_GPLL0_ENABLE, Value | 1u);
 
-    Value = HspRd (Ctx->Gcc, HSP_GCC_VOTE_ENABLE);
-    HspWr (Ctx->Gcc, HSP_GCC_VOTE_ENABLE, Value | HSP_VOTE_ALL);
+    NTSTATUS VoteStatus=PlatformVote(WdfDeviceWdmGetPhysicalDevice(Ctx->Device),HSP_VOTE_ALL);
+    if(!NT_SUCCESS(VoteStatus))return VoteStatus;
 
     for (Index = 0; Index < 200; Index++) {
         Value = HspRd (Ctx->Gcc, HSP_HALT_CORE_2X);
@@ -360,7 +361,7 @@ HspClocksOn (
 }
 
 NTSTATUS
-HspResetAndConfigurePins (_In_ PUCHAR Tlmm)
+HspResetAndConfigurePins (_In_ PUCHAR Pins,_In_ PUCHAR Reset)
 {
     ULONG Pin;
     ULONG Config;
@@ -368,32 +369,32 @@ HspResetAndConfigurePins (_In_ PUCHAR Tlmm)
     ULONG ResetHigh;
     LARGE_INTEGER Delay;
 
-    if (Tlmm == NULL) {
+    if (Pins == NULL || Reset == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
     for (Pin = 48; Pin <= 51; Pin++) {
-        HspWr(Tlmm, Pin * HSP_TLMM_STRIDE, 0x84u);
-        Config = HspRd(Tlmm, Pin * HSP_TLMM_STRIDE);
+        HspWr(Pins, (Pin-48) * HSP_TLMM_STRIDE, 0x84u);
+        Config = HspRd(Pins, (Pin-48) * HSP_TLMM_STRIDE);
         if ((Config & 0x3FFu) != 0x84u) {
             return STATUS_IO_DEVICE_ERROR;
         }
     }
-    HspWr(Tlmm, 162 * HSP_TLMM_STRIDE, 0);
-    HspWr(Tlmm, 161 * HSP_TLMM_STRIDE + 4, 2);
-    HspWr(Tlmm, 161 * HSP_TLMM_STRIDE, 1u << HSP_OE_BIT);
-    Config = HspRd(Tlmm, 161 * HSP_TLMM_STRIDE);
-    if ((Config & 0x3FFu) != 0x200u || (HspRd(Tlmm, 162 * HSP_TLMM_STRIDE) & 0x3FFu) != 0) {
+    HspWr(Reset, HSP_TLMM_STRIDE, 0);
+    HspWr(Reset, 0 + 4, 2);
+    HspWr(Reset, 0, 1u << HSP_OE_BIT);
+    Config = HspRd(Reset, 0);
+    if ((Config & 0x3FFu) != 0x200u || (HspRd(Reset, HSP_TLMM_STRIDE) & 0x3FFu) != 0) {
         return STATUS_IO_DEVICE_ERROR;
     }
-    if ((HspRd(Tlmm, 161 * HSP_TLMM_STRIDE) & 0x3FFu) != 0x200u) {
+    if ((HspRd(Reset, 0) & 0x3FFu) != 0x200u) {
         return STATUS_INVALID_DEVICE_STATE;
     }
-    HspWr(Tlmm, 161 * HSP_TLMM_STRIDE + 4, 0);
+    HspWr(Reset, 0 + 4, 0);
     Delay.QuadPart = -100000;
     KeDelayExecutionThread(KernelMode, FALSE, &Delay);
-    ResetLow = HspRd(Tlmm, 161 * HSP_TLMM_STRIDE + 4);
-    HspWr(Tlmm, 161 * HSP_TLMM_STRIDE + 4, 2);
-    ResetHigh = HspRd(Tlmm, 161 * HSP_TLMM_STRIDE + 4);
+    ResetLow = HspRd(Reset, 0 + 4);
+    HspWr(Reset, 0 + 4, 2);
+    ResetHigh = HspRd(Reset, 0 + 4);
     Delay.QuadPart = -2000000;
     KeDelayExecutionThread(KernelMode, FALSE, &Delay);
     return (ResetLow & 2u) == 0 && (ResetHigh & 2u) != 0 ? STATUS_SUCCESS : STATUS_IO_DEVICE_ERROR;
@@ -407,8 +408,9 @@ HspSmmuMatch(ULONG Smr, ULONG StreamId)
         (((Smr ^ StreamId) & ~(Smr >> 16) & 0x7FFFu) == 0);
 }
 
+static
 NTSTATUS
-HspConfigureSmmu (_Inout_ PHSP_CTX Ctx)
+HspConfigureSmmuLocked (_Inout_ PHSP_CTX Ctx)
 {
     ULONG Count, Slot, Index, Stream[2] = { HSP_GPI_STREAM_ID, HSP_QUP_STREAM_ID };
     ULONG FoundUfs = MAXULONG, FreeSlot[2] = { MAXULONG, MAXULONG };
@@ -484,6 +486,14 @@ rollback:
         Ctx->SmmuChanged[Item] = FALSE;
     }
     return STATUS_IO_DEVICE_ERROR;
+}
+
+NTSTATUS HspConfigureSmmu(PHSP_CTX Ctx) {
+    PLATFORM_LOCK_GUARD guard={0};NTSTATUS status=PlatformLockAcquire(&guard,TRUE);
+    if(status!=STATUS_SUCCESS)return status;
+    __try {status=HspConfigureSmmuLocked(Ctx);}
+    __finally {NTSTATUS released=PlatformLockRelease(&guard);if(NT_SUCCESS(status))status=released;}
+    return status;
 }
 
 static
@@ -612,7 +622,6 @@ HspInit (
     _In_ WDFDEVICE Device,
     _In_ PUCHAR Se,
     _In_ PUCHAR Gpi,
-    _In_ PUCHAR Tlmm,
     _In_ PUCHAR Gcc,
     _In_ PUCHAR Smmu
     )
@@ -625,11 +634,11 @@ HspInit (
     PVOID Addresses[5];
     PHYSICAL_ADDRESS Logical[5];
 
-    if (Ctx == NULL || Device == NULL || Se == NULL || Gpi == NULL || Tlmm == NULL || Gcc == NULL || Smmu == NULL) {
+    if (Ctx == NULL || Device == NULL || Se == NULL || Gpi == NULL || Gcc == NULL || Smmu == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
     RtlZeroMemory(Ctx, sizeof(*Ctx));
-    Ctx->Se = Se; Ctx->Gpi = Gpi; Ctx->Tlmm = Tlmm; Ctx->Gcc = Gcc;
+    Ctx->Se = Se; Ctx->Gpi = Gpi; Ctx->Device = Device; Ctx->Gcc = Gcc;
     Ctx->Smmu = Smmu;
     WDF_DMA_ENABLER_CONFIG_INIT(&DmaConfig, WdfDmaProfileScatterGather64Duplex, HSP_DATA_BYTES);
     DmaConfig.AddressWidthOverride = 32;

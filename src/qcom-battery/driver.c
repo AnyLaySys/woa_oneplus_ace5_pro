@@ -11,7 +11,6 @@ static NTSTATUS BatPnp (PDEVICE_OBJECT DeviceObject, PIRP Irp);
 static NTSTATUS BatPower (PDEVICE_OBJECT DeviceObject, PIRP Irp);
 static NTSTATUS BatUnsupported (PDEVICE_OBJECT DeviceObject, PIRP Irp);
 static NTSTATUS BatComplete (PIRP Irp, NTSTATUS Status);
-static IO_COMPLETION_ROUTINE BatStartComplete;
 static DRIVER_UNLOAD BatUnload;
 static DRIVER_DISPATCH BatSystemControl;
 static WMI_QUERY_REGINFO_CALLBACK BatWmiInfo;
@@ -106,11 +105,6 @@ BatAddDevice (
     DeviceObject->Flags |= DO_POWER_PAGABLE;
     DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
 
-    Status = BatHardwareInit (Dev);
-    if (!NT_SUCCESS (Status)) {
-        KeStallExecutionProcessor (20000);
-        Status = BatHardwareInit (Dev);
-    }
     Status=BatMiniportInit(Dev);
     if(!NT_SUCCESS(Status)){
         BatHardwareStop(Dev);IoDetachDevice(Dev->Lower);IoDeleteDevice(DeviceObject);return Status;
@@ -131,7 +125,8 @@ BatHardwareInit (
     NTSTATUS Status;
 
     if (Dev->Tlmm == NULL) {
-        Phys.QuadPart = BAT_TLMM_PHYS;
+        Phys=Dev->Registers;
+        if(Phys.QuadPart!=BAT_TLMM_PHYS)return STATUS_DEVICE_CONFIGURATION_ERROR;
         Dev->Tlmm = (PUCHAR)MmMapIoSpaceEx (Phys, BAT_TLMM_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
         if (Dev->Tlmm == NULL) {
             return STATUS_INSUFFICIENT_RESOURCES;
@@ -195,27 +190,6 @@ BatHardwareStop (
         MmUnmapIoSpace (Dev->Tlmm, BAT_TLMM_SIZE);
         Dev->Tlmm = NULL;
     }
-}
-
-static NTSTATUS
-BatStartComplete (
-    _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ PIRP Irp,
-    _In_ PVOID Context
-    )
-{
-    PBAT_DEVICE Dev = (PBAT_DEVICE)Context;
-
-    UNREFERENCED_PARAMETER (DeviceObject);
-
-    if (NT_SUCCESS (Irp->IoStatus.Status)) {
-        (VOID)BatHardwareStart (Dev);
-
-    }
-    if (Irp->PendingReturned) {
-        IoMarkIrpPending (Irp);
-    }
-    return STATUS_SUCCESS;
 }
 
 static NTSTATUS
@@ -361,13 +335,29 @@ BatPnp (
     NTSTATUS Status;
 
     switch (Stack->MinorFunction) {
-    case IRP_MN_START_DEVICE:
-        IoCopyCurrentIrpStackLocationToNext (Irp);
-        IoSetCompletionRoutine (Irp, BatStartComplete, Dev, TRUE, TRUE, TRUE);
-        return IoCallDriver (Dev->Lower, Irp);
+    case IRP_MN_START_DEVICE: {
+        PCM_RESOURCE_LIST resources=Stack->Parameters.StartDevice.AllocatedResourcesTranslated;
+        ULONG count=0;if(!resources)return BatComplete(Irp,STATUS_DEVICE_CONFIGURATION_ERROR);
+        for(ULONG i=0;i<resources->Count;i++) {
+            PCM_PARTIAL_RESOURCE_LIST list=&resources->List[i].PartialResourceList;
+            for(ULONG n=0;n<list->Count;n++) {
+                PCM_PARTIAL_RESOURCE_DESCRIPTOR r=&list->PartialDescriptors[n];
+                if(r->Type!=CmResourceTypeMemory||r->u.Memory.Start.QuadPart!=BAT_TLMM_PHYS||r->u.Memory.Length!=BAT_TLMM_SIZE)
+                    return BatComplete(Irp,STATUS_DEVICE_CONFIGURATION_ERROR);
+                Dev->Registers=r->u.Memory.Start;count++;
+            }
+        }
+        if(count!=1)return BatComplete(Irp,STATUS_DEVICE_CONFIGURATION_ERROR);
+        if(!IoForwardIrpSynchronously(Dev->Lower,Irp))return BatComplete(Irp,STATUS_UNSUCCESSFUL);
+        Status=Irp->IoStatus.Status;
+        if(NT_SUCCESS(Status))Status=BatHardwareStart(Dev);
+        if(!NT_SUCCESS(Status))BatHardwareStop(Dev);
+        return BatComplete(Irp,Status);
+    }
 
     case IRP_MN_STOP_DEVICE:
         BatHardwareStop (Dev);
+        Dev->Registers.QuadPart=0;
         break;
 
     case IRP_MN_REMOVE_DEVICE:

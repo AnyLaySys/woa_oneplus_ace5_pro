@@ -10,8 +10,8 @@
 #define BAT_GPIO_SDA            66u
 #define BAT_GPIO_SCL            67u
 
-#define BAT_TLMM_PHYS           0x0F100000ull
-#define BAT_TLMM_SIZE           0x000A6000u
+#define BAT_TLMM_PHYS           0x0F142000ull
+#define BAT_TLMM_SIZE           0x00002000u
 
 #define BAT_TLMM_STRIDE         0x1000u
 #define BAT_TLMM_FUNC_GPIO      0u
@@ -56,6 +56,7 @@ typedef struct _BAT_DEVICE
     WMILIB_CONTEXT             Wmi;
     BOOLEAN                    WmiRegistered;
     PUCHAR                     Tlmm;
+    PHYSICAL_ADDRESS          Registers;
     HANDLE                     Thread;
     KEVENT                     StopEvent;
     volatile LONG              Stopping;

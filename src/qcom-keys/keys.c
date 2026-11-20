@@ -16,16 +16,14 @@ static EVT_WDF_INTERRUPT_ISR Isr;
 
 typedef struct { UCHAR Id,Value; } REPORT;
 typedef struct {
-    PUCHAR Base[5],Observe[2],Channel[2],Irq[2];
+    PUCHAR Observe[2],Channel[2],Irq[2];
     WDFQUEUE Reads;
     WDFTIMER Timer;
-    WDFINTERRUPT Interrupt;
-    ULONG Apids,PdcConfig,PdcEnable;
-    BOOLEAN PdcSaved,PdcBank;
     volatile LONG Online;
     UCHAR State,Candidate,Debounce[3],Failures,Head,Count;
     REPORT Pending[16];
     PUCHAR HapticObserve[2],HapticChannel[2];
+    BOOLEAN HapticInterrupt[2];
     WDFDEVICE HapticDevice;
     WDFTIMER HapticTimer;
     NTSTATUS HapticStatus;
@@ -37,8 +35,6 @@ typedef struct {
     KEY_FEEDBACK Feedback;
 } KEYS;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(KEYS,Context);
-static const ULONG Bases[]={0x0c400000,0x0c42d000,0x0c440000,0x0c500000,0x0b220000};
-static const ULONG Sizes[]={0x3000,0x4000,0x80000,0x400000,0x10000};
 static const UCHAR Masks[]={0xc0,1};
 static const UCHAR Descriptor[]={
     0x05,0x01,0x09,0x0d,0xa1,0x01,0x85,0x01,0x09,0x81,0x15,0x00,0x25,0x01,
@@ -167,12 +163,6 @@ static BOOLEAN Isr(WDFINTERRUPT interrupt,ULONG message) {
             if(!NT_SUCCESS(Transfer(k->Channel[i],0x14,&pending,TRUE))){Write(k->Irq[i],0x100,0);k->Failures=4;}
             handled=TRUE;
         }
-        if(!handled)for(ULONG i=0;i<k->Apids;i++) {
-            if(!(Read(k->Base[0],0x2000+4*i)&0x1000000)||(Read(k->Base[1],4*i)&7))continue;
-            PUCHAR channel=k->Base[3]+0x1000*i;
-            if(channel==k->Irq[0]||channel==k->Irq[1]||!Read(channel,0x104))continue;
-            Write(channel,0x100,0);handled=TRUE;
-        }
         if(handled){RtlZeroMemory(k->Debounce,sizeof(k->Debounce));WdfTimerStart(k->Timer,WDF_REL_TIMEOUT_IN_MS(10));}
     }
     WdfObjectReleaseLock(device);return handled;
@@ -181,29 +171,37 @@ static NTSTATUS Prepare(WDFDEVICE device,WDFCMRESLIST raw,WDFCMRESLIST resources
     static const GUID display={0x6fe69556,0x704a,0x47a0,{0x8f,0x24,0xc2,0x8d,0x93,0x6f,0xda,0x47}};
     KEYS *k=Context(device);
     WDF_INTERRUPT_CONFIG irq;WDF_INTERRUPT_CONFIG_INIT(&irq,Isr,NULL);irq.PassiveHandling=TRUE;
-    ULONG n=0;
     for(ULONG i=0;i<WdfCmResourceListGetCount(resources);i++) {
         PCM_PARTIAL_RESOURCE_DESCRIPTOR r=WdfCmResourceListGetDescriptor(resources,i);
-        if(r->Type==CmResourceTypeInterrupt){irq.InterruptRaw=WdfCmResourceListGetDescriptor(raw,i);irq.InterruptTranslated=r;}
-        if(r->Type!=CmResourceTypeMemory)continue;
-        if(n>=RTL_NUMBER_OF(Bases)||r->u.Memory.Start.QuadPart!=Bases[n]||r->u.Memory.Length!=Sizes[n])return STATUS_DEVICE_CONFIGURATION_ERROR;
-        k->Base[n]=MmMapIoSpaceEx(r->u.Memory.Start,Sizes[n],PAGE_READWRITE|PAGE_NOCACHE);
-        if(!k->Base[n])return STATUS_INSUFFICIENT_RESOURCES;
-        n++;
+        if(r->Type==CmResourceTypeInterrupt){if(irq.InterruptTranslated)return STATUS_DEVICE_CONFIGURATION_ERROR;irq.InterruptRaw=WdfCmResourceListGetDescriptor(raw,i);irq.InterruptTranslated=r;}
     }
-    if(n!=RTL_NUMBER_OF(Bases))return STATUS_DEVICE_CONFIGURATION_ERROR;
-    ULONG version=Read(k->Base[0],0),count=Read(k->Base[0],4)&0x7ff;
-    if(version<0x70000000||version>=0x80000000||!count||count>1024)return STATUS_NOT_SUPPORTED;
-    k->Apids=count;
-    for(ULONG i=0;i<count;i++) {
-        ULONG map=Read(k->Base[0],0x2000+4*i),ppid=(map>>8)&0xfff,owner=Read(k->Base[1],4*i)&7;
-        if(ppid!=0x013&&ppid!=0x18d)continue;
-        n=ppid==0x013?0:1;
-        if(!owner){k->Observe[n]=k->Base[2]+0x20*i;k->Channel[n]=k->Base[3]+0x1000*i;}
-        if(map&0x1000000)k->Irq[n]=owner?NULL:k->Base[3]+0x1000*i;
+    if(!irq.InterruptTranslated)return STATUS_DEVICE_CONFIGURATION_ERROR;
+    PHYSICAL_ADDRESS address;address.QuadPart=0x0c400000;
+    PUCHAR core=MmMapIoSpaceEx(address,0x3000,PAGE_READONLY|PAGE_NOCACHE);if(!core)return STATUS_INSUFFICIENT_RESOURCES;
+    address.QuadPart=0x0c42d000;PUCHAR owners=MmMapIoSpaceEx(address,0x4000,PAGE_READONLY|PAGE_NOCACHE);
+    if(!owners){MmUnmapIoSpace(core,0x3000);return STATUS_INSUFFICIENT_RESOURCES;}
+    NTSTATUS status=STATUS_SUCCESS;ULONG count=Read(core,4)&0x7ff,version=Read(core,0);
+    if(version<0x70000000||version>=0x80000000||!count||count>1024)status=STATUS_NOT_SUPPORTED;
+    ULONG observe[4]={MAXULONG,MAXULONG,MAXULONG,MAXULONG},channel[4]={MAXULONG,MAXULONG,MAXULONG,MAXULONG},interrupt[2]={MAXULONG,MAXULONG};
+    for(ULONG i=0;i<count&&NT_SUCCESS(status);i++) {
+        ULONG map=Read(core,0x2000+4*i),ppid=(map>>8)&0xfff,owner=Read(owners,4*i)&7,n;
+        if(ppid==0x013||ppid==0x18d)n=ppid==0x013?0:1;
+        else if(ppid==0x7f0||ppid==0x7f1)n=ppid-0x7f0+2;
+        else continue;
+        if(!owner){observe[n]=channel[n]=i;if(n>=2)k->HapticInterrupt[n-2]=(map&0x1000000)!=0;}
+        else if(n>=2)observe[n]=i;
+        if(n<2&&(map&0x1000000))interrupt[n]=owner?MAXULONG:i;
     }
-    if(!k->Channel[0]||!k->Channel[1]||!k->Irq[0]||!k->Irq[1]||!irq.InterruptTranslated)return STATUS_DEVICE_CONFIGURATION_ERROR;
-    NTSTATUS status=WdfInterruptCreate(device,&irq,WDF_NO_OBJECT_ATTRIBUTES,&k->Interrupt);
+    MmUnmapIoSpace(owners,0x4000);MmUnmapIoSpace(core,0x3000);
+    if(!NT_SUCCESS(status))return status;
+    if(channel[0]==MAXULONG||channel[1]==MAXULONG||interrupt[0]==MAXULONG||interrupt[1]==MAXULONG)return STATUS_DEVICE_CONFIGURATION_ERROR;
+    for(ULONG i=0;i<4;i++) {
+        PUCHAR *o=i<2?&k->Observe[i]:&k->HapticObserve[i-2],*c=i<2?&k->Channel[i]:&k->HapticChannel[i-2];
+        if(observe[i]!=MAXULONG){address.QuadPart=0x0c440000+0x20*observe[i];*o=MmMapIoSpaceEx(address,0x20,PAGE_READWRITE|PAGE_NOCACHE);if(!*o)return STATUS_INSUFFICIENT_RESOURCES;}
+        if(channel[i]!=MAXULONG){address.QuadPart=0x0c500000+0x1000*channel[i];*c=MmMapIoSpaceEx(address,0x1000,PAGE_READWRITE|PAGE_NOCACHE);if(!*c)return STATUS_INSUFFICIENT_RESOURCES;}
+        if(i<2){if(interrupt[i]==channel[i])k->Irq[i]=*c;else{address.QuadPart=0x0c500000+0x1000*interrupt[i];k->Irq[i]=MmMapIoSpaceEx(address,0x1000,PAGE_READWRITE|PAGE_NOCACHE);if(!k->Irq[i])return STATUS_INSUFFICIENT_RESOURCES;}}
+    }
+    WDFINTERRUPT handle;status=WdfInterruptCreate(device,&irq,WDF_NO_OBJECT_ATTRIBUTES,&handle);
     return NT_SUCCESS(status)?PoRegisterPowerSettingCallback(WdfDeviceWdmGetDeviceObject(device),&display,HapticDisplay,device,&k->DisplayCallback):status;
 }
 static NTSTATUS Start(WDFDEVICE device,WDF_POWER_DEVICE_STATE previous) {
@@ -221,10 +219,6 @@ static NTSTATUS Start(WDFDEVICE device,WDF_POWER_DEVICE_STATE previous) {
     if(!NT_SUCCESS(status))return status;
     status=SetInterrupts(k,TRUE);
     if(!NT_SUCCESS(status)){SetInterrupts(k,FALSE);return status;}
-    k->PdcConfig=Read(k->Base[4],0x114);k->PdcSaved=TRUE;
-    k->PdcBank=(Read(k->Base[4],0x1000)&0xffffff00)<0x30200;
-    Write(k->Base[4],0x114,(k->PdcConfig&~7u)|4|(k->PdcBank?0:8));
-    if(k->PdcBank){k->PdcEnable=Read(k->Base[4],0x10);Write(k->Base[4],0x10,k->PdcEnable|2);}
     k->Candidate=0;k->Failures=0;RtlZeroMemory(k->Debounce,sizeof(k->Debounce));
     RtlZeroMemory(&k->Feedback,sizeof(k->Feedback));
     HapticPrepare(k);
@@ -239,7 +233,6 @@ static NTSTATUS Stop(WDFDEVICE device,WDF_POWER_DEVICE_STATE next) {
     WdfObjectAcquireLock(device);
     if(k->HapticPhase)HapticOff(k);
     SetInterrupts(k,FALSE);
-    if(k->PdcSaved){Write(k->Base[4],0x114,k->PdcConfig);if(k->PdcBank)Write(k->Base[4],0x10,k->PdcEnable);k->PdcSaved=FALSE;}
     k->Head=0;k->Count=0;k->State=0;Put(k,1,0);Flush(k);
     RtlZeroMemory(&k->Feedback,sizeof(k->Feedback));k->HapticRepeat=0;
     WdfObjectReleaseLock(device);return STATUS_SUCCESS;
@@ -249,8 +242,15 @@ static NTSTATUS Release(WDFDEVICE device,WDFCMRESLIST resources) {
     KEYS *k=Context(device);
     if(k->DisplayCallback){PoUnregisterPowerSettingCallback(k->DisplayCallback);k->DisplayCallback=NULL;}k->DisplayOn=FALSE;
     SetInterrupts(k,FALSE);
-    for(ULONG i=0;i<RTL_NUMBER_OF(Bases);i++)if(k->Base[i]){MmUnmapIoSpace(k->Base[i],Sizes[i]);k->Base[i]=NULL;}
-    RtlZeroMemory(k->Observe,sizeof(k->Observe));RtlZeroMemory(k->Channel,sizeof(k->Channel));RtlZeroMemory(k->Irq,sizeof(k->Irq));return STATUS_SUCCESS;
+    for(ULONG i=0;i<2;i++) {
+        if(k->Observe[i])MmUnmapIoSpace(k->Observe[i],0x20);
+        if(k->Irq[i]&&k->Irq[i]!=k->Channel[i])MmUnmapIoSpace(k->Irq[i],0x1000);
+        if(k->Channel[i])MmUnmapIoSpace(k->Channel[i],0x1000);
+        if(k->HapticObserve[i])MmUnmapIoSpace(k->HapticObserve[i],0x20);
+        if(k->HapticChannel[i])MmUnmapIoSpace(k->HapticChannel[i],0x1000);
+        k->Observe[i]=k->Channel[i]=k->Irq[i]=k->HapticObserve[i]=k->HapticChannel[i]=NULL;k->HapticInterrupt[i]=FALSE;
+    }
+    return STATUS_SUCCESS;
 }
 static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input,ULONG code) {
     UNREFERENCED_PARAMETER(output);UNREFERENCED_PARAMETER(input);

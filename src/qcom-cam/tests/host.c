@@ -1,6 +1,10 @@
 #include "host.h"
 #include "dma-table.h"
 #include "dma-route.h"
+#include "cdm-command.h"
+#include "cdm-route.h"
+#include "cdm-abort.h"
+#include "dma-ready.h"
 #include "nv12.h"
 #include "rpmh-message.h"
 #include "wait.h"
@@ -8,11 +12,13 @@
 #include "csid-commit.h"
 #include "cphy-lanes.h"
 #include "crm-vote.h"
+#include "clock-measure.h"
+#include "gdsc-cycle.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-static ULONG regs[8192],words[16],wordCount,fifo[16],fifoCount,fifoIndex;
+static ULONG regs[39936],words[16],wordCount,fifo[16],fifoCount,fifoIndex;
 static ULONGLONG clockValue;
 static BOOLEAN nack,timeout,preempt,rcgStuck;
 static ULONG rcgActive,csidActive;
@@ -20,8 +26,35 @@ static ULONG crmRegs[256];
 static BOOLEAN crmStuck;
 static ULONGLONG crmComplete;
 static ULONG crmDoneIrq;
+static UCHAR gdscBase;
+static ULONG gdscControl[2],gdscStatus[2],gdscStuck,gdscRestoreStuck,gdscCount;
+static LONG gdscSequence[8];
+static ULONG smmuRegs[0x100000/4],smmuWrites;
+static UCHAR cdmBase;
+static ULONG cdmRegs[128];
+static BOOLEAN cdmResetStuck,cdmPendingStuck;
+static UCHAR measureBase;
+static ULONG measureControl,measureStatus,measureFrequency;
+static ULONGLONG measureDone;
+static BOOLEAN measureStuck;
 
 ULONG CamRead(PUCHAR base,ULONG offset) {
+    if(base==&measureBase) {
+        if(offset==0x62048)return measureControl;
+        assert(offset==0x6204c);
+        if(measureDone&&!measureStuck&&clockValue>=measureDone) {
+            measureStatus=0x2000000|(ULONG)((ULONGLONG)(measureControl&0xfffff)*measureFrequency/4800000);
+            measureDone=0;
+        }
+        return measureStatus;
+    }
+    if(base==&cdmBase)return cdmRegs[offset/4];
+    if(base==(PUCHAR)smmuRegs){assert(offset<sizeof(smmuRegs));return smmuRegs[offset/4];}
+    if(base==&gdscBase) {
+        assert(offset==0x11004||offset==0x11008||offset==0x1134c||offset==0x11350);
+        ULONG slot=offset>=0x1134c?1:0;
+        return (offset==0x11004||offset==0x1134c)?gdscControl[slot]:gdscStatus[slot];
+    }
     if(base==(PUCHAR)crmRegs)return crmRegs[offset/4];
     (void)base;
     if(offset==0x218){assert(fifoIndex<fifoCount);return fifo[fifoIndex++];}
@@ -30,6 +63,40 @@ ULONG CamRead(PUCHAR base,ULONG offset) {
 }
 
 VOID CamWrite(PUCHAR base,ULONG offset,ULONG value) {
+    if(base==&measureBase) {
+        assert(offset==0x62048);measureControl=value;
+        if(value&0x200000){measureStatus=0;measureDone=0;}
+        if(value&0x100000)measureDone=clockValue+(ULONGLONG)(value&0xfffff)*10000000/4800000;
+        return;
+    }
+    if(base==&cdmBase) {
+        if(offset==0x34){cdmRegs[0x44/4]&=~value;return;}
+        cdmRegs[offset/4]=value;
+        if(offset==0x1c&&value==3)cdmRegs[0x28/4]|=2;
+        if(offset==0x10) {
+            assert(value==1&&cdmRegs[0x1c/4]==3&&!cdmRegs[0x30/4]);
+            if(!cdmResetStuck)cdmRegs[0x44/4]|=1;
+            if(!cdmPendingStuck)cdmRegs[0x6c/4]=0;
+        }
+        return;
+    }
+    if(base==(PUCHAR)smmuRegs){assert(offset<sizeof(smmuRegs));smmuRegs[offset/4]=value;smmuWrites++;return;}
+    if(base==&gdscBase) {
+        assert(offset==0x11004||offset==0x1134c);
+        ULONG slot=offset==0x1134c?1:0;
+        assert(gdscCount<RTL_NUMBER_OF(gdscSequence));
+        if(value&1) {
+            assert(!(value&0x806));
+            if(slot)assert(gdscControl[0]&1);
+            gdscSequence[gdscCount++]=(LONG)slot+1;
+            if(!(gdscStuck&(1u<<slot)))gdscStatus[slot]=0x04068000;
+        } else {
+            if(!slot)assert(!(gdscControl[1]&1));
+            gdscSequence[gdscCount++]=-((LONG)slot+1);
+            if(!(gdscRestoreStuck&(1u<<slot)))gdscStatus[slot]=0x04070000;
+        }
+        gdscControl[slot]=value;return;
+    }
     if(base==(PUCHAR)crmRegs) {
         if(offset==0x250||offset==0x130||offset==0x1f0||offset==0x210){crmRegs[(offset-4)/4]&=~value;return;}
         crmRegs[offset/4]=value;
@@ -83,6 +150,45 @@ NTSTATUS CamWait(PUCHAR base,ULONG offset,ULONG mask,ULONG value,ULONG us) {
     return CamPoll(base,offset,mask,value,us);
 }
 
+NTSTATUS CamSave(CAM *c,PUCHAR base,ULONG offset,ULONG value) {
+    (void)c;assert(base==&gdscBase||base==(PUCHAR)smmuRegs);CamWrite(base,offset,value);return STATUS_SUCCESS;
+}
+
+static VOID CdmTests(void) {
+    memset(cdmRegs,0,sizeof(cdmRegs));cdmRegs[0x44/4]=1;cdmRegs[0x30/4]=1;cdmRegs[0x6c/4]=1;
+    assert(CamCdmAbortCore(&cdmBase)==STATUS_SUCCESS&&cdmRegs[0x1c/4]==0&&!cdmRegs[0x6c/4]);
+    cdmResetStuck=TRUE;clockValue=0;
+    assert(CamCdmAbortCore(&cdmBase)==STATUS_IO_TIMEOUT&&clockValue>=500000);
+    cdmResetStuck=FALSE;cdmPendingStuck=TRUE;cdmRegs[0x6c/4]=1;
+    assert(CamCdmAbortCore(&cdmBase)==STATUS_DEVICE_BUSY);
+    cdmPendingStuck=FALSE;
+    ULONG cmd[8]={0};CamCdmEncode(cmd,0x5a);
+    assert(CAM_CDM_COMMAND_BYTES==24&&cmd[0]==0x08127000&&cmd[1]==0x04000001);
+    assert(cmd[2]==0xe10&&cmd[3]==0x8011&&cmd[4]==0x06000000&&cmd[5]==0x5a&&cmd[6]==0);
+    memset(regs,0,sizeof(regs));
+    regs[0x80/4]=0x59;regs[0xd0/4]=0xad27e10;regs[0xd4/4]=0x8011;
+    assert(!CamCdmCompleted(NULL,0x5a));
+    regs[0x80/4]=0x5a;assert(CamCdmCompleted(NULL,0x5a));
+    regs[0x6c/4]=1;assert(!CamCdmCompleted(NULL,0x5a));regs[0x6c/4]=0;
+    regs[0x44/4]=0x40000;assert(!CamCdmCompleted(NULL,0x5a));regs[0x44/4]=0;
+    regs[0xd0/4]=0xd27e10;assert(!CamCdmCompleted(NULL,0x5a));
+    CAM c={0};c.Base[CamSmmu]=(PUCHAR)smmuRegs;
+    memset(smmuRegs,0,sizeof(smmuRegs));smmuWrites=0;
+    assert(CamCdmRoute(&c)==STATUS_NOT_SUPPORTED&&!smmuWrites);
+    smmuRegs[0x20/4]=0x4c017e84;smmuRegs[0x24/4]=0x60000053;
+    smmuRegs[0x800/4]=0x80001c00;smmuRegs[0x1000/4]=0x1f000;smmuRegs[0x80000/4]=0xa9f00e0;
+    assert(CamCdmRoute(&c)==STATUS_SUCCESS&&smmuWrites==2);
+    assert(smmuRegs[0x804/4]==0x80001860&&smmuRegs[0xc04/4]==0x10000);
+    assert(CamCdmRoute(&c)==STATUS_SUCCESS&&smmuWrites==2);
+    smmuRegs[0x808/4]=0x80001860;assert(CamCdmRoute(&c)==STATUS_DEVICE_BUSY&&smmuWrites==2);
+    smmuRegs[0x808/4]=0;smmuRegs[0x804/4]=0x80011860;
+    assert(CamCdmRoute(&c)==STATUS_DEVICE_BUSY&&smmuWrites==2);
+    smmuRegs[0x804/4]=0x80001860;smmuRegs[0x80000/4]|=1;
+    assert(CamCdmRoute(&c)==STATUS_SUCCESS&&smmuWrites==2);
+    smmuRegs[0xc04/4]=0;
+    assert(CamCdmRoute(&c)==STATUS_NOT_SUPPORTED&&smmuWrites==2);
+}
+
 static VOID Fresh(CAM *c) {
     memset(c,0,sizeof(*c));memset(regs,0,sizeof(regs));memset(words,0,sizeof(words));
     wordCount=fifoCount=fifoIndex=0;clockValue=0;nack=timeout=preempt=rcgStuck=FALSE;rcgActive=csidActive=0;regs[0]=0x10000000;
@@ -101,6 +207,9 @@ static VOID WaitTests(void) {
 
 static VOID CrmTests(void) {
     memset(crmRegs,0,sizeof(crmRegs));clockValue=0;crmComplete=0;crmStuck=FALSE;
+    const ULONG states[]={1,2};
+    assert(CamCrmStates((PUCHAR)crmRegs,0x11c,states)==STATUS_SUCCESS);
+    assert(crmRegs[0x120/4]==1&&crmRegs[0x124/4]==2&&crmRegs[0x11c/4]==0&&!crmComplete);
     crmRegs[0x24c/4]=1;
     assert(CamCrmCommand((PUCHAR)crmRegs,400)==STATUS_SUCCESS);
     assert(clockValue>=500&&crmRegs[0x21c/4]==0xe0000190u);
@@ -119,6 +228,43 @@ static VOID CrmTests(void) {
     assert(CamCrmCommand((PUCHAR)crmRegs,400)==STATUS_IO_TIMEOUT);
     assert(!crmRegs[0x24c/4]&&crmComplete);
     crmStuck=FALSE;crmComplete=0;
+}
+
+static VOID MeasureTests(void) {
+    measureControl=0;measureStatus=0x2000000;measureFrequency=10000000;measureStuck=FALSE;clockValue=0;
+    ULONG shortCount=0,fullCount=0;
+    assert(CamMeasureCount(&measureBase,0x1000,&shortCount)==STATUS_SUCCESS);
+    assert(CamMeasureCount(&measureBase,0x20000,&fullCount)==STATUS_SUCCESS);
+    ULONGLONG hz=CamMeasuredHz(shortCount,fullCount,8);
+    assert(hz>79900000&&hz<80100000&&!(measureControl&0x100000));
+    assert(CamMeasuredHz(37,37,8)==0);
+    measureStuck=TRUE;clockValue=0;
+    assert(CamMeasureCount(&measureBase,0x1000,&shortCount)==STATUS_IO_TIMEOUT);
+    assert(!(measureControl&0x100000)&&clockValue>=500000);
+    measureControl=0x100000;
+    assert(CamMeasureCount(&measureBase,0x1000,&shortCount)==STATUS_DEVICE_BUSY&&measureControl==0x100000);
+}
+
+static VOID GdscTests(void) {
+    CAM c={0};c.Base[CamCc]=&gdscBase;gdscCount=0;
+    assert(CamGdscCycle(&c)==STATUS_DEVICE_NOT_READY&&!gdscCount);
+    c.Powered=TRUE;c.DmaActive=TRUE;
+    assert(CamGdscCycle(&c)==STATUS_DEVICE_BUSY&&!gdscCount);
+    c.DmaActive=FALSE;c.ScmPending=TRUE;
+    assert(CamGdscCycle(&c)==STATUS_DEVICE_BUSY&&!gdscCount);c.ScmPending=FALSE;
+    for(ULONG fail=0;fail<3;fail++) {
+        gdscCount=0;gdscStuck=fail;gdscRestoreStuck=0;clockValue=0;
+        gdscControl[0]=gdscControl[1]=0xfa22f800;
+        gdscStatus[0]=gdscStatus[1]=0x04070000;
+        NTSTATUS status=CamGdscCycle(&c);
+        assert(status==(fail?STATUS_IO_TIMEOUT:STATUS_SUCCESS));
+        assert(gdscControl[0]==0xfa22f800&&gdscControl[1]==0xfa22f800&&!c.Faulted);
+        if(!fail)assert(gdscCount==4&&gdscSequence[0]==1&&gdscSequence[1]==2&&gdscSequence[2]==-2&&gdscSequence[3]==-1);
+        else assert(clockValue>=200000);
+    }
+    gdscCount=0;gdscStuck=0;gdscRestoreStuck=2;
+    assert(CamGdscCycle(&c)==STATUS_IO_TIMEOUT&&c.Faulted&&c.Diag.Step==157);
+    gdscRestoreStuck=0;
 }
 
 static VOID CciTests(void) {
@@ -167,6 +313,21 @@ static ULONGLONG Walk(ULONGLONG *tables,ULONGLONG root,ULONGLONG address) {
 }
 
 static VOID DmaTests(void) {
+    CAM ready={0};memset(regs,0,sizeof(regs));
+    assert(!CamDiagnosticDmaReady(&ready));ready.ReceiverVerified=TRUE;
+    assert(!CamDiagnosticDmaReady(&ready));
+    regs[0x11300/4]=1;regs[0x112e8/4]=0;regs[0x26014/4]=0x08200001;
+    regs[0x228/4]=0xe0000190;regs[0x11350/4]=regs[0x11008/4]=0x10000;
+    regs[0x266c/4]=regs[0x32cc/4]=regs[0x34dc/4]=1;
+    assert(CamDiagnosticDmaReady(&ready));
+    const ULONG disabled[]={0x11300,0x26014,0x228,0x11350,0x11008,0x266c,0x32cc,0x34dc};
+    for(ULONG i=0;i<RTL_NUMBER_OF(disabled);i++) {
+        ULONG old=regs[disabled[i]/4];regs[disabled[i]/4]=0;
+        assert(!CamDiagnosticDmaReady(&ready));regs[disabled[i]/4]=old;
+    }
+    regs[0x112e8/4]=0x80000000;assert(!CamDiagnosticDmaReady(&ready));regs[0x112e8/4]=0;
+    regs[0x11300/4]|=0x80000000;assert(!CamDiagnosticDmaReady(&ready));regs[0x11300/4]=1;
+    regs[0x228/4]=400;assert(!CamDiagnosticDmaReady(&ready));
     const ULONG assignments[]={0x210,0x201,0x120,0x102,0x021,0x012};
     for(ULONG i=0;i<RTL_NUMBER_OF(assignments);i++)assert(CamCphyLaneMask(assignments[i],3)==0x2a);
     assert(CamCphyLaneMask(0,1)==2&&CamCphyLaneMask(1,1)==8&&CamCphyLaneMask(2,1)==32);
@@ -295,7 +456,7 @@ static VOID ScmTests(void) {
     assert(CamScmQos(&c)==STATUS_DEVICE_BUSY&&ScmMock.Calls==0);c.RxActive=FALSE;
     regs[0xf0/4]=0;
     assert(CamScmQos(&c)==STATUS_DEVICE_NOT_READY&&ScmMock.Calls==0);
-    regs[0xf0/4]=1;
+    regs[0xf0/4]=1;regs[0xf8/4]=1;
     assert(CamScmQos(&c)==STATUS_NOT_SUPPORTED&&ScmMock.Calls==1&&!c.ScmAvailable);
     ScmMock.QueryStatus=-1;ScmMock.Supported=TRUE;
     assert(CamScmProbe(&c)==STATUS_NOT_SUPPORTED&&!c.ScmAvailable);
@@ -304,7 +465,7 @@ static VOID ScmTests(void) {
     ScmMock.QueryStatus=0;ScmMock.Calls=0;
     assert(CamScmQos(&c)==STATUS_SUCCESS&&ScmMock.Calls==3&&c.ScmAvailable);
     assert(c.Diag.Step==151&&c.Diag.Address==0x4200180a&&c.Diag.Count==3);
-    assert(CamScmQos(&c)==STATUS_SUCCESS&&ScmMock.Calls==5);
+    assert(CamScmQos(&c)==STATUS_SUCCESS&&ScmMock.Calls==4);
     ScmMock.QosStatus=-1;
     assert(CamScmQos(&c)==STATUS_IO_DEVICE_ERROR&&c.Trace.ScmReturn[0]==MAXULONG);
     c.Powered=FALSE;
@@ -317,7 +478,7 @@ static VOID ScmTests(void) {
     assert(ScmMock.Resumes==1&&ScmMock.WakePolls==3&&c.Trace.ScmReturn[0]==0);
     ScmMock.QosStatus=3;
     assert(CamScmQos(&c)==STATUS_SUCCESS&&!c.ScmPending&&ScmMock.Acks==1);
-    ScmMock.QosStatus=2;ScmMock.WaitSlow=TRUE;ScmMock.WakePolls=0;
+    ScmMock.QosStatus=2;ScmMock.WaitSlow=TRUE;ScmMock.WakePolls=0;c.ScmWaitqKnown=FALSE;
     assert(CamScmQos(&c)==STATUS_SUCCESS&&!c.ScmPending&&ScmMock.Resumes==2);
     ScmMock.WaitStuck=TRUE;clockValue=0;
     assert(CamScmQos(&c)==STATUS_IO_TIMEOUT&&c.ScmPending&&clockValue>=20000000);
@@ -332,6 +493,31 @@ static VOID ScmTests(void) {
     assert(CamScmQos(&c)==STATUS_DEVICE_NOT_READY);
     regs[0x32cc/4]=0;
     assert(CamScmQos(&c)==STATUS_DEVICE_NOT_READY);
+    c.ReceiverVerified=TRUE;regs[0xf0/4]=0;regs[0xf8/4]=0;
+    regs[0x11300/4]=1;regs[0x11310/4]=1;regs[0x112e8/4]=0;regs[0x26014/4]=1;
+    regs[0x11350/4]=0x10000;regs[0x11008/4]=0x10000;
+    regs[0x228/4]=0xe0000190;regs[0x220/4]=0xe0000190;regs[0x224/4]=0xe0000190;
+    const ULONG domains[]={0,6,7};
+    for(ULONG i=0;i<3;i++) {
+        regs[(0x266c+domains[i]*0x210)/4]=1;
+        for(ULONG state=0;state<3;state++)regs[(0x11c+domains[i]*0x20+state*4)/4]=1;
+    }
+    calls=ScmMock.Calls;
+    regs[0x224/4]=0;assert(CamScmQosDiagnostic(&c)==STATUS_DEVICE_NOT_READY&&ScmMock.Calls==calls);
+    regs[0x224/4]=0xe0000190;regs[0x1e4/4]=0;
+    assert(CamScmQosDiagnostic(&c)==STATUS_DEVICE_NOT_READY&&ScmMock.Calls==calls);
+    regs[0x1e4/4]=1;c.CdmPending=TRUE;
+    assert(CamScmQosDiagnostic(&c)==STATUS_DEVICE_BUSY&&ScmMock.Calls==calls);
+    c.CdmPending=FALSE;
+    assert(CamScmQosDiagnostic(&c)==STATUS_SUCCESS&&!c.ScmPending);
+    assert(CamScmQos(&c)==STATUS_DEVICE_NOT_READY);
+    ScmMock.WaitSlow=FALSE;ScmMock.QosStatus=2;ScmMock.WakePolls=0;
+    assert(CamScmWaitqProbe(&c)==STATUS_SUCCESS&&c.ScmFastWaitq);
+    calls=ScmMock.Calls;ULONG resumes=ScmMock.Resumes;
+    assert(CamScmQosRaw(&c)==STATUS_DEVICE_BUSY&&c.ScmPending&&c.Trace.ScmReturn[0]==2);
+    assert(ScmMock.Calls==calls+1&&ScmMock.Resumes==resumes&&ScmMock.WakePolls==0);
+    assert(CamScmWaitqContext(&c)==STATUS_SUCCESS&&c.ScmPending&&c.Trace.ScmReturn[0]==2);
+    assert(ScmMock.Resumes==resumes&&ScmMock.WakePolls==1);
 }
 
-int main(void) {WaitTests();CrmTests();RcgTests();CciTests();DmaTests();ColorTests();PowerTests();ScmTests();puts("Wait preemption, CRM acknowledgment, RCG restore, CCI, C-PHY, CSID commit, DMA, NV12, RPMh and powered secure QoS passed");return 0;}
+int main(void) {MeasureTests();CdmTests();WaitTests();CrmTests();GdscTests();RcgTests();CciTests();DmaTests();ColorTests();PowerTests();ScmTests();puts("Clock measurement, CDM routing and completion, wait preemption, CRM acknowledgment, GDSC sequencing, RCG restore, CCI, C-PHY, CSID commit, DMA, NV12, RPMh and powered secure QoS passed");return 0;}

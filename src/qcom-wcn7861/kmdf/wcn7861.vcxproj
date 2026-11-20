@@ -33,8 +33,8 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <Inf>
-      <DateStamp>11/07/2026</DateStamp>
-      <TimeStamp>26.11.7.62</TimeStamp>
+      <DateStamp>11/20/2026</DateStamp>
+      <TimeStamp>26.11.20.63</TimeStamp>
     </Inf>
     <ClCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);POOL_NX_OPTIN=1</PreprocessorDefinitions>

@@ -21,7 +21,7 @@ HRESULT APIENTRY open_heap(D3D12DDI_HDEVICE hd,const D3D12DDIARG_OPENHEAP_0003 *
     else {
         A830_ALLOCATION_ADDRESS query{A830_ABI_VERSION,memory.Handle,0,0,0,0,0};D3DDDICB_ESCAPE escape{};
         escape.hDevice=d->runtime.handle;escape.pPrivateDriverData=&query;escape.PrivateDriverDataSize=sizeof(query);
-        result=d->kernel.pfnEscapeCb(d->adapter,&escape);memory.Address=query.Address;memory.Size=query.Size;
+        result=d->kernel.pfnEscapeCb(d->adapter->runtime,&escape);memory.Address=query.Address;memory.Size=query.Size;
         if(SUCCEEDED(result))try {AcquireSRWLockExclusive(&d->memory_lock);d->allocations.emplace(memory.Handle,Device::Memory{memory,rt.handle,false,false});ReleaseSRWLockExclusive(&d->memory_lock);}
         catch(const std::bad_alloc &){ReleaseSRWLockExclusive(&d->memory_lock);result=E_OUTOFMEMORY;}
     }

@@ -27,19 +27,45 @@ int wmain(int argc,wchar_t **argv) {
         printf("Querying camera secure firmware capability\n");fflush(stdout);
         ok=DeviceIoControl(device,QCAM_SCM_PROBE,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
     }
+    else if(!wcscmp(argv[1],L"scm-context")&&argc==2) {
+        printf("Reading secure wait queue context, fid=c2002403\n");fflush(stdout);
+        ok=DeviceIoControl(device,QCAM_SCM_WAITQ_CONTEXT,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
+    }
+    else if(!wcscmp(argv[1],L"scm-waitq")&&argc==2) {
+        printf("Querying secure wait queue information, fid=c2002404\n");fflush(stdout);
+        ok=DeviceIoControl(device,QCAM_SCM_WAITQ_PROBE,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
+    }
     else if(!wcscmp(argv[1],L"scm-io")&&argc==2) {
         printf("Reading camera CRM version through secure firmware\n");fflush(stdout);
         ok=DeviceIoControl(device,QCAM_SCM_IO_PROBE,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
     }
-    else if(!wcscmp(argv[1],L"scm-qos")&&argc==2) {
+    else if((!wcscmp(argv[1],L"scm-qos")||!wcscmp(argv[1],L"scm-qos-diag")||!wcscmp(argv[1],L"scm-qos-raw"))&&argc==2) {
         printf("Applying camera static QoS with CRM clocks active\n");fflush(stdout);
-        ok=DeviceIoControl(device,QCAM_SCM_QOS_PROBE,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
+        ok=DeviceIoControl(device,!wcscmp(argv[1],L"scm-qos-raw")?QCAM_SCM_QOS_RAW:
+            !wcscmp(argv[1],L"scm-qos-diag")?QCAM_SCM_QOS_DIAGNOSTIC:QCAM_SCM_QOS_PROBE,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
+    }
+    else if(!wcscmp(argv[1],L"tbu-probe")&&argc==2) {
+        printf("Reading camera translation bridge status without submitting memory transactions\n");fflush(stdout);
+        ok=DeviceIoControl(device,QCAM_TBU_PROBE,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
+    }
+    else if(!wcscmp(argv[1],L"measure-clocks")&&argc==2) {
+        printf("Measuring camera clock frequencies with the hardware counter\n");fflush(stdout);
+        ok=DeviceIoControl(device,QCAM_CLOCK_MEASURE,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
+    }
+    else if(!wcscmp(argv[1],L"cdm-config")&&argc==2) {
+        printf("Submitting bounded camera path configuration\n");fflush(stdout);
+        ok=DeviceIoControl(device,QCAM_CDM_CONFIG,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
+    }
+    else if(!wcscmp(argv[1],L"cdm-probe")&&argc==2) {
+        printf("Reading camera command processor registers\n");fflush(stdout);
+        ok=DeviceIoControl(device,QCAM_CDM_PROBE,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
     }
     else if(!wcscmp(argv[1],L"routes")&&argc==2) {
         QCAM_DMA_ROUTE_INFO r={0};ok=DeviceIoControl(device,QCAM_DMA_ROUTES,NULL,0,&r,sizeof(r),&bytes,NULL);error=GetLastError();
         if(ok&&(bytes!=sizeof(r)||r.Size!=sizeof(r)||r.Abi!=QCAM_ABI||r.Count>128)){ok=FALSE;error=ERROR_INVALID_DATA;}
         if(ok) {
             printf("smmu id0=%08lx id1=%08lx global=%08lx slots=%lu\n",r.Id0,r.Id1,r.Global,r.Count);
+            printf("smmu fault=%08lx syndrome=%08lx %08lx %08lx\n",r.FaultStatus,r.FaultSyndrome[0],r.FaultSyndrome[1],r.FaultSyndrome[2]);
             for(ULONG i=0;i<r.Count;i++)printf("slot=%lu smr=%08lx s2cr=%08lx valid=%lu sid=%04lx mask=%04lx type=%lu bank=%lu cbar=%08lx sctlr=%08lx\n",
                 i,r.Smr[i],r.S2cr[i],r.Smr[i]>>31,r.Smr[i]&0x7fff,(r.Smr[i]>>16)&0x7fff,(r.S2cr[i]>>16)&3,r.S2cr[i]&255,r.Cbar[i],r.Sctlr[i]);
         }
@@ -63,12 +89,22 @@ int wmain(int argc,wchar_t **argv) {
             for(ULONG i=0;i<sizeof(CamWriterTraceRegs)/sizeof(CamWriterTraceRegs[0]);i++)printf("writer[%lx]=%08lx\n",CamWriterTraceRegs[i],t.Writer[i]);
             for(ULONG i=0;i<sizeof(CamGccTraceRegs)/sizeof(CamGccTraceRegs[0]);i++)printf("gcc[%lx]=%08lx\n",CamGccTraceRegs[i],t.Gcc[i]);
             for(ULONG i=0;i<sizeof(CamNocTraceRegs)/sizeof(CamNocTraceRegs[0]);i++)printf("noc[%lx]=%08lx\n",CamNocTraceRegs[i],t.Noc[i]);
-            const char *names[]={"MM0","MM1","SH1"};
-            for(ULONG i=0;i<3;i++)printf("bcm %s original=%08lx request=%08lx observed=%08lx\n",names[i],t.BusVotes[i][0],t.BusVotes[i][1],t.BusVotes[i][2]);
+            const char *names[]={"MM0","MM1","SH1","CN0","SH0","MC0"};
+            for(ULONG i=0;i<6;i++)printf("bcm %s original=%08lx request=%08lx observed=%08lx\n",names[i],t.BusVotes[i][0],t.BusVotes[i][1],t.BusVotes[i][2]);
             printf("firmware qos=%lu\n",t.FirmwareQos);
             printf("scm return:");for(ULONG i=0;i<8;i++)printf(" %llx",t.ScmReturn[i]);printf("\n");
             for(ULONG i=0;i<sizeof(CamCrmTraceRegs)/sizeof(CamCrmTraceRegs[0]);i++)printf("crm[%lx]=%08lx\n",CamCrmTraceRegs[i],t.Crm[i]);
             printf("scm waitq:");for(ULONG i=0;i<8;i++)printf(" %llx",t.ScmWaitq[i]);puts("");
+            for(ULONG i=0;i<sizeof(CamCdmTraceRegs)/sizeof(CamCdmTraceRegs[0]);i++)printf("cdm[%lx]=%08lx\n",CamCdmTraceRegs[i],t.Cdm[i]);
+            printf("cdm command dma=%llx marker=%08lx\n",t.CommandAddress,t.CommandMarker);
+            printf("cdm command words:");for(ULONG i=0;i<6;i++)printf(" %08lx",t.CommandWords[i]);
+            printf(" abort=%08lx\n",(ULONG)t.CommandAbortStatus);
+            const char *clockNames[]={"cam_top_fast_ahb","cam_top_ahb","core_ahb","camnoc_rt_axi","camnoc_nrt_axi",
+                "csid","tfe0_main","csid_phy_rx","gcc_camera_hf_axi","gcc_camera_sf_axi"};
+            for(ULONG i=0;i<10;i++)printf("measured %s hz=%llu short=%lu full=%lu status=%08lx\n",
+                clockNames[i],t.MeasuredHz[i],t.ClockSamples[i][0],t.ClockSamples[i][1],(ULONG)t.MeasureStatus[i]);
+            for(ULONG n=0;n<2;n++)for(ULONG i=0;i<sizeof(CamTbuTraceRegs)/sizeof(CamTbuTraceRegs[0]);i++)
+                printf("tbu_%s[%lx]=%016llx\n",n?"sf":"hf",CamTbuTraceRegs[i],t.Tbu[n][i]);
         }
     }
     else if(!wcscmp(argv[1],L"diag")&&argc==2) {
@@ -82,7 +118,7 @@ int wmain(int argc,wchar_t **argv) {
     }
     else if(!wcscmp(argv[1],L"pipeline")&&argc==3) {
         wchar_t *end;QCAM_PROBE_OPTIONS o={sizeof(o),QCAM_ABI,wcstoul(argv[2],&end,0)};
-        if(*end||!o.Limit||o.Limit>3)goto done;
+        if(*end||!o.Limit||o.Limit>5)goto done;
         printf("Pipeline test limit=%lu\n",o.Limit);fflush(stdout);
         ok=DeviceIoControl(device,QCAM_PIPELINE_PROBE,&o,sizeof(o),NULL,0,&bytes,NULL);error=GetLastError();Info(device);
     }
@@ -101,15 +137,16 @@ int wmain(int argc,wchar_t **argv) {
             QCAM_EXPOSURE_OPTIONS options={sizeof(options),QCAM_ABI,lines,gain};
             ok=DeviceIoControl(device,QCAM_EXPOSURE,&options,sizeof(options),NULL,0,&bytes,NULL);error=GetLastError();
         }
-    } else if(!wcscmp(argv[1],L"capture")&&argc>=3&&argc<=5) {
-        QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,15000,0,4980000000ULL};
+    } else if((!wcscmp(argv[1],L"capture")||!wcscmp(argv[1],L"capture-diag")||!wcscmp(argv[1],L"dump-frame"))&&argc>=3&&argc<=5) {
+        BOOLEAN diagnostic=!wcscmp(argv[1],L"capture-diag"),dump=!wcscmp(argv[1],L"dump-frame");
+        QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,diagnostic?1000:15000,0,4980000000ULL};
         wchar_t *end=NULL;
         if(argc>3){options.DataRate=_wcstoui64(argv[3],&end,0);if(*end)goto done;}
         if(argc>4){options.SettleCount=wcstoul(argv[4],&end,0);if(*end)goto done;}
         UCHAR *raw=VirtualAlloc(NULL,QCAM_FRAME_BYTES,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
         if(!raw){error=GetLastError();goto done;}
-        printf("Starting RAW10 capture, timeout=%lu ms\n",options.TimeoutMs);fflush(stdout);
-        ok=DeviceIoControl(device,QCAM_CAPTURE,&options,sizeof(options),raw,QCAM_FRAME_BYTES,&bytes,NULL);
+        printf(dump?"Reading stopped frame buffer\n":"Starting RAW10 capture, timeout=%lu ms\n",options.TimeoutMs);fflush(stdout);
+        ok=DeviceIoControl(device,dump?QCAM_FRAME_DIAGNOSTIC:diagnostic?QCAM_CAPTURE_DIAGNOSTIC:QCAM_CAPTURE,dump?NULL:&options,dump?0:sizeof(options),raw,QCAM_FRAME_BYTES,&bytes,NULL);
         error=GetLastError();Info(device);
         if(ok&&bytes!=QCAM_FRAME_BYTES){ok=FALSE;error=ERROR_INVALID_DATA;}
         if(ok) {
@@ -117,7 +154,7 @@ int wmain(int argc,wchar_t **argv) {
             if(file==INVALID_HANDLE_VALUE){ok=FALSE;error=GetLastError();}
             else {
                 DWORD written=0;ok=WriteFile(file,raw,QCAM_FRAME_BYTES,&written,NULL)&&written==QCAM_FRAME_BYTES;
-                if(!ok)error=GetLastError();else printf("Saved %lu bytes of RGGB RAW10\n",written);
+                if(!ok)error=GetLastError();else printf(dump?"Saved %lu bytes of diagnostic buffer data\n":"Saved %lu bytes of RGGB RAW10\n",written);
                 CloseHandle(file);
             }
         }

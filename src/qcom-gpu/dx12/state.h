@@ -27,7 +27,7 @@ struct State {
     UINT viewport_count=0,scissor_count=0;
     pipe_blend_color blend{};
     pipe_stencil_ref stencil{};
-    mesa_prim topology=MESA_PRIM_TRIANGLES;
+    mesa_prim topology=MESA_PRIM_UNKNOWN;
     UINT patch_vertices=0;
     Resource *predicate=nullptr;UINT64 predicate_offset=0;D3D12DDI_PREDICATION_OP predicate_op{};
     D3D12DDI_STREAM_OUTPUT_BUFFER_VIEW stream_targets[4]={};
@@ -116,8 +116,8 @@ HRESULT APIENTRY create_pipeline(D3D12DDI_HDEVICE hd,const D3D12DDIARG_CREATE_PI
 void APIENTRY destroy_pipeline(D3D12DDI_HDEVICE,D3D12DDI_HPIPELINESTATE h){object<Pipeline>(h)->~Pipeline();}
 void APIENTRY set_pipeline(D3D12DDI_HCOMMANDLIST h,D3D12DDI_HPIPELINESTATE p) {
     List *l=object<List>(h);Pipeline *pipeline=object<Pipeline>(p);
-    if(!pipeline || pipeline->device!=l->device || !pipeline->data){error(l,E_INVALIDARG);return;}
-    auto state=pipeline->data;record(l,[state](Queue *q){q->state->pipeline=state;return S_OK;});
+    if(pipeline && (pipeline->device!=l->device || !pipeline->data)){error(l,E_INVALIDARG);return;}
+    auto state=pipeline?pipeline->data:nullptr;record(l,[state](Queue *q){q->state->pipeline=state;return S_OK;});
 }
 template<bool Compute> void APIENTRY set_root(D3D12DDI_HCOMMANDLIST h,D3D12DDI_HROOTSIGNATURE root) {
     Root *r=object<Root>(root);record(object<List>(h),[r](Queue *q){auto &args=q->state->roots[Compute];if(args.root!=r){args={};args.root=r;}return S_OK;});
@@ -141,7 +141,7 @@ void APIENTRY set_heaps(D3D12DDI_HCOMMANDLIST h,UINT count,D3D12DDI_HDESCRIPTORH
 }
 void APIENTRY set_topology(D3D12DDI_HCOMMANDLIST h,D3D12DDI_PRIMITIVE_TOPOLOGY topology) {
     UINT t=static_cast<UINT>(topology),patch=0;mesa_prim prim=MESA_PRIM_TRIANGLES;
-    switch(t) {case 1:prim=MESA_PRIM_POINTS;break;case 2:prim=MESA_PRIM_LINES;break;case 3:prim=MESA_PRIM_LINE_STRIP;break;
+    switch(t) {case 0:prim=MESA_PRIM_UNKNOWN;break;case 1:prim=MESA_PRIM_POINTS;break;case 2:prim=MESA_PRIM_LINES;break;case 3:prim=MESA_PRIM_LINE_STRIP;break;
         case 4:break;case 5:prim=MESA_PRIM_TRIANGLE_STRIP;break;case 10:prim=MESA_PRIM_LINES_ADJACENCY;break;case 11:prim=MESA_PRIM_LINE_STRIP_ADJACENCY;break;
         case 12:prim=MESA_PRIM_TRIANGLES_ADJACENCY;break;case 13:prim=MESA_PRIM_TRIANGLE_STRIP_ADJACENCY;break;
         default:if(t>=33 && t<=64){prim=MESA_PRIM_PATCHES;patch=t-32;}else {error(object<List>(h),E_INVALIDARG);return;}

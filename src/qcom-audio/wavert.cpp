@@ -396,7 +396,7 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT Device, PIRP Irp, PRESOURCELIST Resou
         Resources->FindTranslatedEntry(CmResourceTypeMemory, 0) : nullptr;
     if (!Memory) return STATUS_DEVICE_CONFIGURATION_ERROR;
     auto Dev = DeviceContext(Device);
-    NTSTATUS Status = SiaHardwareStart(Dev, Memory);
+    NTSTATUS Status = SiaHardwareStart(Dev,Device,Memory);
     if (!NT_SUCCESS(Status)) { SiaHardwareStop(Dev); return Status; }
     InterlockedExchange(&AudioLimits,QH_VOLUME_READY|QH_VOLUME_MAX);
     for (ULONG Index = 0; Index < 2 && NT_SUCCESS(Status); Index++) {
@@ -433,7 +433,7 @@ static NTSTATUS DispatchPnp(PDEVICE_OBJECT Device, PIRP Irp)
 extern "C" DRIVER_INITIALIZE DriverEntry;
 extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT Driver, PUNICODE_STRING RegistryPath)
 {
-    SiaDspMemoryInit();QcomRpcInit();
+    QcomRpcInit();
     NTSTATUS Status = PcInitializeAdapterDriver(Driver, RegistryPath, AddDevice);
     if (NT_SUCCESS(Status)) Driver->MajorFunction[IRP_MJ_PNP] = DispatchPnp;
     if (NT_SUCCESS(Status)) Status=QchInit(Driver,RegistryPath);
