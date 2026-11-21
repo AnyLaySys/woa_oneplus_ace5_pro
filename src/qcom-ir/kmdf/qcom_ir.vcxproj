@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|ARM64"><Configuration>Release</Configuration><Platform>ARM64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{37203720-2026-1121-8000-731945104001}</ProjectGuid>
+    <Configuration Condition="'$(Configuration)'==''">Release</Configuration>
+    <Platform Condition="'$(Platform)'==''">ARM64</Platform>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion><DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType><PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries>
+    <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <TargetName>qcom_ir</TargetName>
+    <IrVersionDate Condition="'$(IrVersionDate)'==''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</IrVersionDate>
+    <IrRevision Condition="'$(IrRevision)'==''">5</IrRevision>
+    <IrDriverDate>$([System.DateTime]::Parse('$(IrVersionDate)').ToString('MM/dd/yyyy'))</IrDriverDate>
+    <IrDriverVersion>$([System.DateTime]::Parse('$(IrVersionDate)').ToString('yy.M.d')).$(IrRevision)</IrDriverVersion>
+    <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
+    <OutDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-ir\ARM64\Release\bin\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-ir\ARM64\Release\obj\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><PreprocessorDefinitions>POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MinSpace</Optimization><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
+    <Link><GenerateDebugInformation>false</GenerateDebugInformation><Profile>false</Profile></Link>
+    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>$(IrDriverDate)</DateStamp><TimeStamp>$(IrDriverVersion)</TimeStamp></Inf>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="..\ir.c" /><Inf Include="qcom_ir.inx" /><FilesToPackage Include="$(TargetPath)" /><FilesToPackage Include="$(OutDir)qcom_ir_power.exe" /></ItemGroup>
+  <Target Name="BuildPowerControl" BeforeTargets="PrepareForBuild">
+    <MSBuild Projects="$(MSBuildThisFileDirectory)..\power.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=$(Platform);OutDir=$(OutDir);IntDir=$(IntDir)power\" />
+  </Target>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

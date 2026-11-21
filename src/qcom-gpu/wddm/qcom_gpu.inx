@@ -16,8 +16,6 @@ qcom_gpu.sys=1
 a830_umd.dll=1
 a830_umd_arm64.dll=1
 a830_umd_x64.dll=1
-a830_gpu.dll=1
-a830_gpu_x64.dll=1
 a830_gl.dll=1
 a830_gl_x64.dll=1
 vulkan_freedreno.dll=1
@@ -44,8 +42,6 @@ qcom_gpu.sys
 a830_umd.dll
 a830_umd_arm64.dll
 a830_umd_x64.dll
-a830_gpu.dll
-a830_gpu_x64.dll
 a830_gl.dll
 a830_gl_x64.dll
 vulkan_freedreno.dll
@@ -57,7 +53,7 @@ vcruntime140.dll
 gen80000_zap.mbn
 [Driver.Render]
 HKR,,VulkanDriverName,0x00010000,"%13%\freedreno_icd.json","%13%\freedreno_icd_x64.json"
-HKR,,UserModeDriverName,0x00010000,"%13%\a830_umd.dll","%13%\a830_umd.dll","%13%\a830_umd.dll","%13%\a830_umd.dll"
+HKR,,UserModeDriverName,0x00010000,"%13%\a830_umd.dll","%13%\a830_umd.dll","%13%\a830_umd.dll"
 HKR,,InstalledDisplayDrivers,0x00010000,a830_umd
 HKR,,OpenGLDriverName,0x00000000,"%13%\a830_gl.dll"
 HKR,,OpenGLVersion,0x00010001,1

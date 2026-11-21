@@ -47,13 +47,9 @@ void APIENTRY CreateResource(D3D10DDI_HDEVICE h,const D3D10DDIARG_CREATERESOURCE
 }
 void APIENTRY OpenResource(D3D10DDI_HDEVICE h,const D3D10DDIARG_OPENRESOURCE *p,D3D10DDI_HRESOURCE hr,D3D10DDI_HRTRESOURCE rt) {
  Device *d=dev(h);auto *r=new(hr.pDrvPrivate) Resource{};
- if(p->NumAllocations!=1 || (p->PrivateDriverDataSize!=sizeof(A830_RESOURCE) && p->PrivateDriverDataSize!=sizeof(A830_DX12_RESOURCE)) || !p->pPrivateDriverData){error(d,E_INVALIDARG);return;}
+ if(p->NumAllocations!=1 || p->PrivateDriverDataSize!=sizeof(A830_RESOURCE) || !p->pPrivateDriverData){error(d,E_INVALIDARG);return;}
  auto *a=(const A830_RESOURCE *)p->pPrivateDriverData;
- if(a->Version!=A830_ABI_VERSION || !a->Width || !a->Height || !(a->Flags&(A830_RESOURCE_OWNED|A830_RESOURCE_NATIVE))){error(d,E_INVALIDARG);return;}
- if(p->PrivateDriverDataSize==sizeof(A830_DX12_RESOURCE)) {
-   const auto *native=static_cast<const A830_DX12_RESOURCE *>(p->pPrivateDriverData);
-   if(!(a->Flags&A830_RESOURCE_NATIVE) || native->Type!=3 || native->Depth!=1 || native->Levels!=1 || native->Samples!=1 || native->Offset){error(d,DXGI_ERROR_UNSUPPORTED);return;}
- }
+ if(a->Version!=A830_ABI_VERSION || !a->Width || !a->Height || !(a->Flags&A830_RESOURCE_OWNED)){error(d,E_INVALIDARG);return;}
  r->format=a->Format==D3DDDIFMT_A8R8G8B8 || a->Format==D3DDDIFMT_X8R8G8B8?DXGI_FORMAT_B8G8R8A8_UNORM:
    a->Format==D3DDDIFMT_A8B8G8R8?DXGI_FORMAT_R8G8B8A8_UNORM:
    a->Format==D3DDDIFMT_A2B10G10R10?DXGI_FORMAT_R10G10B10A2_UNORM:

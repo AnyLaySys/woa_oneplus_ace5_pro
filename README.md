@@ -20,6 +20,7 @@ Windows 驱动配合本设备的 UEFI/ACPI 使用。Linux 适配由 `linux_onepl
 | `src/qcom-keys` | Qualcomm 物理按键及 PMIH010x 振动控制 |
 | `src/qcom-sensors/hall.inc` | AKM AK09970 霍尔磁场采样和三段拨键判定，复用按键及传感器包 |
 | `src/nxp-nfc` | NXP SN220T NFC 读卡驱动，硬件通信待验证 |
+| `src/qcom-ir` | 高通 SPI 红外发射及 Samsung M5 电源按钮，配套 boot 后实测 |
 | `src/qcom-cam` | Qualcomm SM8750 / Sony IMX906 主摄控制器及 AVStream 视频接口，实机采集待验证 |
 | `src/qcom-gpu` | Adreno 830 Windows 硬件执行驱动 |
 | `src/mesa/umd` | D3D DDI → Vulkan / Turnip 用户态后端 |
@@ -92,21 +93,19 @@ PowerShell 中对应使用 `.\build.cmd`，例如：
 | `qcom-keys` | `out/drv/qcom-keys` | qcom_keys.inf / qcom_keys.sys / qcom_keys.cat |
 | `nxp-nfc` | `out/drv/nxp-nfc` | nxp_nfc.inf / nxp_nfc.dll / nxp_nfc.cat |
 | `qcom-cam` | `out/drv/qcom-cam` | qcom_cam.inf/sys/cat、qcom_cam_video.inf/sys/cat、采集及枚举工具 |
-| `qcom-gpu` | `out/drv/qcom-gpu` | a830_native.inf / a830_native.sys / a830_native.cat / a830_umd.dll / vulkan_freedreno.dll / msvcp140.dll / vcruntime140.dll / gen80000_zap.mbn |
+| `qcom-gpu` | `out/drv/qcom-gpu` | qcom_gpu.inf/sys/cat、ARM64/x64 UMD、OpenGL、Turnip、运行库及 GPU 固件 |
 
 编译中间文件位于 `out/<目标>/ARM64/Release`。驱动包中的 SYS 和 CAT、GPU 用户态驱动 DLL 及充电服务 EXE 均由构建脚本签名，安装时使用 `out/drv` 下的完整包。
 
 `qcom-audio` 会自动构建 `qcom-charge`，将 `charge.exe`、`credential.bin` 和 58 个 ADSP 文件纳入音频包及 CAT。其余运行数据由 `install-fw` 复制。
 
-`qcom-gpu` 会自动构建直接 DDI 后端、Turnip 和 WDDM 内核。Mesa、vkd3d 源码及编译缓存位于 `out/mesa`，Meson 子依赖位于 `out/mesa/source/subprojects`。
+`qcom-gpu` 构建 D3D10/11 前端、OpenGL、Turnip 和 WDDM 内核，同时生成 `out/drv/qcom-d3d12` 的 VKD3D-Proton 运行库。Mesa、着色器编译器和 VKD3D-Proton 的源码与编译缓存位于 `out/mesa`。
 
-同一次构建还会生成 `out/drv/qcom-d3d12`。把整个目录复制到设备后，在管理员 PowerShell 中运行：
+DWM 使用 D3D11 → Vulkan → Turnip；OpenGL 使用 Gallium Freedreno；D3D12 使用 VKD3D-Proton → Vulkan → Turnip。已移除未完成的原生 D3D12 前端和专用后端。
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-d3d12.ps1
-```
+将 `out/drv/qcom-d3d12` 完整复制到设备，在管理员 PowerShell 中运行 `install-d3d12.ps1`，即可启用 ARM64/x64 共用的 D3D12 入口。安装器保留 Microsoft 运行库用于软件适配器和必需的系统入口，运行同一脚本并加 `-Uninstall` 可恢复系统入口。硬件 D3D12 使用已注册的 Turnip ICD，避免全局枚举进入 Dozen 后递归调用 D3D12。
 
-安装脚本备份系统 `d3d12.dll`，安装 ARM64/x64 共用入口和各自的 VKD3D-Proton、DXGI 运行库。重启应用后可直接使用 VKD3D-Proton → Turnip，无须在应用 EXE 目录复制 DLL；不使用 Zink。VKD3D-Proton 和 DXGI 直接加载显示驱动注册的对应架构 Turnip ICD，避免 Vulkan 全局枚举进入 Dozen 后递归调用 D3D12。原生 D3D11 保持现有 DDI 路径，显式软件适配器仍使用系统 WARP。实机已通过 FL12_0/FL12_1 设备创建、GPU 计算、三角形显示、稀疏缓冲及纹理回读，以及像素／四重采样 ROV 排序测试；TiledResourcesTier 为 2，ROVsSupported 为 1。这些测试验证图形接口，不代表所有游戏均已通过实测。需要恢复系统入口时运行同一脚本并加 `-Uninstall`，随后重启应用。
+D3D11 前端声明特性级 10_0；D3D12 的 12_0/12_1 能力由 VKD3D-Proton 与 Turnip 提供。接口与像素验证不等同于完整游戏兼容性验证。
 
 ### 名称与版本
 
@@ -131,7 +130,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-d3d12.ps1
 | `fw/wcn7861` | 目标 Windows 目录下 `System32/drivers/wcn7861` | 7 文件 |
 | `fw/wcn7861-bt` | 目标 Windows 目录下 `System32/drivers/wcn7861-bt` | 5 固件/NVM 文件，另配 address.bin |
 | `fw/gpu` | 目标 Windows 目录下 `System32/drivers/qcom-gpu` | 3 固件 |
-| `fw/gpu/gen80000_zap.mbn` | 随 GPU 驱动包安装到 `DriverStore/FileRepository/a830_native.inf_arm64_<系统生成标识>`，由配套 UEFI 认证加载 | 1 固件 |
+| `fw/gpu/gen80000_zap.mbn` | 随 GPU 驱动包安装到 `DriverStore/FileRepository/qcom_gpu.inf_arm64_<系统生成标识>`，由配套 UEFI 认证加载 | 1 固件 |
 
 ADSP 随音频驱动包安装到 DriverStore。UEFI 在 Windows 启动前选择 `DriverVer` 最高且包含完整 MDT/DTB 的音频包，加载同一 ADSP 目录中的固件分段。目标 Windows 卷需在启动前可供 UEFI 读取。音频 replay 数据由 Windows 驱动读取。
 
@@ -158,7 +157,7 @@ pnputil /add-driver ".\out\drv\qcom-audio\sia9177.inf" /install
 pnputil /add-driver ".\out\drv\qcom-bt\qcom_bt.inf" /install
 pnputil /add-driver ".\out\drv\qcom-wlan\qcom_wlan.inf" /install
 pnputil /add-driver ".\out\drv\ti-batt\ti_batt.inf" /install
-pnputil /add-driver ".\out\drv\qcom-gpu\a830_native.inf" /install
+pnputil /add-driver ".\out\drv\qcom-gpu\qcom_gpu.inf" /install
 ```
 
 5. 重启设备。

@@ -96,7 +96,7 @@ static NTSTATUS Branch(CAM *c,PUCHAR b,ULONG offset) {
         ULONGLONG deadline=KeQueryInterruptTime()+100000;
         do {
             ULONG value=CamRead(b,offset);
-            if(shared?(value&1)!=0:!(value&0x80000000)||((value>>28)&7)==2)break;
+            if(shared?(value&1)!=0:!(value&0x80000000)||((value>>28)&7)==2){status=STATUS_SUCCESS;break;}
             status=STATUS_IO_TIMEOUT;CamDelay(10);
         }while(KeQueryInterruptTime()<deadline);
         ULONG value=CamRead(b,offset);
@@ -179,6 +179,10 @@ NTSTATUS CamPowerOn(CAM *c) {
     if(NT_SUCCESS(status))status=Domain(c,0x11004);
     if(NT_SUCCESS(status)&&c->ProbeLimit==7)return STATUS_SUCCESS;
     if(NT_SUCCESS(status))status=CamCrmOn(c);
+    if(NT_SUCCESS(status)) {
+        c->Trace.DebugXo[0]=CamRead(cc,0x11348);c->Trace.DebugXo[1]=c->Trace.DebugXo[0]|1;
+        status=Branch(c,cc,0x11348);c->Trace.DebugXo[2]=CamRead(cc,0x11348);
+    }
     const ULONG clocks[]={0x113ac,0x1139c,0x11360,0x11320,0x11324,0x11284,0x100bc,0x100c0,0x10020,0x11060,0x11064};
     for(ULONG i=0;i<RTL_NUMBER_OF(clocks)&&NT_SUCCESS(status);i++)status=Branch(c,cc,clocks[i]);
     if(NT_SUCCESS(status)&&c->ProbeLimit==8)return STATUS_SUCCESS;

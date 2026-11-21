@@ -58,20 +58,12 @@ NTSTATUS APIENTRY A830CreateAllocation(HANDLE adapter,DXGKARG_CREATEALLOCATION *
     ULONG i=0;NTSTATUS status=STATUS_INVALID_PARAMETER;
     for(;i<p->NumAllocations;i++) {
         DXGK_ALLOCATIONINFO *info=p->pAllocationInfo+i;
-        if((info->PrivateDriverDataSize!=sizeof(A830_RESOURCE) && info->PrivateDriverDataSize!=sizeof(A830_DX12_RESOURCE)) || !info->pPrivateDriverData)break;
+        if(info->PrivateDriverDataSize!=sizeof(A830_RESOURCE) || !info->pPrivateDriverData)break;
         A830_RESOURCE r=*(A830_RESOURCE *)info->pPrivateDriverData;
-        BOOLEAN native=(r.Flags&A830_RESOURCE_NATIVE)!=0;
-        if(info->PrivateDriverDataSize==sizeof(A830_DX12_RESOURCE) && !native)break;
         BOOLEAN shared=(r.Flags&1) || ((r.Flags&A830_RESOURCE_OWNED) && !(r.Flags&A830_RESOURCE_PRIMARY));
-        ULONGLONG limit=shared || native?min(((A830_ADAPTER *)adapter)->Memory.Shared.Bytes,(ULONGLONG)GPU_BUFFER_LIMIT):A830_SEGMENT_BYTES;
-        if(r.Version!=A830_ABI_VERSION || !r.Size || r.Size>limit || (r.Flags&~15u) ||
-           (native?(r.Rotation>2 || (r.Flags&(1u|A830_RESOURCE_OWNED))):r.Rotation>D3DDDI_ROTATION_270))break;
-        if(native && (r.Flags&A830_RESOURCE_PRIMARY)) {
-            ULONG bytes=A830PixelBytes(r.Format);
-            if(!bytes || !r.Width || !r.Height || r.Size>A830_SEGMENT_BYTES || r.Width>MAXULONG/bytes ||
-               r.Pitch<r.Width*bytes || r.Height>r.Size/r.Pitch)break;
-        }
-        if(!native && (r.Flags&A830_RESOURCE_OWNED)) {
+        ULONGLONG limit=shared?min(((A830_ADAPTER *)adapter)->Memory.Shared.Bytes,(ULONGLONG)GPU_BUFFER_LIMIT):A830_SEGMENT_BYTES;
+        if(r.Version!=A830_ABI_VERSION || !r.Size || r.Size>limit || (r.Flags&~7u) || r.Rotation>D3DDDI_ROTATION_270)break;
+        if(r.Flags&A830_RESOURCE_OWNED) {
             ULONG bytes=A830PixelBytes(r.Format);
             if(!bytes || !r.Width || !r.Height || r.Width>MAXULONG/bytes ||
                r.Pitch<r.Width*bytes || r.Height>r.Size/r.Pitch)break;
@@ -79,7 +71,7 @@ NTSTATUS APIENTRY A830CreateAllocation(HANDLE adapter,DXGKARG_CREATEALLOCATION *
         A830_ALLOCATION *allocation=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*allocation),GPU_TAG);
         if(!allocation){status=STATUS_INSUFFICIENT_RESOURCES;break;}
         allocation->Resource=r;info->hAllocation=allocation;info->Size=(r.Size+4095)&~4095u;
-        if(!native && (r.Flags&A830_RESOURCE_OWNED)) {
+        if(r.Flags&A830_RESOURCE_OWNED) {
             status=A830SharedCreate(allocation);
             if(!NT_SUCCESS(status)){ExFreePoolWithTag(allocation,GPU_TAG);info->hAllocation=NULL;break;}
             info->Size=(r.Flags&A830_RESOURCE_PRIMARY)?((r.Size+4095)&~4095u):4096;
@@ -98,14 +90,6 @@ NTSTATUS APIENTRY A830CreateAllocation(HANDLE adapter,DXGKARG_CREATEALLOCATION *
             info->FlagsWddm2.CpuVisible=0;info->FlagsWddm2.Cached=0;
             info->PreferredSegment.SegmentId0=1;info->SupportedReadSegmentSet=info->SupportedWriteSegmentSet=1;
         }
-        if(native) {
-            BOOLEAN primary=(r.Flags&A830_RESOURCE_PRIMARY)!=0;
-            info->Alignment=65536;info->PreferredSegment.SegmentId0=primary?1:2;
-            info->SupportedReadSegmentSet=info->SupportedWriteSegmentSet=primary?1:2;
-            info->FlagsWddm2.AccessedPhysically=r.Format!=0;info->FlagsWddm2.CpuVisible=1;
-            info->FlagsWddm2.Cached=r.Rotation==2;
-            info->FlagsWddm2.ExplicitResidencyNotification=info->FlagsWddm2.AccessedPhysically;
-        }
     }
     if(i==p->NumAllocations)return STATUS_SUCCESS;
     while(i){i--;A830_ALLOCATION *allocation=p->pAllocationInfo[i].hAllocation;if(allocation->Buffer.Mdl)A830SharedDestroy(allocation);else ExFreePoolWithTag(allocation,GPU_TAG);p->pAllocationInfo[i].hAllocation=NULL;}
@@ -118,22 +102,8 @@ NTSTATUS APIENTRY A830DestroyAllocation(HANDLE adapter,const DXGKARG_DESTROYALLO
     if(p->Flags.DestroyResource && p->hResource)ExFreePoolWithTag(p->hResource,GPU_TAG);
     return STATUS_SUCCESS;
 }
-static NTSTATUS ReadFence(A830_ADAPTER *a,A830_CONTEXT *c,A830_FENCE_QUERY *query) {
-    if(query->Version!=A830_ABI_VERSION || query->Reserved || c->Adapter!=a || !c->AddressSpace ||
-       c->Process!=PsGetCurrentProcess() || (query->Address&7) || query->Address<GPU_CLIENT_VA_BASE || query->Address>>39)return STATUS_INVALID_PARAMETER;
-    A830_PROCESS *process=c->AddressSpace;KeWaitForSingleObject(&process->Lock,Executive,KernelMode,FALSE,NULL);
-    ULONGLONG physical;NTSTATUS status=A830ResolveGpuAddress(a,process->Root,query->Address,&physical);
-    if(NT_SUCCESS(status)) {
-        MM_COPY_ADDRESS source;source.PhysicalAddress.QuadPart=physical;SIZE_T copied=0;
-        status=MmCopyMemory(&query->Value,source,sizeof(query->Value),MM_COPY_MEMORY_PHYSICAL,&copied);
-        if(NT_SUCCESS(status) && copied!=sizeof(query->Value))status=STATUS_PARTIAL_COPY;
-    }
-    KeReleaseMutex(&process->Lock,FALSE);return status;
-}
 NTSTATUS APIENTRY A830Escape(HANDLE adapter,const DXGKARG_ESCAPE *p) {
     A830_ADAPTER *a=adapter;
-    if(p->hContext && p->PrivateDriverDataSize==sizeof(A830_FENCE_QUERY) && p->pPrivateDriverData)
-        return ReadFence(a,p->hContext,p->pPrivateDriverData);
     if(p->hContext && p->PrivateDriverDataSize==sizeof(A830_CONTEXT_QUERY) && p->pPrivateDriverData) {
         A830_CONTEXT_QUERY *query=p->pPrivateDriverData;A830_CONTEXT *c=p->hContext;
         if(query->Version!=A830_ABI_VERSION || query->Reserved || c->Adapter!=a || c->Process!=PsGetCurrentProcess())return STATUS_INVALID_PARAMETER;
@@ -145,12 +115,8 @@ NTSTATUS APIENTRY A830Escape(HANDLE adapter,const DXGKARG_ESCAPE *p) {
     DXGKARGCB_GETHANDLEDATA get={0};get.Type=DXGK_HANDLE_ALLOCATION;get.hObject=address->Allocation;
     DXGKARG_RELEASE_HANDLE release=NULL;
     A830_ALLOCATION *allocation=a->Dxgk.DxgkCbAcquireHandleData(&get,&release);
-    if(!allocation || (!allocation->Buffer.Mdl && (!(allocation->Resource.Flags&A830_RESOURCE_NATIVE) || !allocation->Resident.SegmentId))) {
-        if(release){DXGKARGCB_RELEASEHANDLEDATA drop={release,DXGK_HANDLE_ALLOCATION};a->Dxgk.DxgkCbReleaseHandleData(drop);}return STATUS_INVALID_HANDLE;
-    }
-    address->Address=allocation->Buffer.Mdl?allocation->Buffer.Address:
-        (allocation->Resident.SegmentId==1?A830_SEGMENT_ADDRESS:A830_SHARED_ADDRESS)+allocation->Resident.SegmentOffset;
-    address->Size=allocation->Buffer.Mdl?allocation->Buffer.Size:allocation->Resource.Size;
+    if(!allocation || !allocation->Buffer.Mdl){if(release){DXGKARGCB_RELEASEHANDLEDATA drop={release,DXGK_HANDLE_ALLOCATION};a->Dxgk.DxgkCbReleaseHandleData(drop);}return STATUS_INVALID_HANDLE;}
+    address->Address=allocation->Buffer.Address;address->Size=allocation->Buffer.Size;
     address->Pitch=allocation->Resource.Pitch;address->Format=allocation->Resource.Format;
     if(release){DXGKARGCB_RELEASEHANDLEDATA drop={release,DXGK_HANDLE_ALLOCATION};a->Dxgk.DxgkCbReleaseHandleData(drop);}
     return STATUS_SUCCESS;

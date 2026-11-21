@@ -226,3 +226,19 @@ index dd1f779..a3d2b58 100644
  else
    d3d12core_name_prefix = 'libvkd3d-proton-'
    d3d12core_dependencies = [ vkd3d_dep, lib_dl ]
+diff --git a/libs/vkd3d/swapchain.c b/libs/vkd3d/swapchain.c
+index e53970a..8f8f7c8 100644
+--- a/libs/vkd3d/swapchain.c
++++ b/libs/vkd3d/swapchain.c
+@@ -1780,5 +1780,11 @@ static bool dxgi_vk_swap_chain_select_format(struct dxgi_vk_swap_chain *chain, V
+     VkFormat vk_format = vkd3d_get_format(chain->queue->device, chain->request.dxgi_format, false)->vk_format;
+     VkColorSpaceKHR vk_color_space = convert_color_space(chain->request.dxgi_color_space_type);
+
++#ifdef _WIN32
++    if (chain->queue->device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_MESA_TURNIP &&
++            vk_format == VK_FORMAT_R8G8B8A8_UNORM)
++        vk_format = VK_FORMAT_B8G8R8A8_UNORM;
++#endif
++
+     if (dxgi_vk_swap_chain_find_surface_format(chain, vk_format, vk_color_space, format))
+         return true;

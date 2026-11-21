@@ -74,6 +74,10 @@ int wmain(int argc,wchar_t **argv) {
         puts("Reading camera DDR and MMSS firmware bus state");fflush(stdout);
         ok=DeviceIoControl(device,QCAM_CAMERA_BUS_PROBE,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
     }
+    else if(!wcscmp(argv[1],L"noc-registers")&&argc==2) {
+        puts("Reading the main camera RT NoC error registers");fflush(stdout);
+        ok=DeviceIoControl(device,QCAM_NOC_REGISTERS,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
+    }
     else if(!wcscmp(argv[1],L"frame-route-probe")&&argc==2) {
         puts("Validating and restoring the main camera route through an existing identity context");fflush(stdout);
         ok=DeviceIoControl(device,QCAM_FRAME_ROUTE_PROBE,NULL,0,NULL,0,&bytes,NULL);error=GetLastError();
@@ -129,6 +133,9 @@ int wmain(int argc,wchar_t **argv) {
         if(ok) {
             static const ULONG cpas[]={0,4,8,0xdc,0xec,0xf0,0xf4,0xf8};
             printf("trace step=%lu\n",t.Step);
+            printf("debug XO original=%08lx requested=%08lx observed=%08lx\n",t.DebugXo[0],t.DebugXo[1],t.DebugXo[2]);
+            printf("firmware checkpoint seq=%lu write_status=%08lx\n",t.ScmAuditSequence,(ULONG)t.ScmAuditStatus);
+            printf("noc RT error logger control=%08lx\n",t.NocMainControl);
             printf("frame route slot=%lu original=%08lx selected=%08lx cbar=%08lx sctlr=%08lx status=%08lx/%08lx\n",
                 t.FrameRoute[0],t.FrameRoute[1],t.FrameRoute[2],t.FrameRoute[3],t.FrameRoute[4],t.FrameRouteStatus[0],t.FrameRouteStatus[1]);
             printf("firmware IO function=%08lx\n",t.ScmIoFunction);

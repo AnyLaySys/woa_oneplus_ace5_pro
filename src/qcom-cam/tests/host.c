@@ -550,10 +550,19 @@ static VOID PowerTests(void) {
 }
 
 static struct { ULONG Calls,WakePolls,Resumes,Acks,InterruptResumes; LONG QueryStatus,QosStatus; BOOLEAN Supported,WaitStuck,WaitError,WaitForeign,WaitSlow; } ScmMock;
+static NTSTATUS scmAuditError;
+static ULONG scmAuditPhase;
+
+NTSTATUS CamScmAudit(CAM *c,ULONG phase,const ULONGLONG *registers,NTSTATUS result) {
+    (void)registers;(void)result;scmAuditPhase=phase;
+    c->ScmAuditSequence++;c->Trace.ScmAuditSequence=c->ScmAuditSequence;c->Trace.ScmAuditStatus=scmAuditError;
+    return scmAuditError;
+}
 
 VOID CamScmSlow(ULONGLONG *registers) {
     ScmMock.Calls++;
     if(registers[0]==1) {
+        assert(scmAuditPhase==4);
         assert(registers[1]==0x83&&registers[2]==0&&registers[3]==0&&registers[4]==0&&registers[5]==0&&registers[7]==0);
         assert(registers[6]==0xa6000001);ScmMock.InterruptResumes++;
         memset(registers,0,8*sizeof(*registers));
@@ -562,6 +571,7 @@ VOID CamScmSlow(ULONGLONG *registers) {
         for(ULONG i=3;i<8;i++)assert(registers[i]==0);
         registers[0]=(ULONG)ScmMock.QueryStatus;registers[1]=ScmMock.Supported;
     } else if(registers[0]==0x4200180a) {
+        assert(scmAuditPhase==1);
         assert(registers[0]==0x4200180a&&registers[1]==0x83);
         for(ULONG i=2;i<8;i++)assert(registers[i]==0);
         registers[0]=(ULONG)ScmMock.QosStatus;
@@ -656,8 +666,12 @@ static VOID ScmTests(void) {
     regs[0x1e4/4]=1;c.CdmPending=TRUE;
     assert(CamScmQosDiagnostic(&c)==STATUS_DEVICE_BUSY&&ScmMock.Calls==calls);
     c.CdmPending=FALSE;
+    assert(CamScmQosDiagnostic(&c)==STATUS_DEVICE_NOT_READY&&ScmMock.Calls==calls);
+    assert(CamScmQosRaw(&c)==STATUS_DEVICE_NOT_READY&&ScmMock.Calls==calls);
+    regs[0xf0/4]=1;assert(CamScmQosRaw(&c)==STATUS_DEVICE_NOT_READY&&ScmMock.Calls==calls);
+    regs[0xf0/4]=0;regs[0xf8/4]=1;assert(CamScmQosRaw(&c)==STATUS_DEVICE_NOT_READY&&ScmMock.Calls==calls);
+    regs[0xf0/4]=1;
     assert(CamScmQosDiagnostic(&c)==STATUS_SUCCESS&&!c.ScmPending);
-    assert(CamScmQos(&c)==STATUS_DEVICE_NOT_READY);
     ScmMock.WaitSlow=FALSE;ScmMock.QosStatus=2;ScmMock.WakePolls=0;
     assert(CamScmWaitqProbe(&c)==STATUS_SUCCESS&&c.ScmFastWaitq);
     calls=ScmMock.Calls;ULONG resumes=ScmMock.Resumes;
@@ -668,10 +682,16 @@ static VOID ScmTests(void) {
     assert(c.ScmResumeValid&&CamScmContinue(&c)==STATUS_SUCCESS&&!c.ScmPending&&!c.ScmResumeValid);
     assert(ScmMock.Resumes==resumes+1);
     calls=ScmMock.Calls;assert(CamScmContinue(&c)==STATUS_DEVICE_NOT_READY&&ScmMock.Calls==calls);
+    scmAuditError=STATUS_IO_DEVICE_ERROR;
+    assert(CamScmQosRaw(&c)==STATUS_IO_DEVICE_ERROR&&ScmMock.Calls==calls&&!c.ScmPending&&!c.ScmResumeValid);
+    scmAuditError=STATUS_SUCCESS;
     ScmMock.QosStatus=1;
     assert(CamScmQosRaw(&c)==STATUS_DEVICE_BUSY&&c.ScmPending&&c.ScmResumeValid);
     assert(c.Trace.ScmReturn[1]!=0x83&&c.ScmResumeArgs[1]==0x83&&c.ScmResumeArgs[0]==0x4200180a);
     c.DmaActive=TRUE;calls=ScmMock.Calls;assert(CamScmContinue(&c)==STATUS_DEVICE_BUSY&&ScmMock.Calls==calls);c.DmaActive=FALSE;
+    scmAuditError=STATUS_IO_DEVICE_ERROR;
+    assert(CamScmContinue(&c)==STATUS_IO_DEVICE_ERROR&&ScmMock.Calls==calls&&c.ScmPending&&c.ScmResumeValid);
+    scmAuditError=STATUS_SUCCESS;
     assert(CamScmContinue(&c)==STATUS_SUCCESS&&!c.ScmPending&&!c.ScmResumeValid&&ScmMock.InterruptResumes==1);
 }
 

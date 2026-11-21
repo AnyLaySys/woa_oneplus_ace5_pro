@@ -41,6 +41,7 @@ typedef struct {
     BOOLEAN FrameRouteOwned,TbuPending;
     BOOLEAN ScmResumeValid;
     ULONGLONG ScmResumeArgs[8];
+    ULONG ScmAuditSequence;
     ULONG FrameRoute[4];
 } CAM;
 ULONG CamRead(PUCHAR base,ULONG offset);
@@ -61,4 +62,5 @@ NTSTATUS CamScmWaitqProbe(CAM *c);
 NTSTATUS CamScmWaitqContext(CAM *c);
 NTSTATUS CamScmQosRaw(CAM *c);
 NTSTATUS CamScmContinue(CAM *c);
+NTSTATUS CamScmAudit(CAM *c,ULONG phase,const ULONGLONG *registers,NTSTATUS result);
 NTSTATUS CamScmIoProbe(CAM *c);

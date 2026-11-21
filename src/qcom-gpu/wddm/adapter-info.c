@@ -122,6 +122,12 @@ NTSTATUS APIENTRY A830Query(HANDLE adapter,const DXGKARG_QUERYADAPTERINFO *q) {
         }
         *(PULONG)q->pOutputData=A830_ABI_VERSION;return STATUS_SUCCESS;
     }
+    if(q->Type==DXGKQAITYPE_GPUVERSION) {
+        if(q->OutputDataSize<sizeof(DXGK_GPUVERSION))return STATUS_BUFFER_TOO_SMALL;
+        if(q->InputDataSize && (q->InputDataSize!=sizeof(UINT) || !q->pInputData || *(const UINT *)q->pInputData))return STATUS_INVALID_PARAMETER;
+        DXGK_GPUVERSION *v=q->pOutputData;RtlZeroMemory(v,sizeof(*v));
+        return RtlStringCchCopyW(v->GpuArchitecture,RTL_NUMBER_OF(v->GpuArchitecture),L"Adreno 830");
+    }
     return STATUS_NOT_SUPPORTED;
 }
 NTSTATUS APIENTRY A830StandardAllocation(HANDLE adapter,DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA *p) {

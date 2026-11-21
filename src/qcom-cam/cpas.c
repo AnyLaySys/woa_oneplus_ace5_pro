@@ -2,9 +2,47 @@
 #include "trace-regs.h"
 #include "crm-vote.h"
 #include "mnoc-qos.h"
+#include "scm-ready.h"
 #include "../platform/lock.h"
 
 static const ULONG PerfDomains[]={0,6,7};
+
+static NTSTATUS NocRead(CAM *c,ULONG offset,ULONG *value) {
+    ULONGLONG registers[8]={0xad90000+offset};
+    c->Diag.Step=187;c->Diag.Region=CamNoc;c->Diag.Address=(ULONG)registers[0];c->Diag.Offset=offset;
+    c->Diag.Mask=MAXULONG;c->Diag.Expected=0;c->Diag.Phase=1;c->Diag.Count=1;c->Diag.Slot=0;RtlCopyMemory(c->Diag.Resource,"noc-mmio",8);
+    NTSTATUS status=CamScmAudit(c,7,registers,STATUS_SUCCESS);if(!NT_SUCCESS(status))return status;
+    *value=CamRead(c->Base[CamNoc],offset);c->Diag.Observed=*value;
+    registers[1]=*value;status=CamScmAudit(c,8,registers,STATUS_SUCCESS);
+    return status;
+}
+
+NTSTATUS CamNocRegisters(CAM *c) {
+    if(c->ScmPending||c->CdmPending||c->TbuPending||c->CrmPending)return STATUS_DEVICE_BUSY;
+    if(!c->Powered||!c->CrmOwned||!CamScmDiagnosticReady(c))return STATUS_DEVICE_NOT_READY;
+    ULONG accepted=CamRead(c->Base[CamCpas],0xf0);
+    if(!(accepted&1)) {
+        c->Diag.Step=188;c->Diag.Region=CamCpas;c->Diag.Offset=0xf0;c->Diag.Address=0xac040f0;
+        c->Diag.Mask=1;c->Diag.Expected=1;c->Diag.Observed=accepted;RtlCopyMemory(c->Diag.Resource,"noc-gate",8);
+        return STATUS_DEVICE_NOT_READY;
+    }
+    if((c->DmaActive||c->RxActive)&&((CamRead(c->Base[CamTfe],0x2400)&1)||CamRead(c->Base[CamCsid],0xe04)))return STATUS_DEVICE_BUSY;
+    c->Trace.NocErrorCount[0]=0;c->Trace.NocErrorStatus[0]=STATUS_DEVICE_NOT_READY;
+    c->Trace.NocErrorCount[1]=0;c->Trace.NocErrorStatus[1]=STATUS_NOT_SUPPORTED;
+    NTSTATUS status=NocRead(c,0x10,&c->Trace.NocErrors[0][0]);
+    if(!NT_SUCCESS(status))return status;
+    if(c->Trace.NocErrors[0][0]&~1u)return STATUS_IO_DEVICE_ERROR;
+    c->Trace.NocErrorCount[0]=1;
+    status=NocRead(c,8,&c->Trace.NocMainControl);
+    if(!NT_SUCCESS(status))return status;
+    if(c->Trace.NocMainControl==MAXULONG)return STATUS_IO_DEVICE_ERROR;
+    if(c->Trace.NocErrors[0][0]&1)for(ULONG i=1;i<9;i++) {
+        status=NocRead(c,0x1c+i*4,&c->Trace.NocErrors[0][i]);
+        if(!NT_SUCCESS(status))return status;
+        c->Trace.NocErrorCount[0]++;
+    }
+    c->Trace.NocErrorStatus[0]=STATUS_SUCCESS;return STATUS_SUCCESS;
+}
 
 NTSTATUS CamCameraBusProbe(CAM *c) {
     if(c->ScmPending||c->CdmPending||c->TbuPending||c->CrmPending||c->DmaActive||c->RxActive)return STATUS_DEVICE_BUSY;

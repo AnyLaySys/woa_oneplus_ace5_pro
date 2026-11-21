@@ -171,6 +171,18 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         status=CamCaptureStop(c);if(NT_SUCCESS(status))status=CamPowerOff(c);
         if(NT_SUCCESS(status))c->PipelineLimit=0;goto done;
     }
+    if(code==QCAM_NOC_REGISTERS) {
+        if(input||output){status=STATUS_INVALID_PARAMETER;goto done;}
+        if(c->Powered){status=CamNocRegisters(c);c->Diag.Status=status;goto done;}
+        c->ProbeLimit=0;c->PipelineLimit=1;
+        QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,1000,0,4980000000ULL};
+        status=CamCaptureStart(c,&options);
+        if(NT_SUCCESS(status))status=CamNocRegisters(c);
+        QCAM_DIAG diag=c->Diag;NTSTATUS stopped=CamCaptureStop(c);
+        if(NT_SUCCESS(stopped))stopped=CamPowerOff(c);
+        c->Diag=diag;c->PipelineLimit=0;
+        if(NT_SUCCESS(status))status=stopped;c->Diag.Status=status;goto done;
+    }
     if(code==QCAM_SCM_NOC_FAULTS||code==QCAM_SCM_NOC_FAULTS32||code==QCAM_CAMERA_BUS_PROBE||code==QCAM_FRAME_ROUTE_PROBE) {
         if(input||output){status=STATUS_INVALID_PARAMETER;goto done;}
         c->ProbeLimit=0;c->PipelineLimit=1;
@@ -272,11 +284,14 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
     }
     if(code==QCAM_SCM_QOS_PROBE||code==QCAM_SCM_QOS_DIAGNOSTIC||code==QCAM_SCM_QOS_RAW) {
         if(input||output){status=STATUS_INVALID_PARAMETER;goto done;}
+        if(c->ScmPending||c->CdmPending||c->TbuPending||c->CrmPending||c->DmaActive||c->RxActive||c->FrameRouteOwned){status=STATUS_DEVICE_BUSY;goto done;}
+        status=CamScmAudit(c,0,NULL,STATUS_SUCCESS);if(!NT_SUCCESS(status))goto done;
         c->ProbeLimit=0;c->PipelineLimit=1;
         QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,1000,0,4980000000ULL};
         status=CamCaptureStart(c,&options);
         if(NT_SUCCESS(status))status=code==QCAM_SCM_QOS_RAW?CamScmQosRaw(c):
             code==QCAM_SCM_QOS_DIAGNOSTIC?CamScmQosDiagnostic(c):CamScmQos(c);
+        if(!NT_SUCCESS(status)&&!c->ScmPending)CamScmAudit(c,3,NULL,status);
         if(code==QCAM_SCM_QOS_RAW){c->Diag.Status=status;goto done;}
         if(c->Powered&&!c->ScmPending)CamBusSnapshot(c);
         QCAM_DIAG diag=c->Diag;
