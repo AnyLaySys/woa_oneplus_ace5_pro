@@ -21,6 +21,24 @@ for index in range(sections):
     if name == b'.text':
         code = data[offset:offset + size]
 assert code and bytes.fromhex('030000d4') in code
+entries = {}
+strings = symbols + count * 18
+index = 0
+while index < count:
+    record = symbols + index * 18
+    name = data[record:record + 8]
+    if name[:4] == b'\0' * 4:
+        offset = struct.unpack_from('<I', name, 4)[0]
+        start = strings + offset
+        name = data[start:data.index(b'\0', start)]
+    else:
+        name = name.rstrip(b'\0')
+    value, section = struct.unpack_from('<Ih', data, record + 8)
+    if name in [b'CamScmSlow', b'CamScmOnce']:
+        assert section > 0
+        entries[name.decode()] = value
+    index += 1 + data[record + 17]
+assert set(entries) == {'CamScmSlow', 'CamScmOnce'}
 
 registers = [UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3,
              UC_ARM64_REG_X4, UC_ARM64_REG_X5, UC_ARM64_REG_X6, UC_ARM64_REG_X7]
@@ -28,7 +46,7 @@ base, stack, memory = 0x1000000, 0x2000000, 0x3000000
 return_address = base + 0x1000
 parameters = [0x42000601, 1, 0x0200180a, 0, 0, 0, 0, 0]
 
-def run(interruptions, result):
+def run(interruptions, result, entry='CamScmSlow'):
     cpu = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
     for address in [base, stack, memory]:
         cpu.mem_map(address, 0x10000)
@@ -51,10 +69,15 @@ def run(interruptions, result):
         else:
             assert uc.reg_read(UC_ARM64_REG_X0) == 1
             assert uc.reg_read(UC_ARM64_REG_X6) == 0xa6000000 + calls
+            for index in [1, 2, 3, 4, 5, 7]:
+                assert uc.reg_read(registers[index]) == parameters[index]
+            assert uc.reg_read(UC_ARM64_REG_X18) == saved[UC_ARM64_REG_X18]
         calls += 1
         uc.reg_write(UC_ARM64_REG_X18, 0)
         if calls <= interruptions:
             uc.reg_write(UC_ARM64_REG_X0, 1)
+            for index in [1, 2, 3, 4, 5, 7]:
+                uc.reg_write(registers[index], 0xbad00000 + index + calls * 16)
             uc.reg_write(UC_ARM64_REG_X6, 0xa6000000 + calls)
         else:
             uc.reg_write(UC_ARM64_REG_X0, result)
@@ -62,16 +85,26 @@ def run(interruptions, result):
         uc.reg_write(UC_ARM64_REG_PC, address + size)
 
     cpu.hook_add(UC_HOOK_CODE, instruction)
-    cpu.emu_start(base, return_address, count=2000)
+    cpu.emu_start(base + entries[entry], return_address, count=2000)
     assert cpu.reg_read(UC_ARM64_REG_PC) == return_address
     for register, value in saved.items():
         assert cpu.reg_read(register) == value
     returned = struct.unpack('<8Q', bytes(cpu.mem_read(memory, 64)))
-    assert calls == min(interruptions + 1, 64)
-    assert returned[0] == (1 if interruptions >= 64 else result)
-    if interruptions < 64:
+    limit = 1 if entry == 'CamScmOnce' else 64
+    assert calls == min(interruptions + 1, limit)
+    assert returned[0] == (1 if interruptions >= limit else result)
+    if interruptions < limit:
         assert returned[1] == 1
 
-for interruptions, result in [(0, 0), (1, 0), (3, 0), (100, 0), (0, 0xffffffff)]:
-    run(interruptions, result)
-print('Assembled Windows SMC ABI, register preservation, secure continuation and retry bound passed')
+for parameters in [[0x42000601, 1, 0x0200180a, 0, 0, 0, 0, 0],
+                   [0x4200180a, 0x83, 1, 0x90123000, 8, 0, 0, 0],
+                   [0x4200180a, 0x83, 1, 0x90123000, 16, 0, 0, 0],
+                   [0x4200180a, 0x83, 1, 0x90123000, 40, 0, 0, 0],
+                   [0x42000601, 1, 0x02000501, 0, 0, 0, 0, 0],
+                   [0x82000501, 1, 0x0ad90010, 0, 0, 0, 0, 0],
+                   [0xc2000501, 1, 0x0ad90010, 0, 0, 0, 0, 0]]:
+    for interruptions, result in [(0, 0), (1, 0), (3, 0), (100, 0), (0, 0xffffffff)]:
+        run(interruptions, result)
+    for interruptions, result in [(0, 0), (1, 0), (3, 0), (0, 2), (0, 3)]:
+        run(interruptions, result, 'CamScmOnce')
+print('Assembled Windows SMC ABI, original argument recovery, single call, waitq returns and retry bound passed')

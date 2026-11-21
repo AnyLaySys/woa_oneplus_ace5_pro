@@ -20,7 +20,7 @@
   <PropertyGroup>
     <TargetName>qcom_keys</TargetName>
     <KeysVersionDate Condition="'$(KeysVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</KeysVersionDate>
-    <KeysRevision Condition="'$(KeysRevision)' == ''">26</KeysRevision>
+    <KeysRevision Condition="'$(KeysRevision)' == ''">28</KeysRevision>
     <KeysDriverDate>$([System.DateTime]::Parse('$(KeysVersionDate)').ToString('MM/dd/yyyy'))</KeysDriverDate>
     <KeysDriverVersion>$([System.DateTime]::Parse('$(KeysVersionDate)').ToString('yy.M.d')).$(KeysRevision)</KeysDriverVersion>
     <KeysDriverVersionComma>$([System.String]::Copy('$(KeysDriverVersion)').Replace('.', ','))</KeysDriverVersionComma>

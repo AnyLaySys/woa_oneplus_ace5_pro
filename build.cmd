@@ -9,21 +9,21 @@ if not "%~2"=="" goto invalid
 if /i "%~1"=="all" goto build_all
 set "NAME=%~1"
 set "TARGET="
-if /i "%NAME%"=="syna-s3910" (set "NAME=syna-s3910"& set "TARGET=syna_s3910")
+if /i "%NAME%"=="syna-touch" (set "NAME=syna-touch"& set "TARGET=syna_touch")
 if /i "%NAME%"=="qcom-audio" (set "NAME=qcom-audio"& set "TARGET=sia9177")
-if /i "%NAME%"=="qcom-bluetooth" (set "NAME=qcom-bluetooth"& set "TARGET=qcom_bluetooth")
-if /i "%NAME%"=="qcom-wcn7861" (set "NAME=qcom-wcn7861"& set "TARGET=wcn7861")
+if /i "%NAME%"=="qcom-bt" (set "NAME=qcom-bt"& set "TARGET=qcom_bt")
+if /i "%NAME%"=="qcom-wlan" (set "NAME=qcom-wlan"& set "TARGET=qcom_wlan")
 if /i "%NAME%"=="qcom-charge" (set "NAME=qcom-audio"& set "TARGET=sia9177")
-if /i "%NAME%"=="qcom-battery" (set "NAME=qcom-battery"& set "TARGET=qcom_battery")
-if /i "%NAME%"=="qcom-cpupower" (set "NAME=qcom-cpupower"& set "TARGET=qcom_cpupower")
+if /i "%NAME%"=="ti-batt" (set "NAME=ti-batt"& set "TARGET=ti_batt")
+if /i "%NAME%"=="qcom-cpupwr" (set "NAME=qcom-cpupwr"& set "TARGET=qcom_cpupwr")
 if /i "%NAME%"=="qcom-keys" (set "NAME=qcom-keys"& set "TARGET=qcom_keys")
 if /i "%NAME%"=="qcom-sensors" (set "NAME=qcom-sensors"& set "TARGET=qcom_sensors")
-if /i "%NAME%"=="qcom-nfc" (set "NAME=qcom-nfc"& set "TARGET=qcom_nfc")
+if /i "%NAME%"=="nxp-nfc" (set "NAME=nxp-nfc"& set "TARGET=nxp_nfc")
 if /i "%NAME%"=="qcom-cam" (set "NAME=qcom-cam"& set "TARGET=qcom_cam")
 if /i "%NAME%"=="qcom-gpu" (set "NAME=qcom-gpu"& set "TARGET=qcom_gpu")
 if not defined TARGET goto invalid
 set "DRIVER_EXT=sys"
-if /i "%NAME%"=="qcom-nfc" set "DRIVER_EXT=dll"
+if /i "%NAME%"=="nxp-nfc" set "DRIVER_EXT=dll"
 set "CREDENTIAL="
 if /i "%NAME%"=="qcom-audio" (
   set "CREDENTIAL=%ROOT%\fw\charge\credential.bin"
@@ -155,7 +155,7 @@ dir "%DST%" /b
 exit /b 0
 
 :build_all
-for %%D in (syna-s3910 qcom-audio qcom-bluetooth qcom-wcn7861 qcom-battery qcom-cpupower qcom-keys qcom-sensors qcom-nfc qcom-cam qcom-gpu) do (
+for %%D in (syna-touch qcom-audio qcom-bt qcom-wlan ti-batt qcom-cpupwr qcom-keys qcom-sensors nxp-nfc qcom-cam qcom-gpu) do (
   echo.
   echo Building %%D...
   call "%~f0" %%D
@@ -231,16 +231,16 @@ exit /b 2
 
 :help
 echo Usage: build.cmd all
-echo        build.cmd syna-s3910
+echo        build.cmd syna-touch
 echo        build.cmd qcom-audio
-echo        build.cmd qcom-bluetooth
-echo        build.cmd qcom-wcn7861
+echo        build.cmd qcom-bt
+echo        build.cmd qcom-wlan
 echo        build.cmd qcom-charge
-echo        build.cmd qcom-battery
-echo        build.cmd qcom-cpupower
+echo        build.cmd ti-batt
+echo        build.cmd qcom-cpupwr
 echo        build.cmd qcom-keys
 echo        build.cmd qcom-sensors
-echo        build.cmd qcom-nfc
+echo        build.cmd nxp-nfc
 echo        build.cmd qcom-cam
 echo        build.cmd qcom-gpu
 echo        build.cmd install-fw -WindowsDirectory "W:\Windows" [-BluetoothAddress "XX:XX:XX:XX:XX:XX"] [-WhatIf] [-Force]

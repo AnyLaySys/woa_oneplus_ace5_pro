@@ -13,7 +13,7 @@ bool resource_template(Device *d,const D3D12DDIARG_CREATERESOURCE_0003 *r,pipe_r
     if(!r || !r->Width || r->Width>UINT_MAX || !r->Height || !r->DepthOrArraySize || !r->MipLevels || r->MipLevels>15 ||
        !r->SampleDesc.Count || r->SampleDesc.Quality || (r->Flags&~0xffu))return false;
     p={};p.width0=static_cast<UINT>(r->Width);p.height0=r->Height;p.depth0=1;p.array_size=r->DepthOrArraySize;
-    p.last_level=r->MipLevels-1;p.nr_samples=p.nr_storage_samples=r->SampleDesc.Count;p.usage=PIPE_USAGE_DEFAULT;
+    p.last_level=r->MipLevels-1;p.nr_samples=p.nr_storage_samples=r->SampleDesc.Count>1?r->SampleDesc.Count:0;p.usage=PIPE_USAGE_DEFAULT;
     bool depth=(r->Flags&D3D12DDI_RESOURCE_FLAG_0003_DEPTH_STENCIL)!=0;
     p.format=format(r->Format,depth);
     switch(r->ResourceType) {

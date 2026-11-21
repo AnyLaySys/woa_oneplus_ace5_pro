@@ -20,16 +20,24 @@ static NTSTATUS CamCdmRoute(CAM *c) {
         if((control&0x30000)==0&&bank<0x53) {
             ULONG cbar=CamRead(b,0x1000+bank*4),sctlr=CamRead(b,0x80000+bank*4096);
             if(CamDmaIdentity(control,cbar,sctlr)) {
-                if(smr==0x80001c00)identity=control;
+                if(identity==MAXULONG&&!(sctlr&0x0ff00000u))identity=control;
             } else if(existing==i)return STATUS_NOT_SUPPORTED;
         } else if(existing==i) {
             if(((control>>16)&3)!=1)return STATUS_NOT_SUPPORTED;
         }
     }
-    if(existing!=MAXULONG)return ((existingControl>>16)&3)<=1?STATUS_SUCCESS:STATUS_NOT_SUPPORTED;
+    if(existing!=MAXULONG) {
+        c->Trace.CommandRoute[0]=existing;c->Trace.CommandRoute[1]=existingControl;
+        if(!(existingControl&0x30000)) {
+            c->Trace.CommandRoute[2]=CamRead(b,0x1000+(existingControl&255)*4);
+            c->Trace.CommandRoute[3]=CamRead(b,0x80000+(existingControl&255)*4096);
+        } else c->Trace.CommandRoute[2]=c->Trace.CommandRoute[3]=0;
+        return ((existingControl>>16)&3)<=1?STATUS_SUCCESS:STATUS_NOT_SUPPORTED;
+    }
     if(freeSlot==MAXULONG||identity==MAXULONG)return STATUS_NOT_SUPPORTED;
     if(CamRead(b,0x800+freeSlot*4))return STATUS_DEVICE_BUSY;
-    ULONG control=0x10000;
+    ULONG control=identity;
+    c->Diag.Region=CamSmmu;c->Diag.Slot=freeSlot;RtlCopyMemory(c->Diag.Resource,"cdm-sid",8);
     NTSTATUS status=CamSave(c,b,0xc00+freeSlot*4,control);
     if(!NT_SUCCESS(status))return status;
     c->Diag.Offset=0xc00+freeSlot*4;c->Diag.Mask=MAXULONG;c->Diag.Expected=control;
@@ -38,5 +46,8 @@ static NTSTATUS CamCdmRoute(CAM *c) {
     status=CamSave(c,b,0x800+freeSlot*4,0x80001860);
     if(!NT_SUCCESS(status))return status;
     c->Diag.Slot=freeSlot;
+    c->Trace.CommandRoute[0]=freeSlot;c->Trace.CommandRoute[1]=control;
+    c->Trace.CommandRoute[2]=CamRead(b,0x1000+(control&255)*4);
+    c->Trace.CommandRoute[3]=CamRead(b,0x80000+(control&255)*4096);
     return CamRead(b,0x800+freeSlot*4)==0x80001860?STATUS_SUCCESS:STATUS_IO_DEVICE_ERROR;
 }

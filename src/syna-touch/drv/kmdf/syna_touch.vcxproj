@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|ARM64"><Configuration>Release</Configuration><Platform>ARM64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{64048006-1C5F-4262-823B-54310D7F3869}</ProjectGuid>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <Platform Condition="'$(Platform)' == ''">ARM64</Platform>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion><DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType><PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries>
+    <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <TargetName>syna_touch</TargetName>
+    <S3910VersionDate Condition="'$(S3910VersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</S3910VersionDate>
+    <S3910Revision Condition="'$(S3910Revision)' == ''">15</S3910Revision>
+    <S3910DriverDate>$([System.DateTime]::Parse('$(S3910VersionDate)').ToString('MM/dd/yyyy'))</S3910DriverDate>
+    <S3910DriverVersion>$([System.DateTime]::Parse('$(S3910VersionDate)').ToString('yy.M.d')).$(S3910Revision)</S3910DriverVersion>
+    <S3910DriverVersionComma>$([System.String]::Copy('$(S3910DriverVersion)').Replace('.', ','))</S3910DriverVersionComma>
+    <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
+    <OutDir>$(MSBuildThisFileDirectory)..\..\..\..\out\syna-touch\ARM64\Release\bin\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)..\..\..\..\out\syna-touch\ARM64\Release\obj\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><PreprocessorDefinitions>_UNICODE;UNICODE;POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MinSpace</Optimization><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
+    <Link><GenerateDebugInformation>false</GenerateDebugInformation><Profile>false</Profile></Link>
+    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>$(S3910DriverDate)</DateStamp><TimeStamp>$(S3910DriverVersion)</TimeStamp></Inf>
+    <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=$(S3910DriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(S3910DriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\vhidmini.c" /><ClCompile Include="..\hummer_spi.c" /><ClCompile Include="..\hummer_rpmh.c" />
+    <ClInclude Include="..\vhidmini.h" /><ClInclude Include="..\hummer_spi.h" /><ClInclude Include="..\hummer_rpmh.h" />
+    <ClInclude Include="..\tap.h" /><ClInclude Include="..\..\..\qcom-keys\haptics.h" />
+    <ResourceCompile Include="syna_touch.rc" /><Inf Include="syna_touch.inx" /><FilesToPackage Include="$(TargetPath)" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

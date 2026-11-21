@@ -1,4 +1,0 @@
-#pragma once
-
-#define WCN_DRIVER_VERSION "26.11.7.62"
-#define WCN_DRIVER_VERSION_COMMA 26,11,7,62

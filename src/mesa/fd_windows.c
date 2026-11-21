@@ -100,7 +100,8 @@ static int submit_list(struct list_head *list) {
 static struct fd_submit *submit_new(struct fd_pipe *pipe) { return fd_submit_sp_new(pipe,submit_list); }
 static void pipe_destroy(struct fd_pipe *pipe) {
    struct windows_pipe *p=to_windows_pipe(pipe);
-   if(p->native)p->host.Destroy(p->native);else a830_context_finish(p->context);
+   if(p->native){if(p->native!=p->host.Queue)p->host.Destroy(p->native);}
+   else a830_context_finish(p->context);
    fd_pipe_sp_ringpool_fini(pipe);free(pipe);
 }
 static const struct fd_pipe_funcs pipe_funcs = {

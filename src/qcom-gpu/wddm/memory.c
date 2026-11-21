@@ -102,9 +102,9 @@ NTSTATUS APIENTRY A830CreateAllocation(HANDLE adapter,DXGKARG_CREATEALLOCATION *
             BOOLEAN primary=(r.Flags&A830_RESOURCE_PRIMARY)!=0;
             info->Alignment=65536;info->PreferredSegment.SegmentId0=primary?1:2;
             info->SupportedReadSegmentSet=info->SupportedWriteSegmentSet=primary?1:2;
-            info->FlagsWddm2.AccessedPhysically=0;info->FlagsWddm2.CpuVisible=1;
+            info->FlagsWddm2.AccessedPhysically=r.Format!=0;info->FlagsWddm2.CpuVisible=1;
             info->FlagsWddm2.Cached=r.Rotation==2;
-            info->FlagsWddm2.ExplicitResidencyNotification=1;
+            info->FlagsWddm2.ExplicitResidencyNotification=info->FlagsWddm2.AccessedPhysically;
         }
     }
     if(i==p->NumAllocations)return STATUS_SUCCESS;

@@ -14,8 +14,11 @@ DriverCopy=13
 qcom_sensors_native.dll=1
 [Manufacturer]
 %Provider%=Devices,NT$ARCH$.10.0...22000
+%HallManufacturer%=HallDevices,NT$ARCH$.10.0...22000
 [Devices.NT$ARCH$.10.0...22000]
 %Description%=Install,ROOT\QCOMSENSORNATIVE
+[HallDevices.NT$ARCH$.10.0...22000]
+%HallDescription%=Install,ROOT\AKMHALL
 [Install.NT]
 Include=WUDFRD.inf
 Needs=WUDFRD.NT
@@ -41,3 +44,5 @@ UmdfExtensions=SensorsCx0102
 [Strings]
 Provider="AnyLaySys"
 Description="Qualcomm Native Sensors"
+HallManufacturer="AKM"
+HallDescription="AKM AK09970 Hall Sensor"

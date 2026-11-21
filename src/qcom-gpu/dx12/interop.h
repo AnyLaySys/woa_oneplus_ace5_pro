@@ -60,5 +60,5 @@ void APIENTRY present(D3D12DDI_HCOMMANDLIST h,D3D12DDI_HCOMMANDQUEUE queue,const
     Resource *s=object<Resource>(p->phSurfacesToPresent[0].hSurface),*d=object<Resource>(p->hDstResource);
     if(!s || p->phSurfacesToPresent[0].SubResourceIndex){error(l,E_INVALIDARG);return;}
     out->hSrcAllocation=s->heap->memory.Handle;out->hDstAllocation=d?d->heap->memory.Handle:0;out->hContext=q->context;
-    out->BackBufferMultiplicity=1;out->AddedGpuWork=!l->recording->ops.empty();
+    out->BackBufferMultiplicity=1;
 }

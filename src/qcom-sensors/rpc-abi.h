@@ -1,0 +1,10 @@
+#pragma once
+#define QCOM_RPC_INVOKE CTL_CODE(FILE_DEVICE_UNKNOWN, 0x823, METHOD_BUFFERED, FILE_READ_DATA)
+typedef struct {
+    ULONG Offset, Length;
+} QCOM_RPC_ARGUMENT;
+typedef struct {
+    ULONG Handle, Scalar, Result, Count;
+    QCOM_RPC_ARGUMENT Arg[16];
+    UCHAR Data[1];
+} QCOM_RPC_PACKET;

@@ -1,0 +1,46 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=Battery
+ClassGuid={72631e54-78a4-11d0-bcf7-00aa00b7b32a}
+Provider=%ProviderString%
+DriverVer=11/04/2026,26.11.4.1
+CatalogFile=ti_batt.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskDesc%,,,
+
+[SourceDisksFiles]
+ti_batt.sys = 1
+
+[Manufacturer]
+%ManufacturerString% = TI, NT$ARCH$.10.0...22000
+
+[TI.NT$ARCH$.10.0...22000]
+%DeviceDesc% = ti_batt_Device, ACPI\HMRB0001
+
+[ti_batt_Device.NT]
+CopyFiles = ti_batt_CopyFiles
+
+[ti_batt_CopyFiles]
+ti_batt.sys
+
+[ti_batt_Device.NT.Services]
+AddService = ti_batt, 0x00000002, ti_batt_Service
+
+[ti_batt_Service]
+DisplayName   = %ServiceDesc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\ti_batt.sys
+
+[Strings]
+ProviderString     = "AnyLaySys"
+ManufacturerString = "Texas Instruments"
+DiskDesc           = "AnyLaySys Battery Gauge Driver"
+DeviceDesc         = "Texas Instruments BQ28Z610 Fuel Gauge"
+ServiceDesc        = "Texas Instruments BQ28Z610 Fuel Gauge Driver"

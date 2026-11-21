@@ -14,7 +14,7 @@ HRESULT APIENTRY caps(D3D12DDI_HADAPTER,const D3D12DDIARG_GETCAPS *p) {
     switch(p->Type) {
     case D3D12DDICAPS_TYPE_MEMORY_ARCHITECTURE:
         if(!p->pInfo || *static_cast<const UINT *>(p->pInfo))return E_INVALIDARG;
-        return capability(p,D3D12DDI_MEMORY_ARCHITECTURE_CAPS{TRUE,FALSE,FALSE});
+        return capability(p,D3D12DDI_MEMORY_ARCHITECTURE_CAPS{TRUE,TRUE,FALSE});
     case D3D12DDICAPS_TYPE_TEXTURE_LAYOUT:
         if(p->DataSize==sizeof(D3D12DDI_TEXTURE_LAYOUT_CAPS))return capability(p,D3D12DDI_TEXTURE_LAYOUT_CAPS{});
         return capability(p,D3D12DDI_TEXTURE_LAYOUT_CAPS_0001{});
@@ -41,7 +41,7 @@ HRESULT APIENTRY caps(D3D12DDI_HADAPTER,const D3D12DDIARG_GETCAPS *p) {
 void APIENTRY check_format(D3D12DDI_HDEVICE h,DXGI_FORMAT f,UINT *out) {
     *out=0;Device *d=object<Device>(h);pipe_format pf=format(f);
     if(!pf){if(f==DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM)*out=D3D12DDI_FORMAT_SUPPORT_NOT_SUPPORTED;return;}
-    auto supported=[&](pipe_texture_target target,UINT samples,UINT bind){return d->screen->is_format_supported(d->screen,pf,target,samples,samples,bind);};
+    auto supported=[&](pipe_texture_target target,UINT samples,UINT bind){samples=samples>1?samples:0;return d->screen->is_format_supported(d->screen,pf,target,samples,samples,bind);};
     if(depth_format(f)) {
         for(UINT samples:{2u,4u,8u})if(supported(PIPE_TEXTURE_2D,samples,PIPE_BIND_DEPTH_STENCIL))*out|=D3D12DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
         return;

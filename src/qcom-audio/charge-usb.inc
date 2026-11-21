@@ -1,4 +1,4 @@
-#include "..\qcom-battery\power.h"
+#include "..\ti-batt\power.h"
 #include "charge-policy.h"
 static BOOLEAN QchSharedPoll(PSIA_LINK L,ULONGLONG Now)
 {

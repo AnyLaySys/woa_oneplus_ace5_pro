@@ -1,7 +1,7 @@
 #pragma once
 #include <ntddk.h>
 #include "..\qcom-sensors\see.h"
-#include "..\qcom-sensors\rpc.h"
+#include "..\qcom-sensors\rpc-abi.h"
 #include "usb.h"
 #include "charge.h"
 #include "volume.h"

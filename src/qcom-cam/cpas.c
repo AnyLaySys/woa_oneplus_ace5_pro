@@ -1,8 +1,45 @@
 #include "cam.h"
 #include "trace-regs.h"
 #include "crm-vote.h"
+#include "mnoc-qos.h"
+#include "../platform/lock.h"
 
 static const ULONG PerfDomains[]={0,6,7};
+
+NTSTATUS CamCameraBusProbe(CAM *c) {
+    if(c->ScmPending||c->CdmPending||c->TbuPending||c->CrmPending||c->DmaActive||c->RxActive)return STATUS_DEVICE_BUSY;
+    if(!c->Powered||!c->CrmOwned||!c->BusOn)return STATUS_DEVICE_NOT_READY;
+    const ULONG offsets[]={4,0x14,0x800,0x810,0x804};
+    PLATFORM_LOCK_GUARD guard={0};NTSTATUS status=PlatformLockAcquire(&guard,FALSE);
+    if(status!=STATUS_SUCCESS)return status;
+    for(ULONG i=0;i<RTL_NUMBER_OF(offsets);i++) {
+        c->Diag.Step=182;c->Diag.Region=CamRpmh;c->Diag.Address=0xbbf0000+offsets[i];
+        c->Diag.Offset=offsets[i];c->Diag.Count=i;c->Diag.Phase=0;RtlCopyMemory(c->Diag.Resource,"cam-rpmh",8);
+        c->Trace.CameraRpmh[i]=CamRead(c->Base[CamRpmh],offsets[i]);c->Diag.Observed=c->Trace.CameraRpmh[i];
+    }
+    return PlatformLockRelease(&guard);
+}
+
+NTSTATUS CamMnocQos(CAM *c,BOOLEAN apply) {
+    if(c->DmaActive||c->RxActive||c->ScmPending||c->CdmPending||c->TbuPending||c->CrmPending)return STATUS_DEVICE_BUSY;
+    if(!c->Powered||!c->BusOn||!c->CrmOwned)return STATUS_DEVICE_NOT_READY;
+    PLATFORM_LOCK_GUARD guard={0};NTSTATUS status=PlatformLockAcquire(&guard,FALSE);
+    if(status!=STATUS_SUCCESS)return status;
+    PUCHAR b=c->Base[CamMnoc];
+    for(ULONG i=0;i<RTL_NUMBER_OF(CamMnocQosRegs);i++) {
+        ULONG offset=CamMnocQosRegs[i],original=CamRead(b,offset),requested=CamMnocQosValue(i,original);
+        c->Trace.MnocQos[i][0]=original;c->Trace.MnocQos[i][1]=requested;
+        c->Diag.Step=176;c->Diag.Region=CamMnoc;c->Diag.Address=0x1780000+offset;
+        c->Diag.Offset=offset;c->Diag.Mask=CAM_MNOC_QOS_MASK;c->Diag.Expected=requested&CAM_MNOC_QOS_MASK;
+        c->Diag.Phase=apply;c->Diag.Count=i;RtlCopyMemory(c->Diag.Resource,"mnoc-qos",8);
+        if(apply&&original!=requested)status=CamSave(c,b,offset,requested);
+        ULONG observed=CamRead(b,offset);c->Trace.MnocQos[i][2]=observed;c->Diag.Observed=observed;
+        if(apply&&NT_SUCCESS(status)&&(observed&CAM_MNOC_QOS_MASK)!=(requested&CAM_MNOC_QOS_MASK))status=STATUS_IO_DEVICE_ERROR;
+        if(!NT_SUCCESS(status))break;
+    }
+    NTSTATUS released=PlatformLockRelease(&guard);
+    return NT_SUCCESS(status)?released:status;
+}
 
 VOID CamBusSnapshot(CAM *c) {
     static const ULONG cpas[]={0,4,8,0xdc,0xec,0xf0,0xf4,0xf8};
@@ -25,9 +62,8 @@ NTSTATUS CamCrmOn(CAM *c) {
     for(ULONG i=0;i<hwCount;i++)if(CamRead(crm,0xdc+i*0x29c))return STATUS_DEVICE_BUSY;
     for(ULONG i=0;i<hwCount;i++) {
         ULONG offset=0xe4+i*0x29c;
-        c->Diag.Step=158;c->Diag.Region=CamCrm;c->Diag.Offset=offset;c->Diag.Mask=1;c->Diag.Expected=1;
+        c->Diag.Step=158;c->Diag.Region=CamCrm;c->Diag.Offset=offset;c->Diag.Mask=0;c->Diag.Expected=0;
         NTSTATUS configured=CamSave(c,crm,offset,CamRead(crm,offset)|1);
-        if(NT_SUCCESS(configured))configured=CamWait(crm,offset,1,1,1000);
         c->Diag.Observed=CamRead(crm,offset);
         if(!NT_SUCCESS(configured))return configured;
     }
@@ -82,6 +118,7 @@ NTSTATUS CamBusOn(CAM *c) {
     c->Diag.Offset=0xf8;status=CamWait(p,0xf8,1,0,20000);
     c->Diag.Observed=CamRead(p,0xf8);
     if(!NT_SUCCESS(status)){CamBusSnapshot(c);return status;}
+    status=CamMnocQos(c,TRUE);if(!NT_SUCCESS(status))return status;
     CamDelay(1);CamWrite(p,0xec,1);CamWrite(p,0xf4,1);
     if(CamRead(p,0)!=0x00090800||CamRead(p,4)!=0x10000000)return STATUS_REVISION_MISMATCH;
     c->Diag.Step=141;c->Diag.Region=CamCpas;c->Diag.Offset=0xf0;c->Diag.Mask=1;c->Diag.Expected=1;

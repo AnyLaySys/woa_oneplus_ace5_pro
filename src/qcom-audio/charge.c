@@ -1,7 +1,7 @@
 #include <ntifs.h>
 #include <wdmsec.h>
 #include "sia9177.h"
-#include "..\qcom-battery\power.h"
+#include "..\ti-batt\power.h"
 static HANDLE InputKey;
 static BOOLEAN InputSaved;
 BOOLEAN QchInputSaved(VOID){return InputSaved;}

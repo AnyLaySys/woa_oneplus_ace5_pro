@@ -1,6 +1,8 @@
 #include "cam.h"
 #include "wait.h"
 #include "rcg-restore.h"
+#include "smmu-restore.h"
+#include "mnoc-qos.h"
 #include "../platform/lock.h"
 
 NTSTATUS CamRailsOn(CAM *c);
@@ -150,7 +152,7 @@ static NTSTATUS Domain(CAM *c,ULONG offset) {
 }
 
 NTSTATUS CamPowerOn(CAM *c) {
-    if(c->ScmPending||c->CdmPending)return STATUS_DEVICE_BUSY;
+    if(c->ScmPending||c->CdmPending||c->TbuPending||c->FrameRouteOwned)return STATUS_DEVICE_BUSY;
     if(c->Powered)return STATUS_SUCCESS;
     if(c->PowerState||c->Faulted)return STATUS_DEVICE_HARDWARE_ERROR;
     RtlZeroMemory(&c->Diag,sizeof(c->Diag));c->Diag.Step=100;
@@ -198,7 +200,7 @@ NTSTATUS CamPowerOn(CAM *c) {
 }
 
 NTSTATUS CamPowerOff(CAM *c) {
-    if(c->ScmPending||c->CdmPending)return STATUS_DEVICE_BUSY;
+    if(c->ScmPending||c->CdmPending||c->TbuPending||c->FrameRouteOwned)return STATUS_DEVICE_BUSY;
     if(c->DmaActive||c->RxActive||c->BusOn)return STATUS_DEVICE_BUSY;
     NTSTATUS status=CamCrmOff(c);
     if(!NT_SUCCESS(status))return status;
@@ -211,11 +213,36 @@ NTSTATUS CamPowerOff(CAM *c) {
     c->Configured=FALSE;c->Powered=FALSE;
     while(c->SavedCount) {
         CAM_SAVE *s=&c->Saved[c->SavedCount-1];
+        if(s->Base==c->Base[CamMnoc]) {
+            PLATFORM_LOCK_GUARD guard={0};NTSTATUS locked=PlatformLockAcquire(&guard,FALSE);
+            if(locked!=STATUS_SUCCESS)return locked;
+            do {
+                s=&c->Saved[c->SavedCount-1];
+                ULONG restored=CamMnocQosRestore(CamRead(s->Base,s->Offset),s->Original);
+                CamWrite(s->Base,s->Offset,restored);
+                if((CamRead(s->Base,s->Offset)&CAM_MNOC_QOS_MASK)!=(s->Original&CAM_MNOC_QOS_MASK)) {
+                    c->Faulted=TRUE;PlatformLockRelease(&guard);return STATUS_IO_DEVICE_ERROR;
+                }
+                c->SavedCount--;
+            } while(c->SavedCount&&c->Saved[c->SavedCount-1].Base==c->Base[CamMnoc]);
+            NTSTATUS released=PlatformLockRelease(&guard);if(!NT_SUCCESS(released))return released;
+            continue;
+        }
         if(s->Base==c->Base[CamSmmu]) {
             PLATFORM_LOCK_GUARD guard={0};NTSTATUS locked=PlatformLockAcquire(&guard,TRUE);
             if(locked!=STATUS_SUCCESS)return locked;
             do {
-                s=&c->Saved[c->SavedCount-1];CamWrite(s->Base,s->Offset,s->Original);c->SavedCount--;
+                s=&c->Saved[c->SavedCount-1];
+                NTSTATUS restored=STATUS_SUCCESS;
+                if(s->Offset>=0xc00&&s->Offset<0xe00)
+                    restored=CamSmmuRestoreControl(s->Base,s->Offset,s->Original,c->Trace.Smmu[1]&255);
+                else CamWrite(s->Base,s->Offset,s->Original);
+                if(!NT_SUCCESS(restored)) {
+                    c->Diag.Step=173;c->Diag.Region=CamSmmu;c->Diag.Offset=s->Offset;
+                    c->Diag.Expected=s->Original;c->Diag.Observed=CamRead(s->Base,s->Offset);
+                    PlatformLockRelease(&guard);return restored;
+                }
+                c->SavedCount--;
             } while(c->SavedCount&&c->Saved[c->SavedCount-1].Base==c->Base[CamSmmu]);
             NTSTATUS released=PlatformLockRelease(&guard);if(!NT_SUCCESS(released))return released;
             continue;

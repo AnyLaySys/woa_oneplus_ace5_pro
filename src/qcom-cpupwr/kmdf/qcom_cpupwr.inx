@@ -1,0 +1,36 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider=%Provider%
+DriverVer=11/20/2026,26.11.20.5
+CatalogFile=qcom_cpupwr.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir=13
+[SourceDisksNames]
+1=%Disk%,,,
+[SourceDisksFiles]
+qcom_cpupwr.sys=1
+
+; A primitive boot driver: no fabricated ACPI node or processor replacement.
+[DefaultInstall.NT$ARCH$]
+CopyFiles=CopyDriver
+[CopyDriver]
+qcom_cpupwr.sys
+[DefaultInstall.NT$ARCH$.Services]
+DelService=qcom_cpupower
+AddService=qcom_cpupwr,0x00000002,CpuPowerService
+[CpuPowerService]
+DisplayName=%Service%
+ServiceType=1
+StartType=0
+ErrorControl=1
+LoadOrderGroup="Boot Bus Extender"
+ServiceBinary=%13%\qcom_cpupwr.sys
+
+[Strings]
+Provider="AnyLaySys"
+Disk="Qualcomm SM8750 CPU Power Driver"
+Service="Qualcomm SM8750 CPU Power Management"

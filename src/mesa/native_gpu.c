@@ -13,6 +13,33 @@
 #include "compiler/nir/nir_xfb_info.h"
 #include "util/format/u_format.h"
 
+static nir_def *descriptor_index(nir_builder *b,nir_deref_instr *deref,unsigned base) {
+    nir_def *value=nir_imm_int(b,0);unsigned elements=1;
+    while(deref->deref_type!=nir_deref_type_var) {
+        if(deref->deref_type==nir_deref_type_array) {
+            value=nir_iadd(b,value,nir_imul_imm(b,deref->arr.index.ssa,elements));
+            elements*=glsl_get_length(nir_deref_instr_parent(deref)->type);
+        } else if(deref->deref_type==nir_deref_type_cast) {
+            if(!nir_def_is_deref(deref->parent.ssa))
+                return nir_iadd_imm(b,nir_iadd(b,value,nir_channel(b,deref->parent.ssa,0)),-base);
+        } else return NULL;
+        deref=nir_deref_instr_parent(deref);
+    }
+    return nir_iadd_imm(b,nir_umin(b,value,nir_imm_int(b,elements-1)),deref->var->data.binding-base);
+}
+static bool lower_sampler_derefs(nir_builder *b,nir_tex_instr *tex,void *unused) {
+    b->cursor=nir_before_instr(&tex->instr);
+    const nir_tex_src_type derefs[]={nir_tex_src_texture_deref,nir_tex_src_sampler_deref};
+    const nir_tex_src_type offsets[]={nir_tex_src_texture_offset,nir_tex_src_sampler_offset};
+    bool progress=false;
+    for(unsigned i=0;i<2;i++) {
+        int source=nir_tex_instr_src_index(tex,derefs[i]);if(source<0)continue;
+        nir_def *value=descriptor_index(b,nir_src_as_deref(tex->src[source].src),i?16:32);if(!value)continue;
+        nir_src_rewrite(&tex->src[source].src,value);tex->src[source].src_type=offsets[i];
+        if(i)tex->sampler_index=0;else tex->texture_index=0;progress=true;
+    }
+    return progress;
+}
 static bool lower_descriptor(nir_builder *b,nir_intrinsic_instr *in,void *unused) {
     nir_def *value;
     b->cursor=nir_before_instr(&in->instr);
@@ -25,6 +52,12 @@ static bool lower_descriptor(nir_builder *b,nir_intrinsic_instr *in,void *unused
     case nir_intrinsic_vulkan_resource_reindex:
         value=nir_vec2(b,nir_iadd(b,nir_channel(b,in->src[0].ssa,0),in->src[1].ssa),nir_channel(b,in->src[0].ssa,1));break;
     case nir_intrinsic_load_vulkan_descriptor:value=in->src[0].ssa;break;
+    case nir_intrinsic_image_deref_load:case nir_intrinsic_image_deref_store:
+    case nir_intrinsic_image_deref_atomic:case nir_intrinsic_image_deref_atomic_swap:
+    case nir_intrinsic_image_deref_size:case nir_intrinsic_image_deref_samples: {
+        value=descriptor_index(b,nir_src_as_deref(in->src[0]),160);if(!value)return false;
+        nir_rewrite_image_intrinsic(in,value,nir_image_intrinsic_type_default);return true;
+    }
     default:return false;
     }
     nir_def_replace(&in->def,value);return true;
@@ -147,13 +180,13 @@ static void *shader_create(struct pipe_context *context,unsigned stage,const uin
     nir_lower_explicit_io(nir,nir_var_mem_ubo|nir_var_mem_ssbo,nir_address_format_32bit_index_offset);
     nir_lower_vars_to_explicit_types(nir,nir_var_mem_shared,glsl_get_natural_size_align_bytes);
     nir_lower_explicit_io(nir,nir_var_mem_shared,nir_address_format_32bit_offset);
+    nir_shader_tex_pass(nir,lower_sampler_derefs,nir_metadata_control_flow,NULL);
     nir_foreach_variable_with_modes(var,nir,nir_var_uniform|nir_var_image) {
         const struct glsl_type *type=glsl_without_array(var->type);
         if(glsl_type_is_sampler(type))var->data.binding-=glsl_get_sampler_result_type(type)==GLSL_TYPE_VOID?16:32;
         if(glsl_type_is_image(type))var->data.binding-=160;
         var->data.driver_location=var->data.binding;
     }
-    nir_lower_samplers(nir);
     nir_assign_io_var_locations(nir,nir_var_shader_in);
     nir_assign_io_var_locations(nir,nir_var_shader_out);
     if(stage==MESA_SHADER_VERTEX)nir_foreach_shader_in_variable(var,nir) {

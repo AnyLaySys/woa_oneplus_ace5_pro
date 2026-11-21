@@ -16,7 +16,7 @@
   <ItemDefinitionGroup>
     <ClCompile><PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard>stdcpp17</LanguageStandard><Optimization>MinSpace</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><ExceptionHandling>Sync</ExceptionHandling><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
     <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=$(SensorsDriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(SensorsDriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
-    <Link><AdditionalDependencies>advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies><GenerateDebugInformation>false</GenerateDebugInformation><SubSystem>Console</SubSystem><OptimizeReferences>true</OptimizeReferences><EnableCOMDATFolding>true</EnableCOMDATFolding></Link>
+    <Link><AdditionalDependencies>advapi32.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies><GenerateDebugInformation>false</GenerateDebugInformation><SubSystem>Console</SubSystem><OptimizeReferences>true</OptimizeReferences><EnableCOMDATFolding>true</EnableCOMDATFolding></Link>
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="service.cpp" /><ResourceCompile Include="service.rc" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

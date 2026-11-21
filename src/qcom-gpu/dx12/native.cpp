@@ -256,7 +256,7 @@ HRESULT WINAPI host_create(void *device,void *queue,void **out) {
     if(q->event)CloseHandle(q->event);delete q;return hr;
 }
 void WINAPI host_destroy(void *user) {
-    Queue *q=static_cast<Queue *>(user);if(q->runtime.handle)return;
+    Queue *q=static_cast<Queue *>(user);
     D3DDDICB_DESTROYCONTEXT destroy{q->context};q->device->kernel.pfnDestroyContextCb(q->device->runtime.handle,&destroy);
     CloseHandle(q->event);delete q;
 }

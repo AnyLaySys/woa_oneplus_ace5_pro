@@ -10,15 +10,16 @@ Windows 驱动配合本设备的 UEFI/ACPI 使用。Linux 适配由 `linux_onepl
 
 | 路径 | 内容 |
 | --- | --- |
-| `src/syna-s3910` | Synaptics S3910 触控驱动及上游许可证 |
+| `src/syna-touch` | Synaptics S3910 触控驱动及上游许可证 |
 | `src/qcom-audio` | Qualcomm ADSP 音频、SIA9177 功放及 PMIC 充电、USB 电源管理 |
-| `src/qcom-wcn7861` | Qualcomm WCN7861 Wi-Fi 驱动 |
-| `src/qcom-bluetooth` | Qualcomm WCN7861 UART HCI 蓝牙驱动 |
-| `src/qcom-battery` | Qualcomm 电量计（bq27xxx，hub I2C）剩余电量显示驱动 |
+| `src/qcom-wlan` | Qualcomm WCN7861 Wi-Fi 驱动 |
+| `src/qcom-bt` | Qualcomm WCN7861 UART HCI 蓝牙驱动 |
+| `src/ti-batt` | Texas Instruments BQ28Z610 电量计（hub I2C）剩余电量显示驱动 |
 | `src/qcom-charge` | 随音频包部署的充电与 USB 角色管理服务 |
-| `src/qcom-cpupower` | SM8750 原生 CPU 调频驱动 |
+| `src/qcom-cpupwr` | SM8750 原生 CPU 调频驱动 |
 | `src/qcom-keys` | Qualcomm 物理按键及 PMIH010x 振动控制 |
-| `src/qcom-nfc` | NXP SN220T NFC 读卡驱动，硬件通信待验证 |
+| `src/qcom-sensors/hall.inc` | AKM AK09970 霍尔磁场采样和三段拨键判定，复用按键及传感器包 |
+| `src/nxp-nfc` | NXP SN220T NFC 读卡驱动，硬件通信待验证 |
 | `src/qcom-cam` | Qualcomm SM8750 / Sony IMX906 主摄控制器及 AVStream 视频接口，实机采集待验证 |
 | `src/qcom-gpu` | Adreno 830 Windows 硬件执行驱动 |
 | `src/mesa/umd` | D3D DDI → Vulkan / Turnip 用户态后端 |
@@ -55,15 +56,15 @@ Windows 驱动配合本设备的 UEFI/ACPI 使用。Linux 适配由 `linux_onepl
 
 ```cmd
 build.cmd all
-build.cmd syna-s3910
+build.cmd syna-touch
 build.cmd qcom-audio
-build.cmd qcom-bluetooth
-build.cmd qcom-wcn7861
-build.cmd qcom-battery
+build.cmd qcom-bt
+build.cmd qcom-wlan
+build.cmd ti-batt
 build.cmd qcom-charge
-build.cmd qcom-cpupower
+build.cmd qcom-cpupwr
 build.cmd qcom-keys
-build.cmd qcom-nfc
+build.cmd nxp-nfc
 build.cmd qcom-cam
 build.cmd qcom-gpu
 build.cmd --help
@@ -81,15 +82,15 @@ PowerShell 中对应使用 `.\build.cmd`，例如：
 
 | 目标 | 输出目录 | 文件 |
 | --- | --- | --- |
-| `syna-s3910` | `out/drv/syna-s3910` | syna_s3910.inf / syna_s3910.sys / syna_s3910.cat |
+| `syna-touch` | `out/drv/syna-touch` | syna_touch.inf / syna_touch.sys / syna_touch.cat |
 | `qcom-audio` | `out/drv/qcom-audio` | sia9177.inf / sia9177.sys / sia9177.cat / charge.exe / credential.bin / ADSP（58 文件） |
-| `qcom-bluetooth` | `out/drv/qcom-bluetooth` | qcom_bluetooth.inf / qcom_bluetooth.sys / qcom_bluetooth.cat |
-| `qcom-wcn7861` | `out/drv/qcom-wcn7861` | wcn7861.inf / wcn7861.sys / wcn7861.cat |
-| `qcom-battery` | `out/drv/qcom-battery` | qcom_battery.inf / qcom_battery.sys / qcom_battery.cat |
+| `qcom-bt` | `out/drv/qcom-bt` | qcom_bt.inf / qcom_bt.sys / qcom_bt.cat |
+| `qcom-wlan` | `out/drv/qcom-wlan` | qcom_wlan.inf / qcom_wlan.sys / qcom_wlan.cat |
+| `ti-batt` | `out/drv/ti-batt` | ti_batt.inf / ti_batt.sys / ti_batt.cat |
 | `qcom-charge` | `out/qcom-charge/ARM64/Release/bin` | charge.exe / credential.bin |
-| `qcom-cpupower` | `out/drv/qcom-cpupower` | qcom_cpupower.inf / qcom_cpupower.sys / qcom_cpupower.cat |
+| `qcom-cpupwr` | `out/drv/qcom-cpupwr` | qcom_cpupwr.inf / qcom_cpupwr.sys / qcom_cpupwr.cat |
 | `qcom-keys` | `out/drv/qcom-keys` | qcom_keys.inf / qcom_keys.sys / qcom_keys.cat |
-| `qcom-nfc` | `out/drv/qcom-nfc` | qcom_nfc.inf / qcom_nfc.dll / qcom_nfc.cat |
+| `nxp-nfc` | `out/drv/nxp-nfc` | nxp_nfc.inf / nxp_nfc.dll / nxp_nfc.cat |
 | `qcom-cam` | `out/drv/qcom-cam` | qcom_cam.inf/sys/cat、qcom_cam_video.inf/sys/cat、采集及枚举工具 |
 | `qcom-gpu` | `out/drv/qcom-gpu` | a830_native.inf / a830_native.sys / a830_native.cat / a830_umd.dll / vulkan_freedreno.dll / msvcp140.dll / vcruntime140.dll / gen80000_zap.mbn |
 
@@ -109,7 +110,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-d3d12.ps1
 
 ### 名称与版本
 
-驱动提供商和文件公司为 `AnyLaySys`；硬件制造商按对应设备填写 Synaptics、Qualcomm 等。
+源码组件目录采用“厂商－驱动类别”，使用 WLAN、BT、NFC、GPU、CPU、PWR、BATT 等常见缩写；touch、audio、sensors 保留明确的名称。芯片型号记录在硬件 ID、设备描述、固件分组和文档中。
+
+驱动提供商和文件公司为 `AnyLaySys`；硬件制造商按对应设备填写 Synaptics、Qualcomm、NXP、Texas Instruments 等。
 
 版本采用 `yy.M.d.revision`：
 
@@ -145,16 +148,16 @@ ADSP 随音频驱动包安装到 DriverStore。UEFI 在 Windows 启动前选择 
 ## 在完整 Windows 中使用
 
 1. 准备配套的 UEFI/ACPI，并配置目标 Windows 的测试签名和证书信任。
-2. 将完整音频包通过 DISM 安装到目标 ARM64 Windows 镜像，使 ADSP 随包进入 DriverStore。CPU 调频驱动的离线安装步骤见 [CPU 说明](src/qcom-cpupower/README.md)。
+2. 将完整音频包通过 DISM 安装到目标 ARM64 Windows 镜像，使 ADSP 随包进入 DriverStore。CPU 调频驱动的离线安装步骤见 对应 CPU 驱动包。
 3. 在首次启动驱动前，用 `install-fw` 部署上述运行数据和本机蓝牙地址。
 4. 在目标手机的 ARM64 Windows 管理员终端中安装完整驱动包，例如：
 
 ```powershell
-pnputil /add-driver ".\out\drv\syna-s3910\syna_s3910.inf" /install
+pnputil /add-driver ".\out\drv\syna-touch\syna_touch.inf" /install
 pnputil /add-driver ".\out\drv\qcom-audio\sia9177.inf" /install
-pnputil /add-driver ".\out\drv\qcom-bluetooth\qcom_bluetooth.inf" /install
-pnputil /add-driver ".\out\drv\qcom-wcn7861\wcn7861.inf" /install
-pnputil /add-driver ".\out\drv\qcom-battery\qcom_battery.inf" /install
+pnputil /add-driver ".\out\drv\qcom-bt\qcom_bt.inf" /install
+pnputil /add-driver ".\out\drv\qcom-wlan\qcom_wlan.inf" /install
+pnputil /add-driver ".\out\drv\ti-batt\ti_batt.inf" /install
 pnputil /add-driver ".\out\drv\qcom-gpu\a830_native.inf" /install
 ```
 
@@ -168,7 +171,7 @@ GPU 按负载选择原厂档位，每 20 ms 采样，正常最低 342 MHz；工�
 
 GPU 固定显存池为 64 MB。共享显存容量按 Windows 可见内存预算计算，并受剩余 GPU 地址空间约束，当前最大为 4 GB；物理页和页记录按需映射、分配与释放。
 
-SM8750 CPU 两组核心各有原厂 16 档：六核组 384–3532.8 MHz，两核组 1017.6–4320 MHz。驱动按负载调频并支持 PSCI 保留上下文休眠。两个簇独立读取 CPU/cache TSENS：87°C 时分别限至 2400 / 2438.4 MHz，99°C 时降至最低档，81°C 退出紧急档，78°C 解除温度限频。升温和传感器失效立即收紧上限，冷却条件需持续 500 ms；Windows 请求仍约束频率上限。构建入口为 `build.cmd qcom-cpupower`。
+SM8750 CPU 两组核心各有原厂 16 档：六核组 384–3532.8 MHz，两核组 1017.6–4320 MHz。驱动按负载调频并支持 PSCI 保留上下文休眠。两个簇独立读取 CPU/cache TSENS：87°C 时分别限至 2400 / 2438.4 MHz，99°C 时降至最低档，81°C 退出紧急档，78°C 解除温度限频。升温和传感器失效立即收紧上限，冷却条件需持续 500 ms；Windows 请求仍约束频率上限。构建入口为 `build.cmd qcom-cpupwr`。
 
 ## 蓝牙与 USB
 
@@ -178,7 +181,7 @@ USB 2.0 Host/OTG 支持自动插拔与充电器输入切换，主控和集线器
 
 ## 电量与充电
 
-`qcom-battery` 读取 BQ 电量计，并向 Windows 提供电池电量。`qcom-audio` 提供 PMIC GLINK、普通充电和 UFCS 充电通道，`qcom-charge` 的 `ALSCharge` 服务随音频包安装并自动启动，管理充电策略和 USB 角色。
+`ti-batt` 读取原厂配置为 BQ28Z610 的双电芯电量计，并向 Windows 提供电池电量。`qcom-audio` 提供 PMIC GLINK、普通充电和 UFCS 充电通道，`qcom-charge` 的 `ALSCharge` 服务随音频包安装并自动启动，管理充电策略和 USB 角色。
 
 UFCS 认证文件 `credential.bin` 随音频包进入 DriverStore，与 `charge.exe` 位于同一目录，由服务读取。
 
@@ -188,15 +191,17 @@ UFCS 认证文件 `credential.bin` 随音频包进入 DriverStore，与 `charge.
 
 重力、线性加速度、相对姿态和地磁姿态也通过独立 HID 集合提供。磁力计、计步、活动状态和接近检测由同包的 UMDF SensorsCx 驱动提供，复用只读的 `QcomSensorData` 入口；入口只接受传感器查询。磁场单位为 µT；计步提供真实累计总步数，步态类型为 Unknown，累计时长不提供有效测量。活动状态接入 ADSP `activity_recognition`，支持 Unknown、Stationary、Walking、Running、InVehicle、Biking，置信度为 Low；固件未提供 Idle/Fidgeting。消息中的层级状态已按本机固件的发布器与消费端核对，步行事件已实测；RMD/AMD 保留为完整分类不可用时的静止/未知回退。跑步、骑行和乘车的实际识别准确性仍待实测。标准 API 已读到三轴磁场和活动状态；手持手机前后甩动后，ADSP 与 Windows 计步接口均读到累计计数 11，确认计步变化能够上报。实际步行准确性仍待验证。新增接口仅在应用订阅时轮询，订阅结束后 ADSP 需求在 5 秒内过期。HID 与原生接口统一使用 `QcomSensorData` 的单一读取 ABI，不包含原始事件采集或厂商服务探测接口。`qcom_sensors_service` 负责 ADSP 固件配置与注册初始化，是正常启动所需的服务。
 
-原生驱动的承载控制器标记为不在设备管理器普通列表显示，四个标准接口继续供应用使用。接近检测通过 `ProximityDetection` 布尔字段提供，实机 Windows 事件已验证 0→1→0；不提供未经测量的毫米距离。SensorExplorer 部分页面可能不更新；交叉测试可使用 SensorInfo；接近距离未提供时不以 0 毫米代替。
+原生驱动的承载控制器标记为不在设备管理器普通列表显示，原有四个标准接口继续供应用使用。接近检测通过 `ProximityDetection` 布尔字段提供，实机 Windows 事件已验证 0→1→0；不提供未经测量的毫米距离。SensorExplorer 部分页面可能不更新；交叉测试可使用 SensorInfo；接近距离未提供时不以 0 毫米代替。
 
 实机没有注册 pressure 传感器，[OnePlus Ace 5 Pro 官方规格](https://www.oneplus.com/cn/ace-5-pro/specs)也未列出气压计；通用参考板的气压配置不能证明手机具备该硬件。目前不提供气压和气压高度。色温、环境色尚未接入标准接口，罗盘真北航向的磁偏角仍待校正。
 
-修改 ADSP 通道后，依次运行 `build.cmd qcom-audio` 和 `build.cmd qcom-sensors`。传感器包同时生成、签名 HID 驱动和原生 SensorsCx 驱动，两份 INF 都需安装。原生接口使用 `ROOT\QCOMSENSORNATIVE`；首次安装时需创建该根设备实例。更新底层通道后重启设备。
+修改 ADSP 通道后，依次运行 `build.cmd qcom-audio` 和 `build.cmd qcom-sensors`。传感器包同时生成、签名 HID 驱动和原生 SensorsCx 驱动，两份 INF 都需安装。原生接口使用 `ROOT\QCOMSENSORNATIVE`，独立霍尔项使用 `ROOT\AKMHALL`；两者复用同一份原生 INF，首次安装时需创建对应根设备实例。更新底层通道后重启设备。
+
+AKM AK09970 霍尔传感器由 `qcom-keys` 通过专用 GPIO80/81 I²C 读取，ACPI 为按键设备声明对应的两个 GPIO 页；UEFI 保持原厂 `ldob1` 1.8 V 供电。`qcom-sensors` 额外提供名为 `AKM AK09970 Hall Sensor` 的 Windows CustomSensor：CustomValue0／1／2 为真实有符号 X／Y／Z 原始计数，CustomValue3 为三段位置（0 未确认、1 上、2 中、3 下）。不把未经校准的计数标作 µT。位置按原厂 X／Y 判定并经过两次采样确认；上档静音并关闭触控／按键振动，中档恢复声音但关闭振动，下档恢复声音和振动。静音由现有 `qcom_sensors_service` 调用 Core Audio 设置，不新增服务。实机已验证 AK09970 芯片识别与连续变化的真实三轴原始计数；三档声音／振动行为仍需逐档实测。各传感器源码平铺拆分，共有框架与文件对应关系见 [传感器源码说明](src/qcom-sensors/README.md)。
 
 ## 触屏反馈
 
-触控及按键反馈由 `qcom-keys` 控制 PMIH010x 马达，每次播放 18 ms，使用高精度定时器，实际电压为 800 mV 和 1200 mV，振幅均为 `0xFF`。`syna-s3910` 按接触 ID 分别记录每根手指：新增手指按下请求一次 800 mV 短振，在原有移动阈值内按住超过 495 ms 后请求一次 1200 mV 短振，抬起不振；移动超限或读取失败取消对应长按反馈。音量键单独按下上报一次音量按下／释放并请求一次 800 mV；按住 270 ms 后由按键驱动按 27 ms 节奏重复上报音量按下／释放，同时请求 800 mV 振动，系统音量连调与振动请求共用计时，播放和停机期间及停止后 27 ms 内的新触发忽略、不补振。电源键单独短按在抬起时请求一次 800 mV，单独按住 2.4 s 时请求一次 800 mV，之后抬起不再振。音量加／电源、音量减／电源组合成立时各请求一次 800 mV，并取消该次电源抬起反馈。`qcom-audio` 的扬声器音量和静音节点实际执行 24 位 PCM 增益处理，并通过已有内核控制设备提供当前音量上下限；音量键按住时到达相应极限播放两次 1200 mV，每次 18 ms，两次之间仍等待停止后 27 ms，随后停止重复反馈。极限模式在马达空闲后开始，开始前松开按键或离开极限会取消。触控、按键及音量协作不需要常驻用户态程序。版本沿用 `yy.M.d.revision`，日期和修订号由各驱动现有项目属性控制。
+触控及按键反馈由 `qcom-keys` 控制 PMIH010x 马达，每次播放 18 ms，使用高精度定时器，实际电压为 800 mV 和 1200 mV，振幅均为 `0xFF`。`syna-touch` 按接触 ID 分别记录每根手指：新增手指按下请求一次 800 mV 短振，在原有移动阈值内按住超过 495 ms 后请求一次 1200 mV 短振，抬起不振；移动超限或读取失败取消对应长按反馈。音量键单独按下上报一次音量按下／释放并请求一次 800 mV；按住 270 ms 后由按键驱动按 27 ms 节奏重复上报音量按下／释放，同时请求 800 mV 振动，系统音量连调与振动请求共用计时，播放和停机期间及停止后 27 ms 内的新触发忽略、不补振。电源键单独短按在抬起时请求一次 800 mV，单独按住 2.4 s 时请求一次 800 mV，之后抬起不再振。音量加／电源、音量减／电源组合成立时各请求一次 800 mV，并取消该次电源抬起反馈。`qcom-audio` 的扬声器音量和静音节点实际执行 24 位 PCM 增益处理，并通过已有内核控制设备提供当前音量上下限；音量键按住时到达相应极限播放两次 1200 mV，每次 18 ms，两次之间仍等待停止后 27 ms，随后停止重复反馈。极限模式在马达空闲后开始，开始前松开按键或离开极限会取消。触控、按键及音量协作不需要常驻用户态程序。版本沿用 `yy.M.d.revision`，日期和修订号由各驱动现有项目属性控制。
 
 ## 主摄
 

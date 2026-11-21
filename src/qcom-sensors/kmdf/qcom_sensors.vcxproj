@@ -20,7 +20,7 @@
   <PropertyGroup>
     <TargetName>qcom_sensors</TargetName>
     <SensorsVersionDate Condition="'$(SensorsVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</SensorsVersionDate>
-    <SensorsRevision Condition="'$(SensorsRevision)' == ''">42</SensorsRevision>
+    <SensorsRevision Condition="'$(SensorsRevision)' == ''">45</SensorsRevision>
     <SensorsDriverDate>$([System.DateTime]::Parse('$(SensorsVersionDate)').ToString('MM/dd/yyyy'))</SensorsDriverDate>
     <SensorsDriverVersion>$([System.DateTime]::Parse('$(SensorsVersionDate)').ToString('yy.M.d')).$(SensorsRevision)</SensorsDriverVersion>
     <SensorsDriverVersionComma>$([System.String]::Copy('$(SensorsDriverVersion)').Replace('.', ','))</SensorsDriverVersionComma>
@@ -35,7 +35,7 @@
     <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=$(SensorsDriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(SensorsDriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\als.c" />
+    <ClCompile Include="..\hid.c" />
     <ResourceCompile Include="qcom_sensors.rc" /><Inf Include="qcom_sensors.inx" /><FilesToPackage Include="$(TargetPath)" />
     <FilesToPackage Include="$(OutDir)qcom_sensors_service.exe" />
   </ItemGroup>

@@ -1,4 +1,4 @@
-#include "..\qcom-battery\power.h"
+#include "..\ti-batt\power.h"
 
 static VOID SiaUsbOpen(PSIA_LINK L)
 {

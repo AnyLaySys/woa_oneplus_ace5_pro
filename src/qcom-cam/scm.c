@@ -2,6 +2,7 @@
 #include "scm-ready.h"
 
 VOID CamScmSlow(ULONGLONG *registers);
+VOID CamScmOnce(ULONGLONG *registers);
 
 static NTSTATUS Complete(CAM *c,ULONGLONG *registers,BOOLEAN fastWaitq) {
     ULONGLONG deadline=KeQueryInterruptTime()+20000000;
@@ -95,7 +96,9 @@ static NTSTATUS Qos(CAM *c,BOOLEAN diagnostic,BOOLEAN complete) {
     c->Diag.Step=151;c->Diag.Region=MAXULONG;c->Diag.Offset=0;
     c->Diag.Address=(ULONG)registers[0];c->Diag.Count=3;c->Diag.Slot=MAXULONG;
     c->Diag.Phase=complete?1:2;RtlCopyMemory(c->Diag.Resource,"scm-qos",8);
-    CamScmSlow(registers);
+    c->ScmPending=TRUE;
+    RtlCopyMemory(c->ScmResumeArgs,registers,sizeof(registers));c->ScmResumeValid=TRUE;
+    if(complete)CamScmSlow(registers);else CamScmOnce(registers);
     RtlCopyMemory(c->Trace.ScmReturn,registers,sizeof(registers));
     if(complete)status=Complete(c,registers,c->ScmFastWaitq);
     else {
@@ -103,7 +106,24 @@ static NTSTATUS Qos(CAM *c,BOOLEAN diagnostic,BOOLEAN complete) {
         status=c->ScmPending?STATUS_DEVICE_BUSY:registers[0]?STATUS_IO_DEVICE_ERROR:STATUS_SUCCESS;
     }
     c->Diag.Observed=(ULONG)registers[0];c->Diag.Mask=MAXULONG;c->Diag.Expected=0;
-    c->Diag.Status=status;return status;
+    c->ScmResumeValid=c->ScmPending;c->Diag.Status=status;return status;
+}
+
+NTSTATUS CamScmContinue(CAM *c) {
+    if(!c->ScmPending||!c->ScmResumeValid)return STATUS_DEVICE_NOT_READY;
+    if(!c->Powered||c->DmaActive||c->RxActive||c->CdmPending||c->TbuPending||c->CrmPending)return STATUS_DEVICE_BUSY;
+    ULONGLONG registers[8];RtlCopyMemory(registers,c->Trace.ScmReturn,sizeof(registers));
+    ULONG prior=(ULONG)registers[0];
+    if(prior!=1&&prior!=2&&prior!=3)return STATUS_DEVICE_NOT_READY;
+    c->Diag.Step=185;c->Diag.Region=MAXULONG;c->Diag.Address=(ULONG)c->ScmResumeArgs[0];
+    c->Diag.Offset=0;c->Diag.Count=3;c->Diag.Slot=MAXULONG;c->Diag.Phase=prior;RtlCopyMemory(c->Diag.Resource,"scm-resm",8);
+    if(prior==1) {
+        ULONGLONG cookie=registers[6];RtlCopyMemory(registers,c->ScmResumeArgs,sizeof(registers));
+        registers[0]=1;registers[6]=cookie;CamScmSlow(registers);
+    }
+    NTSTATUS status=Complete(c,registers,c->ScmFastWaitq);
+    c->ScmResumeValid=c->ScmPending;c->Diag.Observed=(ULONG)c->Trace.ScmReturn[0];
+    c->Diag.Mask=MAXULONG;c->Diag.Expected=0;c->Diag.Status=status;return status;
 }
 
 NTSTATUS CamScmQos(CAM *c) {return Qos(c,FALSE,TRUE);}

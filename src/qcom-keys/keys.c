@@ -3,6 +3,10 @@
 #include <hidport.h>
 #include "haptics.h"
 #include "feedback.h"
+#include "../qcom-sensors/abi.h"
+#define SENSOR_HARDWARE
+#include "../qcom-sensors/hall.inc"
+#undef SENSOR_HARDWARE
 
 DRIVER_INITIALIZE DriverEntry;
 static EVT_WDF_DRIVER_DEVICE_ADD AddDevice;
@@ -33,6 +37,7 @@ typedef struct {
     BOOLEAN DisplayOn;
     WDFIOTARGET Audio;
     KEY_FEEDBACK Feedback;
+    HALL Hall;
 } KEYS;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(KEYS,Context);
 static const UCHAR Masks[]={0xc0,1};
@@ -173,6 +178,7 @@ static NTSTATUS Prepare(WDFDEVICE device,WDFCMRESLIST raw,WDFCMRESLIST resources
     WDF_INTERRUPT_CONFIG irq;WDF_INTERRUPT_CONFIG_INIT(&irq,Isr,NULL);irq.PassiveHandling=TRUE;
     for(ULONG i=0;i<WdfCmResourceListGetCount(resources);i++) {
         PCM_PARTIAL_RESOURCE_DESCRIPTOR r=WdfCmResourceListGetDescriptor(resources,i);
+        if(r->Type==CmResourceTypeMemory && r->u.Memory.Start.QuadPart==0x0f150000 && r->u.Memory.Length==0x2000){if(k->Hall.Base)return STATUS_DEVICE_CONFIGURATION_ERROR;k->Hall.Base=MmMapIoSpaceEx(r->u.Memory.Start,0x2000,PAGE_READWRITE|PAGE_NOCACHE);if(!k->Hall.Base)return STATUS_INSUFFICIENT_RESOURCES;}
         if(r->Type==CmResourceTypeInterrupt){if(irq.InterruptTranslated)return STATUS_DEVICE_CONFIGURATION_ERROR;irq.InterruptRaw=WdfCmResourceListGetDescriptor(raw,i);irq.InterruptTranslated=r;}
     }
     if(!irq.InterruptTranslated)return STATUS_DEVICE_CONFIGURATION_ERROR;
@@ -221,7 +227,7 @@ static NTSTATUS Start(WDFDEVICE device,WDF_POWER_DEVICE_STATE previous) {
     if(!NT_SUCCESS(status)){SetInterrupts(k,FALSE);return status;}
     k->Candidate=0;k->Failures=0;RtlZeroMemory(k->Debounce,sizeof(k->Debounce));
     RtlZeroMemory(&k->Feedback,sizeof(k->Feedback));
-    HapticPrepare(k);
+    HapticPrepare(k);HallStart(&k->Hall);
     InterlockedExchange(&k->Online,1);
     WdfTimerStart(k->Timer,WDF_REL_TIMEOUT_IN_MS(10));return STATUS_SUCCESS;
 }
@@ -232,7 +238,7 @@ static NTSTATUS Stop(WDFDEVICE device,WDF_POWER_DEVICE_STATE next) {
     WdfTimerStop(k->HapticTimer,TRUE);
     WdfObjectAcquireLock(device);
     if(k->HapticPhase)HapticOff(k);
-    SetInterrupts(k,FALSE);
+    HallStop(&k->Hall);SetInterrupts(k,FALSE);
     k->Head=0;k->Count=0;k->State=0;Put(k,1,0);Flush(k);
     RtlZeroMemory(&k->Feedback,sizeof(k->Feedback));k->HapticRepeat=0;
     WdfObjectReleaseLock(device);return STATUS_SUCCESS;
@@ -241,7 +247,7 @@ static NTSTATUS Release(WDFDEVICE device,WDFCMRESLIST resources) {
     UNREFERENCED_PARAMETER(resources);
     KEYS *k=Context(device);
     if(k->DisplayCallback){PoUnregisterPowerSettingCallback(k->DisplayCallback);k->DisplayCallback=NULL;}k->DisplayOn=FALSE;
-    SetInterrupts(k,FALSE);
+    SetInterrupts(k,FALSE);HallStop(&k->Hall);if(k->Hall.Base){MmUnmapIoSpace(k->Hall.Base,0x2000);k->Hall.Base=NULL;}
     for(ULONG i=0;i<2;i++) {
         if(k->Observe[i])MmUnmapIoSpace(k->Observe[i],0x20);
         if(k->Irq[i]&&k->Irq[i]!=k->Channel[i])MmUnmapIoSpace(k->Irq[i],0x1000);

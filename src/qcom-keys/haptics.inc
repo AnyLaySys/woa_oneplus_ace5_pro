@@ -67,7 +67,7 @@ static VOID HapticPoll(WDFTIMER timer) {
 }
 static NTSTATUS HapticPulse(KEYS *k,ULONG voltage,ULONG pulses) {
     if(voltage!=800 && voltage!=1200)return STATUS_INVALID_PARAMETER;
-    if(!k->Online || !k->DisplayOn)return STATUS_DEVICE_NOT_READY;
+    if(!k->Online || !k->DisplayOn || (k->Hall.Sample.Position==1 || k->Hall.Sample.Position==2))return STATUS_DEVICE_NOT_READY;
     if(!NT_SUCCESS(k->HapticStatus))return k->HapticStatus;
     if(k->HapticPhase || KeQueryInterruptTime()<k->HapticDue)return STATUS_DEVICE_BUSY;
     k->HapticVoltage=(UCHAR)(voltage/50);k->HapticRepeat=(UCHAR)(pulses-1);k->HapticPhase=1;
@@ -91,6 +91,10 @@ static VOID HapticControl(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t
         ULONG *voltage;status=WdfRequestRetrieveInputBuffer(request,sizeof(*voltage),(PVOID*)&voltage,NULL);
         if(NT_SUCCESS(status))status=HapticPulse(k,*voltage,1);
     }
+    if(code==AKM_HALL_READ && !input && output>=sizeof(AKM_HALL_SAMPLE)){
+        AKM_HALL_SAMPLE *sample;status=WdfRequestRetrieveOutputBuffer(request,sizeof(*sample),(PVOID*)&sample,NULL);
+        if(NT_SUCCESS(status)){status=k->Online?HallRead(&k->Hall,sample):STATUS_DEVICE_NOT_READY;if(NT_SUCCESS(status)){WdfRequestSetInformation(request,sizeof(*sample));if(sample->Position!=3 && sample->Position!=0 && k->HapticPhase){WdfTimerStop(k->HapticTimer,FALSE);k->HapticRepeat=0;HapticOff(k);}}}
+    }
     WdfObjectReleaseLock(parent);WdfRequestComplete(request,status);
 }
 static VOID HapticCleanup(WDFOBJECT object) {
@@ -102,7 +106,7 @@ static NTSTATUS HapticCreate(WDFDEVICE parent) {
     WDF_TIMER_CONFIG t;WDF_TIMER_CONFIG_INIT(&t,HapticPoll);t.UseHighResolutionTimer=TRUE;WDF_OBJECT_ATTRIBUTES a;WDF_OBJECT_ATTRIBUTES_INIT(&a);
     a.ParentObject=parent;a.ExecutionLevel=WdfExecutionLevelPassive;
     NTSTATUS status=WdfTimerCreate(&t,&a,&k->HapticTimer);if(!NT_SUCCESS(status))return status;
-    UNICODE_STRING sddl=RTL_CONSTANT_STRING(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)"),name=RTL_CONSTANT_STRING(L"\\Device\\QcomHaptics"),link=RTL_CONSTANT_STRING(L"\\DosDevices\\QcomHaptics");
+    UNICODE_STRING sddl=RTL_CONSTANT_STRING(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;UD)"),name=RTL_CONSTANT_STRING(L"\\Device\\QcomHaptics"),link=RTL_CONSTANT_STRING(L"\\DosDevices\\QcomHaptics");
     PWDFDEVICE_INIT init=WdfControlDeviceInitAllocate(WdfDeviceGetDriver(parent),&sddl);if(!init)return STATUS_INSUFFICIENT_RESOURCES;
     status=WdfDeviceInitAssignName(init,&name);if(!NT_SUCCESS(status)){WdfDeviceInitFree(init);return status;}
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&a,HAPTIC_CONTROL);a.ExecutionLevel=WdfExecutionLevelPassive;

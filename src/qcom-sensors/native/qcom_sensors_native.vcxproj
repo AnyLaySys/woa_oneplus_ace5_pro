@@ -8,7 +8,7 @@
  <PropertyGroup>
   <TargetName>qcom_sensors_native</TargetName>
   <SensorsVersionDate Condition="'$(SensorsVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</SensorsVersionDate>
-  <SensorsRevision Condition="'$(SensorsRevision)' == ''">42</SensorsRevision>
+  <SensorsRevision Condition="'$(SensorsRevision)' == ''">45</SensorsRevision>
   <SensorsDriverDate>$([System.DateTime]::Parse('$(SensorsVersionDate)').ToString('MM/dd/yyyy'))</SensorsDriverDate>
   <SensorsDriverVersion>$([System.DateTime]::Parse('$(SensorsVersionDate)').ToString('yy.M.d')).$(SensorsRevision)</SensorsDriverVersion>
   <SensorsDriverVersionComma>$([System.String]::Copy('$(SensorsDriverVersion)').Replace('.', ','))</SensorsDriverVersionComma>

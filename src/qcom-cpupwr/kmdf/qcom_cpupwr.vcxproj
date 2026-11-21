@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|ARM64"><Configuration>Release</Configuration><Platform>ARM64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{9F09E67E-8C26-4FDA-B249-19B4258823B0}</ProjectGuid>
+    <RootNamespace>qcom_cpupwr</RootNamespace>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <Platform Condition="'$(Platform)' == ''">ARM64</Platform>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Driver</ConfigurationType><DriverType>WDM</DriverType>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform><PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <TargetVersion>Windows10</TargetVersion><UseDebugLibraries>false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.props" />
+  <PropertyGroup><TargetName>qcom_cpupwr</TargetName><Inf2CatUseLocalTime>true</Inf2CatUseLocalTime></PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><LanguageStandard_C>stdc17</LanguageStandard_C><DebugInformationFormat>None</DebugInformationFormat><Optimization>MinSpace</Optimization></ClCompile>
+    <Link><GenerateDebugInformation>false</GenerateDebugInformation></Link>
+    <DriverSign><FileDigestAlgorithm>sha256</FileDigestAlgorithm></DriverSign>
+    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>11/20/2026</DateStamp><TimeStamp>26.11.20.5</TimeStamp></Inf>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\power.c"/><ClCompile Include="..\pep.c"/><ClCompile Include="..\scmi.c"/>
+    <ClCompile Include="..\thermal.c"/>
+    <MARMASM Include="..\idle.asm"/>
+    <ClInclude Include="..\cpupower.h"/><ClInclude Include="..\policy.h"/>
+    <Inf Include="qcom_cpupwr.inx"/><FilesToPackage Include="$(TargetPath)"/>
+  </ItemGroup>
+  <PropertyGroup>
+    <WoAProjectRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..'))</WoAProjectRoot>
+    <OutDir>$(WoAProjectRoot)\out\qcom-cpupwr\$(Platform)\$(Configuration)\bin\</OutDir>
+    <IntDir>$(WoAProjectRoot)\out\qcom-cpupwr\$(Platform)\$(Configuration)\obj\</IntDir>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets"/>
+  <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.targets" />
+</Project>
