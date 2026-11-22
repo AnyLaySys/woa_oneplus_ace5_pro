@@ -85,7 +85,7 @@ BOOLEAN SmProcessorNotification(PEPHANDLE handle,ULONG notification,PVOID data) 
         return TRUE;
     }
     if(notification==PEP_NOTIFY_PPM_PERF_CHECK_COMPLETE) {
-        if(KeQueryInterruptTime()-Sm.LastSample>=200000)SmWake();
+        if(KeQueryInterruptTime()-Sm.LastSample>=DVFS_SAMPLE_100NS)SmWake();
         return TRUE;
     }
     if(notification==PEP_NOTIFY_PPM_QUERY_DOMAIN_INFO) {
@@ -155,7 +155,8 @@ BOOLEAN SmProcessorNotification(PEPHANDLE handle,ULONG notification,PVOID data) 
     case PEP_NOTIFY_PPM_PERF_CONSTRAINTS: {
         PPEP_PPM_PERF_CONSTRAINTS constraints=data;
         constraints->GuaranteedPerformanceLimit=min(Sm.NominalKhz[domain],SmFrequencyKhz[domain][SmEffectiveCeiling(domain)]);
-        constraints->LimitReasons=Sm.Fault?PERFORMANCE_LIMIT_POWER:Sm.CoolingBand[domain]?PERFORMANCE_LIMIT_THERMAL:0;
+        constraints->LimitReasons=Sm.Fault?PERFORMANCE_LIMIT_POWER:
+            (Sm.CoolingBand[domain] || Sm.SweetBand[domain] || Sm.TemperatureAverage[domain]==MINLONG)?PERFORMANCE_LIMIT_THERMAL:0;
         return TRUE;
     }
     case PEP_NOTIFY_PPM_PERF_SET: {

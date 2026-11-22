@@ -19,10 +19,6 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
     <TargetName>qcom_ir</TargetName>
-    <IrVersionDate Condition="'$(IrVersionDate)'==''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</IrVersionDate>
-    <IrRevision Condition="'$(IrRevision)'==''">5</IrRevision>
-    <IrDriverDate>$([System.DateTime]::Parse('$(IrVersionDate)').ToString('MM/dd/yyyy'))</IrDriverDate>
-    <IrDriverVersion>$([System.DateTime]::Parse('$(IrVersionDate)').ToString('yy.M.d')).$(IrRevision)</IrDriverVersion>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
     <OutDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-ir\ARM64\Release\bin\</OutDir>
     <IntDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-ir\ARM64\Release\obj\</IntDir>
@@ -30,11 +26,8 @@
   <ItemDefinitionGroup>
     <ClCompile><PreprocessorDefinitions>POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MinSpace</Optimization><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
     <Link><GenerateDebugInformation>false</GenerateDebugInformation><Profile>false</Profile></Link>
-    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>$(IrDriverDate)</DateStamp><TimeStamp>$(IrDriverVersion)</TimeStamp></Inf>
+    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>11/22/2026</DateStamp><TimeStamp>26.11.22.28</TimeStamp></Inf>
   </ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="..\ir.c" /><Inf Include="qcom_ir.inx" /><FilesToPackage Include="$(TargetPath)" /><FilesToPackage Include="$(OutDir)qcom_ir_power.exe" /></ItemGroup>
-  <Target Name="BuildPowerControl" BeforeTargets="PrepareForBuild">
-    <MSBuild Projects="$(MSBuildThisFileDirectory)..\power.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=$(Platform);OutDir=$(OutDir);IntDir=$(IntDir)power\" />
-  </Target>
+  <ItemGroup><ClCompile Include="..\driver.c" /><Inf Include="qcom_ir.inx" /><FilesToPackage Include="$(TargetPath)" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

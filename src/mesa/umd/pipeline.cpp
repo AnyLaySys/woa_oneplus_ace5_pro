@@ -36,14 +36,15 @@ bool draw(Device *d,UINT count,UINT first,INT bias,UINT instances,UINT first_ins
  UINT width=~0u,height=~0u;std::array<VkFormat,9> formats{};std::vector<VkImageView> views;
  for(UINT i=0;i<d->target_count;i++) {
    View *v=d->targets[i];if(!v){formats[i]=VK_FORMAT_UNDEFINED;continue;}
-   if(!view_create(d,v))return false;v->resource->storage.used=d->next_submit;formats[i]=format(v->format);views.push_back(v->image);
+   if(!view_create(d,v))return false;formats[i]=format(v->format);views.push_back(v->image);
    width=std::min(width,std::max(1u,v->resource->width>>v->level));height=std::min(height,std::max(1u,v->resource->height>>v->level));
  }
  if(d->depth_view) {
-   if(!view_create(d,d->depth_view))return false;d->depth_view->resource->storage.used=d->next_submit;formats[8]=format(d->depth_view->format);views.push_back(d->depth_view->image);
+   if(!view_create(d,d->depth_view))return false;formats[8]=format(d->depth_view->format);views.push_back(d->depth_view->image);
    width=std::min(width,std::max(1u,d->depth_view->resource->width>>d->depth_view->level));height=std::min(height,std::max(1u,d->depth_view->resource->height>>d->depth_view->level));
  }
  if(width==~0u || !width || !height){error(d,DXGI_ERROR_UNSUPPORTED);return false;}
+ if(d->pass_views!=views || d->pass_formats!=formats || d->pass_targets!=d->target_count)end_pass(d);
  auto &key=d->pipeline_key;key.clear();for(auto *s:d->shaders)key_append(key,s?s->id:0ull);
  UINT elements=d->layout?(UINT)d->layout->elements.size():0;key_append(key,elements);
  if(d->layout)for(const auto &e:d->layout->elements){key_append(key,e.InputSlot);key_append(key,e.AlignedByteOffset);key_append(key,e.Format);key_append(key,e.InputSlotClass);key_append(key,e.InstanceDataStepRate);key_append(key,e.InputRegister);}
@@ -102,18 +103,21 @@ bool draw(Device *d,UINT count,UINT first,INT bias,UINT instances,UINT first_ins
  } else pipeline=found->second;
  std::array<VkDescriptorSet,3> sets{};
  for(UINT stage=0;stage<3;stage++) {
+   const VkPipelineStageFlags shader_stage=stage==0?VK_PIPELINE_STAGE_VERTEX_SHADER_BIT:stage==1?VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT:VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
    auto &key=d->descriptor_key;key.clear();Shader *shader=d->shaders[stage];key_append(key,shader?shader->id:0ull);
    if(shader) {
      for(UINT i=0;i<16;i++)if(shader->cb[i]) {
        Resource *r=d->cb[stage][i];key_append(key,r?r->storage.buffer:d->dummy_buffer.buffer);key_append(key,r?r->width:65536u);
-       if(r)r->storage.used=d->next_submit;
+       access(d,r?r->storage:d->dummy_buffer,shader_stage,VK_ACCESS_UNIFORM_READ_BIT);
      }
      for(UINT i=0;i<16;i++)if(shader->samplers[i])key_append(key,d->samplers[stage][i]?d->samplers[stage][i]->handle:d->dummy_sampler.handle);
      for(UINT i=0;i<128;i++)if(shader->textures[i]) {
        View *v=d->textures[stage][i];if(!v)v=&d->dummy_view;if(!view_create(d,v,true))return false;
-       v->resource->storage.used=d->next_submit;key_append(key,v->image);key_append(key,v->buffer);
+       access(d,v->resource->storage,shader_stage,VK_ACCESS_SHADER_READ_BIT);key_append(key,v->image);key_append(key,v->buffer);
      }
    }
+   if(d->bound_sets[stage] && d->descriptor_keys[stage]==key){sets[stage]=d->bound_sets[stage];continue;}
+   d->descriptor_keys[stage]=key;
    auto &cache=d->descriptor_cache[stage];auto found=cache.find(key);
    if(found!=cache.end()){sets[stage]=found->second;continue;}
    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};dai.descriptorPool=d->descriptors;dai.descriptorSetCount=1;dai.pSetLayouts=d->sets+stage;
@@ -136,26 +140,39 @@ bool draw(Device *d,UINT count,UINT first,INT bias,UINT instances,UINT first_ins
    if(count)d->vk.UpdateDescriptorSets(d->device,count,writes,0,nullptr);
    cache.emplace(key,sets[stage]);
  }
- if(!d->render_pass || d->pass_views!=views || d->pass_formats!=formats) {
-   barrier(d);
-   VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};fci.renderPass=pipeline.pass;fci.attachmentCount=(UINT)views.size();fci.pAttachments=views.data();fci.width=width;fci.height=height;fci.layers=1;VkFramebuffer fb;
-   if(!check(d,d->vk.CreateFramebuffer(d->device,&fci,nullptr,&fb)))return false;d->framebuffers.push_back({fb});
+ for(auto &v:d->vertices)if(v.resource)access(d,v.resource->storage,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
+ if(indexed){if(!d->indices){end_pass(d);error(d,E_INVALIDARG);return false;}access(d,d->indices->storage,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,VK_ACCESS_INDEX_READ_BIT);}
+ for(UINT i=0;i<d->target_count;i++)if(d->targets[i])access(d,d->targets[i]->resource->storage,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,true);
+ if(d->depth_view)access(d,d->depth_view->resource->storage,VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,true);
+ if(!d->render_pass) {
+   VkFramebuffer fb=VK_NULL_HANDLE;
+   for(auto &f:d->framebuffers)if(f.views==views && f.formats==formats && f.width==width && f.height==height && f.targets==d->target_count){fb=f.handle;break;}
+   if(!fb) {
+     VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};fci.renderPass=pipeline.pass;fci.attachmentCount=(UINT)views.size();fci.pAttachments=views.data();fci.width=width;fci.height=height;fci.layers=1;
+     if(!check(d,d->vk.CreateFramebuffer(d->device,&fci,nullptr,&fb)))return false;
+     if(d->framebuffers.size()>=256){d->retired_framebuffers.push_back(d->framebuffers.front().handle);d->framebuffers.erase(d->framebuffers.begin());}
+     d->framebuffers.push_back({fb,views,formats,width,height,d->target_count});
+   }
    VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};rp.renderPass=pipeline.pass;rp.framebuffer=fb;rp.renderArea.extent={width,height};
-   d->vk.CmdBeginRenderPass(d->cmd,&rp,VK_SUBPASS_CONTENTS_INLINE);d->render_pass=true;d->pass_views=views;d->pass_formats=formats;
+   d->vk.CmdBeginRenderPass(d->cmd,&rp,VK_SUBPASS_CONTENTS_INLINE);d->render_pass=true;d->pass_views=views;d->pass_formats=formats;d->pass_targets=d->target_count;
 
  }
  if(d->bound_pipeline!=pipeline.handle){d->vk.CmdBindPipeline(d->cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline.handle);d->bound_pipeline=pipeline.handle;}
  if(d->bound_sets!=sets){d->vk.CmdBindDescriptorSets(d->cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,d->pipeline_layout,0,3,sets.data(),0,nullptr);d->bound_sets=sets;}
  VkViewport viewport{d->viewport.TopLeftX,d->viewport.TopLeftY+d->viewport.Height,d->viewport.Width,-d->viewport.Height,d->viewport.MinDepth,d->viewport.MaxDepth};
  if(!viewport.width || !viewport.height)viewport={0,(float)height,(float)width,-(float)height,0,1};
- d->vk.CmdSetViewport(d->cmd,0,1,&viewport);VkRect2D scissor{{0,0},{width,height}};
+ if(!d->bound.dynamic || memcmp(&d->bound.viewport,&viewport,sizeof(viewport))){d->vk.CmdSetViewport(d->cmd,0,1,&viewport);d->bound.viewport=viewport;}
+ VkRect2D scissor{{0,0},{width,height}};
  if(d->raster && d->raster->desc.ScissorEnable){LONG x=std::max<LONG>(0,d->scissor.left),y=std::max<LONG>(0,d->scissor.top);LONG right=std::min<LONG>(width,d->scissor.right),bottom=std::min<LONG>(height,d->scissor.bottom);scissor={{x,y},{(UINT)std::max<LONG>(0,right-x),(UINT)std::max<LONG>(0,bottom-y)}};}
- d->vk.CmdSetScissor(d->cmd,0,1,&scissor);d->vk.CmdSetBlendConstants(d->cmd,d->blend_color);d->vk.CmdSetStencilReference(d->cmd,VK_STENCIL_FACE_FRONT_AND_BACK,d->stencil_ref);
- for(UINT i=0;i<32;i++)if(d->vertices[i].resource){d->vertices[i].resource->storage.used=d->next_submit;VkBuffer b=d->vertices[i].resource->storage.buffer;VkDeviceSize offset=d->vertices[i].offset;d->vk.CmdBindVertexBuffers(d->cmd,i,1,&b,&offset);}
+ if(!d->bound.dynamic || memcmp(&d->bound.scissor,&scissor,sizeof(scissor))){d->vk.CmdSetScissor(d->cmd,0,1,&scissor);d->bound.scissor=scissor;}
+ if(!d->bound.dynamic || memcmp(d->bound.blend.data(),d->blend_color,16)){d->vk.CmdSetBlendConstants(d->cmd,d->blend_color);memcpy(d->bound.blend.data(),d->blend_color,16);}
+ if(!d->bound.dynamic || d->bound.stencil!=d->stencil_ref){d->vk.CmdSetStencilReference(d->cmd,VK_STENCIL_FACE_FRONT_AND_BACK,d->stencil_ref);d->bound.stencil=d->stencil_ref;}
+ d->bound.dynamic=true;
+ for(UINT i=0;i<32;i++)if(d->vertices[i].resource){VkBuffer b=d->vertices[i].resource->storage.buffer;VkDeviceSize offset=d->vertices[i].offset;if(d->bound.vertices[i]!=b || d->bound.offsets[i]!=offset){d->vk.CmdBindVertexBuffers(d->cmd,i,1,&b,&offset);d->bound.vertices[i]=b;d->bound.offsets[i]=offset;}}
  for(auto *q:d->queries)if(q->active && q->pool && q->count<256)d->vk.CmdBeginQuery(d->cmd,q->pool,q->count,VK_QUERY_CONTROL_PRECISE_BIT);
- if(indexed){if(!d->indices){end_pass(d);error(d,E_INVALIDARG);return false;}d->indices->storage.used=d->next_submit;d->vk.CmdBindIndexBuffer(d->cmd,d->indices->storage.buffer,d->index_offset,d->index_size==2?VK_INDEX_TYPE_UINT16:VK_INDEX_TYPE_UINT32);d->vk.CmdDrawIndexed(d->cmd,count,instances,first,bias,first_instance);}
+ if(indexed){VkBuffer b=d->indices->storage.buffer;VkIndexType type=d->index_size==2?VK_INDEX_TYPE_UINT16:VK_INDEX_TYPE_UINT32;if(d->bound.index!=b || d->bound.index_offset!=d->index_offset || d->bound.index_type!=type){d->vk.CmdBindIndexBuffer(d->cmd,b,d->index_offset,type);d->bound.index=b;d->bound.index_offset=d->index_offset;d->bound.index_type=type;}d->vk.CmdDrawIndexed(d->cmd,count,instances,first,bias,first_instance);}
  else d->vk.CmdDraw(d->cmd,count,instances,first,first_instance);
  for(auto *q:d->queries)if(q->active && q->pool && q->count<256){d->vk.CmdEndQuery(d->cmd,q->pool,q->count);q->count++;}
 
- if(d->framebuffers.size()>=400 || d->renamed.size()>=256 || d->descriptor_cache[0].size()+d->descriptor_cache[1].size()+d->descriptor_cache[2].size()>=1500)return flush(d);return true;
+ if(d->retired_framebuffers.size()>=400 || d->renamed.size()>=256 || d->descriptor_cache[0].size()+d->descriptor_cache[1].size()+d->descriptor_cache[2].size()>=1500)return flush(d);return true;
 }

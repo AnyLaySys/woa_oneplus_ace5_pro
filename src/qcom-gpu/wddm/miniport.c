@@ -43,7 +43,6 @@ static NTSTATUS Add(PDEVICE_OBJECT device,PVOID *context) {
     GpuInitialize(&a->Hardware,Synchronize,a);KeInitializeSpinLock(&a->QueueLock);KeInitializeMutex(&a->DisplayPowerLock,0);
     KeInitializeEvent(&a->Wake,SynchronizationEvent,FALSE);InitializeListHead(&a->Pending);InitializeListHead(&a->Free);InitializeListHead(&a->Inflight);InitializeListHead(&a->Contexts);KeInitializeSpinLock(&a->ContextLock);
     KeInitializeDpc(&a->DisplayWake,DisplayWake,a);
-    ExInitializeRundownProtection(&a->ScanoutAccess);
     for(ULONG i=0;i<A830_QUEUE_DEPTH;i++)InsertTailList(&a->Free,&a->Jobs[i].Entry);
     a->Brightness=47;a->PanelBrightness=A830BacklightLevel(a->Brightness);*context=a;return STATUS_SUCCESS;
 }
@@ -114,10 +113,10 @@ static NTSTATUS Start(PVOID context,PDXGK_START_INFO start,PDXGKRNL_INTERFACE dx
 
     if(NT_SUCCESS(status))status=A830MemoryStart(a);
     if(NT_SUCCESS(status)) {
-        /* Map the two independent fallback frames before DPU can take over.
-           Allocation/CreateResource retains an ordinary-BO escape path. */
-        QcomGpuScanoutStart(a);
-        A830DpuInitialize(a);
+        /* GPU scanout must be available before enabling display submission.
+           DPU initialization may retain that GPU-only scanout path. */
+        status=QcomGpuScanoutStart(a);
+        if(NT_SUCCESS(status))A830DpuInitialize(a);
     }
     if(NT_SUCCESS(status))status=StartWorker(a);
 
@@ -216,7 +215,9 @@ static NTSTATUS APIENTRY Calibrate(HANDLE adapter,UINT32 node,UINT32 engine,DXGK
     return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY Present(HANDLE context,DXGKARG_PRESENT *p) {
-    return A830Present(context,p);
+    UNREFERENCED_PARAMETER(context);
+    if(!p->Flags.Flip)return STATUS_NOT_SUPPORTED;
+    p->pDmaBuffer=NULL;return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY ControlInterrupt(HANDLE adapter,DXGK_INTERRUPT_TYPE type,BOOLEAN enabled) {
     A830_ADAPTER *a=adapter;

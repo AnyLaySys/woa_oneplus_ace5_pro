@@ -71,17 +71,32 @@ NTSTATUS APIENTRY A830Query(HANDLE adapter,const DXGKARG_QUERYADAPTERINFO *q) {
         if(q->OutputDataSize<sizeof(DXGK_WDDMDEVICECAPS))return STATUS_BUFFER_TOO_SMALL;
         DXGK_WDDMDEVICECAPS *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->WDDMVersion=DXGKDDI_WDDMv2_4;return STATUS_SUCCESS;
     }
+    if(q->Type==DXGKQAITYPE_NODEPERFDATA) {
+        if(q->InputDataSize!=sizeof(UINT) || !q->pInputData || *(const UINT *)q->pInputData>=A830_NODE_COUNT ||
+           q->OutputDataSize<sizeof(DXGK_NODE_PERFDATA))return STATUS_INVALID_PARAMETER;
+        GPU *g=&a->Hardware;
+        KeWaitForSingleObject(&g->PowerLock,Executive,KernelMode,FALSE,NULL);
+        NTSTATUS status=STATUS_DEVICE_NOT_READY;
+        if(g->Online && g->PerfCount>1) {
+            DXGK_NODE_PERFDATA data={0};
+            data.Frequency=(ULONGLONG)g->PerfKhz[g->PerfIndex]*1000;
+            data.MaxFrequency=data.MaxFrequencyOC=(ULONGLONG)g->PerfKhz[g->PerfCount-1]*1000;
+            RtlCopyMemory(q->pOutputData,&data,sizeof(data));status=STATUS_SUCCESS;
+        }
+        KeReleaseMutex(&g->PowerLock,FALSE);return status;
+    }
     if(q->Type==DXGKQAITYPE_ADAPTERPERFDATA_CAPS || q->Type==DXGKQAITYPE_ADAPTERPERFDATA) {
         if(q->InputDataSize!=sizeof(UINT) || !q->pInputData || *(UINT *)q->pInputData)return STATUS_INVALID_PARAMETER;
         if(q->Type==DXGKQAITYPE_ADAPTERPERFDATA_CAPS) {
             if(q->OutputDataSize<sizeof(DXGK_ADAPTER_PERFDATACAPS))return STATUS_BUFFER_TOO_SMALL;
-            DXGK_ADAPTER_PERFDATACAPS *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->TemperatureMax=1250;c->TemperatureWarning=870;return STATUS_SUCCESS;
+            DXGK_ADAPTER_PERFDATACAPS *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->TemperatureMax=1250;c->TemperatureWarning=990;return STATUS_SUCCESS;
         }
         if(q->OutputDataSize<sizeof(DXGK_ADAPTER_PERFDATA))return STATUS_BUFFER_TOO_SMALL;
         if(!a->Hardware.Thermal)return STATUS_DEVICE_NOT_READY;
         LONG temperature=GpuTemperature(&a->Hardware);
         if(temperature==MINLONG)return STATUS_DEVICE_NOT_READY;
-        DXGK_ADAPTER_PERFDATA *d=q->pOutputData;RtlZeroMemory(d,sizeof(*d));d->Temperature=(ULONG)max(temperature,0);return STATUS_SUCCESS;
+        DXGK_ADAPTER_PERFDATA *d=q->pOutputData;RtlZeroMemory(d,sizeof(*d));
+        d->Temperature=(ULONG)max(temperature,0);d->PowerStateOverride=a->Hardware.Powered;return STATUS_SUCCESS;
     }
     if(q->Type==DXGKQAITYPE_PHYSICALADAPTERCAPS) {
         if(q->OutputDataSize<sizeof(DXGK_PHYSICALADAPTERCAPS))return STATUS_BUFFER_TOO_SMALL;
@@ -101,7 +116,9 @@ NTSTATUS APIENTRY A830Query(HANDLE adapter,const DXGKARG_QUERYADAPTERINFO *q) {
         if(s->NbSegment<segments || s->SegmentDescriptorStride<sizeof(DXGK_SEGMENTDESCRIPTOR4))return STATUS_INVALID_PARAMETER;
         DXGK_SEGMENTDESCRIPTOR4 *d=(PVOID)s->pSegmentDescriptor;RtlZeroMemory(d,sizeof(*d));
         d->Flags.CpuVisible=1;
-        d->Flags.PopulatedFromSystemMemory=1;
+        /* Windows inventory compatibility: report this fixed driver-owned
+           pool as dedicated adapter memory. Backing remains pinned system DDR. */
+        d->Flags.PopulatedFromSystemMemory=0;
         d->BaseAddress.QuadPart=A830_SEGMENT_ADDRESS;d->CpuTranslatedAddress.QuadPart=a->Memory.Segment.Physical;
         d->Size=A830_SEGMENT_BYTES;d->CommitLimit=A830_SEGMENT_BYTES;
          {

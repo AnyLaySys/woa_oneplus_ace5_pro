@@ -129,3 +129,161 @@ index f9d1e98..9aadaad 100644
    }
  
    LibraryLoader::LibraryLoader() {
+--- a/src/dxgi/dxgi_factory.cpp
++++ b/src/dxgi/dxgi_factory.cpp
+@@ -3,6 +3,7 @@
+ #include "dxgi_factory.h"
+ #include "dxgi_surface.h"
+ #include "dxgi_swapchain.h"
++#include "dxgi_composition.h"
+ #include "dxgi_swapchain_dispatcher.h"
+ 
+ #include "../util/util_singleton.h"
+@@ -282,15 +283,20 @@
+           IDXGISwapChain1**     ppSwapChain) {
+     InitReturnPtr(ppSwapChain);
+ 
+-    if (!m_options.enableDummyCompositionSwapchain) {
+-      Logger::err("DxgiFactory::CreateSwapChainForComposition: Not implemented");
+-      return E_NOTIMPL;
+-    }
+-
+-    Logger::warn("DxgiFactory::CreateSwapChainForComposition: Creating dummy swap chain");
+-
+-    return CreateSwapChainBase(pDevice,
+-      nullptr, pDesc, nullptr, pRestrictToOutput, ppSwapChain);
++    if (!ppSwapChain || !pDevice || !pDesc || pRestrictToOutput)
++      return DXGI_ERROR_INVALID_CALL;
++
++    Com<DxgiCompositionPresenter> presenter = new DxgiCompositionPresenter();
++    HRESULT hr = presenter->Init(pDevice, pDesc, m_instance->vki()->getLoaderProc());
++    if (FAILED(hr))
++      return hr;
++
++    DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen = {};
++    fullscreen.Windowed = TRUE;
++    Com<IDXGISwapChain4> frontend = new DxgiSwapChain(this, presenter.ptr(),
++      nullptr, pDesc, &fullscreen, pDevice, presenter->Native());
++    *ppSwapChain = new DxgiSwapChainDispatcher(frontend.ref(), pDevice);
++    return S_OK;
+   }
+   
+   
+--- a/src/dxgi/dxgi_swapchain.h
++++ b/src/dxgi/dxgi_swapchain.h
+@@ -32,7 +32,8 @@
+             HWND                        hWnd,
+       const DXGI_SWAP_CHAIN_DESC1*      pDesc,
+       const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*  pFullscreenDesc,
+-            IUnknown*                   pDevice);
++            IUnknown*                   pDevice,
++            IDXGISwapChain3*            pComposition = nullptr);
+     
+     ~DxgiSwapChain();
+     
+@@ -187,6 +188,7 @@
+     UINT                            m_presentId;
+     bool                            m_ModeChangeInProgress = false;
+ 
++    Com<IDXGISwapChain3> m_composition;
+     Com<IDXGIVkSwapChain>           m_presenter;
+     Com<IDXGIVkSwapChain1>          m_presenter1;
+     Com<IDXGIVkSwapChain2>          m_presenter2;
+--- a/src/dxgi/dxgi_swapchain.cpp
++++ b/src/dxgi/dxgi_swapchain.cpp
+@@ -14,13 +14,15 @@
+           HWND                        hWnd,
+     const DXGI_SWAP_CHAIN_DESC1*      pDesc,
+     const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*  pFullscreenDesc,
+-          IUnknown*                   pDevice)
++          IUnknown*                   pDevice,
++          IDXGISwapChain3*            pComposition)
+   : m_factory   (pFactory),
+     m_window    (hWnd),
+     m_desc      (*pDesc),
+     m_descFs    (*pFullscreenDesc),
+     m_presentId (0u),
+     m_presenter (pPresenter),
++    m_composition(pComposition),
+     m_monitor   (wsi::getWindowMonitor(m_window)),
+     m_is_d3d12(SUCCEEDED(pDevice->QueryInterface(__uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&Com<ID3D12CommandQueue>())))),
+     m_destructionNotifier(this) {
+@@ -94,6 +96,9 @@
+       return S_OK;
+     }
+     
++    if (m_composition != nullptr)
++      return m_composition->QueryInterface(riid, ppvObject);
++
+     if (logQueryInterfaceError(__uuidof(IDXGISwapChain), riid)) {
+       Logger::warn("DxgiSwapChain::QueryInterface: Unknown interface query");
+       Logger::warn(str::format(riid));
+@@ -177,6 +182,9 @@
+   
+   HRESULT STDMETHODCALLTYPE DxgiSwapChain::GetBackgroundColor(
+           DXGI_RGBA*                pColor) {
++    if (m_composition != nullptr)
++      return m_composition->GetBackgroundColor(pColor);
++
+     Logger::err("DxgiSwapChain::GetBackgroundColor: Not implemented");
+     return E_NOTIMPL;
+   }
+@@ -184,6 +192,9 @@
+   
+   HRESULT STDMETHODCALLTYPE DxgiSwapChain::GetRotation(
+           DXGI_MODE_ROTATION*       pRotation) {
++    if (m_composition != nullptr)
++      return m_composition->GetRotation(pRotation);
++
+     Logger::err("DxgiSwapChain::GetRotation: Not implemented");
+     return E_NOTIMPL;
+   }
+@@ -363,7 +374,7 @@
+ 
+     if (wsi::isWindow(m_window) || !m_window) {
+       std::lock_guard<dxvk::mutex> lockBuf(m_lockBuffer);
+-      hr = m_presenter->Present(SyncInterval, PresentFlags, nullptr);
++      hr = m_presenter->Present(SyncInterval, PresentFlags, m_composition != nullptr ? pPresentParameters : nullptr);
+     }
+ 
+     if (PresentFlags & DXGI_PRESENT_TEST)
+@@ -535,6 +546,9 @@
+   
+   HRESULT STDMETHODCALLTYPE DxgiSwapChain::SetBackgroundColor(
+     const DXGI_RGBA*                pColor) {
++    if (m_composition != nullptr)
++      return m_composition->SetBackgroundColor(pColor);
++
+     Logger::err("DxgiSwapChain::SetBackgroundColor: Not implemented");
+     return E_NOTIMPL;
+   }
+@@ -542,6 +556,9 @@
+   
+   HRESULT STDMETHODCALLTYPE DxgiSwapChain::SetRotation(
+           DXGI_MODE_ROTATION        Rotation) {
++    if (m_composition != nullptr)
++      return m_composition->SetRotation(Rotation);
++
+     Logger::err("DxgiSwapChain::SetRotation: Not implemented");
+     return E_NOTIMPL;
+   }
+@@ -557,6 +574,9 @@
+ 
+   HRESULT STDMETHODCALLTYPE DxgiSwapChain::GetMatrixTransform(
+           DXGI_MATRIX_3X2_F*        pMatrix) {
++    if (m_composition != nullptr)
++      return m_composition->GetMatrixTransform(pMatrix);
++
+     // We don't support composition swap chains
+     Logger::err("DxgiSwapChain::GetMatrixTransform: Not supported");
+     return DXGI_ERROR_INVALID_CALL;
+@@ -586,6 +606,9 @@
+   
+   HRESULT STDMETHODCALLTYPE DxgiSwapChain::SetMatrixTransform(
+     const DXGI_MATRIX_3X2_F*        pMatrix) {
++    if (m_composition != nullptr)
++      return m_composition->SetMatrixTransform(pMatrix);
++
+     // We don't support composition swap chains
+     Logger::err("DxgiSwapChain::SetMatrixTransform: Not supported");
+     return DXGI_ERROR_INVALID_CALL;

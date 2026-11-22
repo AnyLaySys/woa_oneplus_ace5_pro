@@ -121,6 +121,10 @@ NTSTATUS APIENTRY A830Escape(HANDLE adapter,const DXGKARG_ESCAPE *p) {
     if(release){DXGKARGCB_RELEASEHANDLEDATA drop={release,DXGK_HANDLE_ALLOCATION};a->Dxgk.DxgkCbReleaseHandleData(drop);}
     return STATUS_SUCCESS;
 }
+VOID A830ReleasePaging(A830_DMA *dma) {
+    if(dma->SourceMdl){MmUnmapLockedPages(dma->Source,dma->SourceMdl);IoFreeMdl(dma->SourceMdl);dma->SourceMdl=NULL;dma->Source=NULL;}
+    if(dma->DestinationMdl){MmUnmapLockedPages(dma->Destination,dma->DestinationMdl);IoFreeMdl(dma->DestinationMdl);dma->DestinationMdl=NULL;dma->Destination=NULL;}
+}
 static PVOID Segment(A830_ADAPTER *a,ULONGLONG offset,SIZE_T bytes) {
     if(offset>=A830_SEGMENT_ADDRESS)offset-=A830_SEGMENT_ADDRESS;
     if(offset>A830_SEGMENT_BYTES || bytes>A830_SEGMENT_BYTES-offset)return NULL;
@@ -233,10 +237,10 @@ NTSTATUS APIENTRY A830Paging(HANDLE adapter,DXGKARG_BUILDPAGINGBUFFER *p) {
         dma->Operation=3;dma->Bytes=(ULONG)v->TransferSizeInBytes;
         NTSTATUS status=MapVirtualCpu(a,v->SourceVirtualAddress,dma->Bytes,&dma->Source,&dma->SourceMdl);
         if(NT_SUCCESS(status))status=MapVirtualCpu(a,v->DestinationVirtualAddress,dma->Bytes,&dma->Destination,&dma->DestinationMdl);
-        if(!NT_SUCCESS(status)){A830ReleasePresent(dma);return status;}
+        if(!NT_SUCCESS(status)){A830ReleasePaging(dma);return status;}
     } else if(p->Operation==DXGK_OPERATION_SIGNAL_MONITORED_FENCE) {
         if(p->SignalMonitoredFence.MonitoredFenceGpuVa&7)return STATUS_INVALID_PARAMETER;
-        dma->Operation=8;dma->SourceShared=p->SignalMonitoredFence.MonitoredFenceValue;
+        dma->Operation=8;dma->FenceValue=p->SignalMonitoredFence.MonitoredFenceValue;
         NTSTATUS status=MapVirtualCpu(a,p->SignalMonitoredFence.MonitoredFenceGpuVa,8,&dma->Destination,&dma->DestinationMdl);
         if(!NT_SUCCESS(status))return status;
     } else if(p->Operation==DXGK_OPERATION_DISCARD_CONTENT)dma->Operation=0;

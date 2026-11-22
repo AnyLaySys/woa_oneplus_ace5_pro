@@ -102,7 +102,7 @@ static NTSTATUS Qos(CAM *c,BOOLEAN diagnostic,BOOLEAN complete) {
     c->Diag.Step=151;c->Diag.Region=MAXULONG;c->Diag.Offset=0;
     c->Diag.Address=(ULONG)registers[0];c->Diag.Count=3;c->Diag.Slot=MAXULONG;
     c->Diag.Phase=complete?1:2;RtlCopyMemory(c->Diag.Resource,"scm-qos",8);
-    c->ScmPending=TRUE;
+    c->StaticQosReady=FALSE;c->ScmPending=TRUE;
     RtlCopyMemory(c->ScmResumeArgs,registers,sizeof(registers));c->ScmResumeValid=TRUE;
     status=CamScmAudit(c,1,registers,STATUS_SUCCESS);
     if(!NT_SUCCESS(status)){c->ScmPending=FALSE;c->ScmResumeValid=FALSE;c->Diag.Status=status;return status;}
@@ -115,6 +115,7 @@ static NTSTATUS Qos(CAM *c,BOOLEAN diagnostic,BOOLEAN complete) {
         status=c->ScmPending?STATUS_DEVICE_BUSY:registers[0]?STATUS_IO_DEVICE_ERROR:STATUS_SUCCESS;
     }
     c->Diag.Observed=(ULONG)registers[0];c->Diag.Mask=MAXULONG;c->Diag.Expected=0;
+    c->StaticQosReady=NT_SUCCESS(status);
     c->ScmResumeValid=c->ScmPending;c->Diag.Status=status;return status;
 }
 
@@ -134,11 +135,18 @@ NTSTATUS CamScmContinue(CAM *c) {
     if(prior==1){CamScmSlow(registers);CamScmAudit(c,5,registers,(NTSTATUS)registers[0]);}
     NTSTATUS status=Complete(c,registers,c->ScmFastWaitq);
     if(prior!=1)CamScmAudit(c,5,c->Trace.ScmReturn,status);
+    if(c->ScmResumeArgs[0]==0x4200180a&&!c->ScmResumeArgs[2]&&!c->ScmResumeArgs[3]&&!c->ScmResumeArgs[4])
+        c->StaticQosReady=NT_SUCCESS(status);
     c->ScmResumeValid=c->ScmPending;c->Diag.Observed=(ULONG)c->Trace.ScmReturn[0];
     c->Diag.Mask=MAXULONG;c->Diag.Expected=0;c->Diag.Status=status;return status;
 }
 
 NTSTATUS CamScmQos(CAM *c) {return Qos(c,FALSE,TRUE);}
+NTSTATUS CamEnsureStaticQos(CAM *c) {
+    if(!c->Powered)return STATUS_DEVICE_NOT_READY;
+    if(c->DmaActive||c->RxActive||c->ScmPending||c->CdmPending||c->CrmPending||c->TbuPending)return STATUS_DEVICE_BUSY;
+    return c->StaticQosReady?STATUS_SUCCESS:CamScmQos(c);
+}
 NTSTATUS CamScmQosDiagnostic(CAM *c) {return Qos(c,TRUE,TRUE);}
 NTSTATUS CamScmQosRaw(CAM *c) {return Qos(c,TRUE,FALSE);}
 

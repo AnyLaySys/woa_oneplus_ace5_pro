@@ -1,6 +1,7 @@
 #include "cpupower.h"
 VOID SmThermalInitialize(VOID) {
     for(ULONG d=0;d<2;d++) {
+        Sm.TemperatureAverage[d]=MINLONG;
         PHYSICAL_ADDRESS p;p.QuadPart=0x0c228000ULL+d*0x1000;
         Sm.Thermal[d]=MmMapIoSpaceEx(p,PAGE_SIZE,PAGE_READONLY|PAGE_NOCACHE);
     }
@@ -11,7 +12,6 @@ VOID SmThermalClose(VOID) {
     }
 }
 VOID SmThermalUpdate(VOID) {
-    ULONGLONG now=KeQueryInterruptTime();
     for(ULONG d=0;d<2;d++) {
         LONG temperature=MINLONG;
         /* Read-only TSENS0/1 CPU and cache sensors; firmware owns setup. */
@@ -21,20 +21,16 @@ VOID SmThermalUpdate(VOID) {
             if(raw!=MAXULONG && (raw&0x200000u) && value>=-400 && value<=2000)
                 temperature=max(temperature,value);
         }
-        ULONG previous=(ULONG)Sm.CoolingBand[d];
-        ULONG band=temperature==MINLONG?2:SmCoolingBand(previous,temperature);
-        /* Only recovery waits for 500 ms; heating and sensor loss act now. */
-        if(band<previous) {
-            if(!Sm.CoolingSince[d])Sm.CoolingSince[d]=now;
-            if(now-Sm.CoolingSince[d]<5000000)band=previous;
-            else Sm.CoolingSince[d]=0;
-        } else Sm.CoolingSince[d]=0;
-        InterlockedExchange(&Sm.CoolingBand[d],(LONG)band);
+        if(temperature==MINLONG){InterlockedExchange(&Sm.TemperatureAverage[d],MINLONG);continue;}
+        InterlockedExchange(&Sm.CoolingBand[d],(LONG)DvfsCoolingBand((ULONG)Sm.CoolingBand[d],temperature));
+        LONG average=DvfsTemperatureAverage(Sm.TemperatureAverage[d],temperature);
+        InterlockedExchange(&Sm.TemperatureAverage[d],average);
+        InterlockedExchange(&Sm.SweetBand[d],(LONG)DvfsSustainableBand((ULONG)Sm.SweetBand[d],average/8));
     }
 }
 ULONG SmEffectiveCeiling(ULONG domain) {
-    if(domain>=2 || Sm.Fault)return 0;
+    if(domain>=2 || Sm.Fault || Sm.TemperatureAverage[domain]==MINLONG)return 0;
     ULONG band=(ULONG)Sm.CoolingBand[domain];
-    ULONG limit=band>=2?0:band==1?(domain?6u:10u):15u;
+    ULONG limit=band>=2?0:band==1?(domain?10u:11u):SM_LEVEL_COUNT-1;
     return min(limit,(ULONG)Sm.Ceiling[domain]);
 }

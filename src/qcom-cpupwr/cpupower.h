@@ -26,12 +26,13 @@ typedef struct {
     ULONG Busy[2];
     SM_CPU_TIME Previous[8];
     ULONGLONG LastSample;
+    volatile LONG64 LastRequest[2];
     KEVENT Wake;
     PETHREAD Thread;
     BOOLEAN ShutdownRegistered;
     PUCHAR Thermal[2];
     volatile LONG CoolingBand[2];
-    ULONGLONG CoolingSince[2];
+    volatile LONG SweetBand[2],TemperatureAverage[2];
 } SM_CONTEXT;
 extern SM_CONTEXT Sm;
 

@@ -26,7 +26,7 @@
  X(DestroyInstance) X(EnumeratePhysicalDevices) X(GetPhysicalDeviceProperties) \
  X(GetPhysicalDeviceFeatures) X(GetPhysicalDeviceMemoryProperties) X(GetPhysicalDeviceQueueFamilyProperties) \
  X(GetPhysicalDeviceFormatProperties) X(CreateDevice) X(GetDeviceProcAddr) \
- X(DestroyDevice) X(GetDeviceQueue) X(DeviceWaitIdle) X(QueueWaitIdle) X(QueueSubmit) \
+ X(DestroyDevice) X(GetDeviceQueue) X(DeviceWaitIdle) X(QueueSubmit) \
  X(CreateCommandPool) X(DestroyCommandPool) X(ResetCommandPool) X(AllocateCommandBuffers) \
  X(BeginCommandBuffer) X(EndCommandBuffer) X(CreateFence) X(DestroyFence) X(ResetFences) X(WaitForFences) \
  X(CreateBuffer) X(DestroyBuffer) X(GetBufferMemoryRequirements) X(BindBufferMemory) \
@@ -43,7 +43,7 @@
  X(CmdBindPipeline) X(CmdBindDescriptorSets) X(CmdBindVertexBuffers) X(CmdBindIndexBuffer) \
  X(CmdSetViewport) X(CmdSetScissor) X(CmdSetBlendConstants) X(CmdSetStencilReference) \
  X(CmdDraw) X(CmdDrawIndexed) X(CreateQueryPool) X(DestroyQueryPool) X(CmdResetQueryPool) \
- X(CmdBeginQuery) X(CmdEndQuery) X(CmdWriteTimestamp) X(GetQueryPoolResults)
+ X(CmdBeginQuery) X(CmdEndQuery) X(GetQueryPoolResults)
 
 struct Dispatch {
 #define DECLARE(name) PFN_vk##name name = nullptr;
@@ -53,6 +53,7 @@ struct Dispatch {
 
 struct Adapter { HANDLE runtime; unsigned flags; };
 struct Device;
+struct PresentImage;
 struct Storage {
  VkBuffer buffer = VK_NULL_HANDLE;
  VkImage image = VK_NULL_HANDLE;
@@ -65,8 +66,13 @@ struct Storage {
  uint64_t used = 0;
  VkBufferUsageFlags usage = 0;
  UINT memory_type = ~0u;
+ uint64_t address = 0;
+ VkPipelineStageFlags stages = 0;
+ VkAccessFlags access = 0;
+ VkImageAspectFlags aspects = VK_IMAGE_ASPECT_COLOR_BIT;
  bool external = false;
 };
+struct AccessState { VkPipelineStageFlags stages = 0; VkAccessFlags mask = 0; uint64_t used = 0; };
 struct Mapping { Storage staging; UINT sub = 0, mode = 0, row = 0, slice = 0; };
 struct Resource {
  Storage storage;
@@ -106,7 +112,14 @@ struct Sampler { VkSampler handle = VK_NULL_HANDLE; };
 struct Query { D3D10DDI_QUERY type{}; VkQueryPool pool = VK_NULL_HANDLE; bool ended = false, active = false; UINT count = 0; };
 struct VertexBinding { Resource *resource = nullptr; UINT stride = 0, offset = 0; };
 struct Pipeline { VkPipeline handle; VkRenderPass pass; };
-struct Framebuffer { VkFramebuffer handle; };
+struct Framebuffer { VkFramebuffer handle; std::vector<VkImageView> views; std::array<VkFormat,9> formats; UINT width,height,targets; };
+struct BoundState {
+ bool dynamic = false;
+ VkViewport viewport{}; VkRect2D scissor{};
+ std::array<float,4> blend{}; UINT stencil = 0;
+ std::array<VkBuffer,32> vertices{}; std::array<VkDeviceSize,32> offsets{};
+ VkBuffer index = VK_NULL_HANDLE; VkDeviceSize index_offset = 0; VkIndexType index_type = VK_INDEX_TYPE_UINT16;
+};
 struct RetiredView { VkImageView image; VkBufferView buffer; };
 struct Batch {
  VkCommandPool commands = VK_NULL_HANDLE;
@@ -118,7 +131,7 @@ struct Batch {
  std::vector<RetiredView> retired_views;
  std::vector<VkSampler> retired_samplers;
  std::vector<VkQueryPool> retired_queries;
- std::vector<Framebuffer> framebuffers;
+ std::vector<VkFramebuffer> retired_framebuffers;
  std::unordered_map<std::string,VkDescriptorSet> descriptor_cache[3];
 };
 struct Device : Batch {
@@ -127,6 +140,12 @@ struct Device : Batch {
  VkPipeline bound_pipeline = VK_NULL_HANDLE;
  std::array<VkDescriptorSet,3> bound_sets{};
  std::string pipeline_key,descriptor_key;
+ std::array<std::string,3> descriptor_keys;
+ BoundState bound;
+ VkPipelineStageFlags export_stages = 0; VkAccessFlags export_access = 0;
+ std::vector<Framebuffer> framebuffers;
+ std::unordered_map<uint64_t,AccessState> shared_access;
+ std::unordered_map<void *,PresentImage *> present_images;
  HANDLE runtime = nullptr, adapter = nullptr, context = nullptr;
  D3D10DDI_HRTCORELAYER core{};
  D3DDDI_DEVICECALLBACKS callbacks{};
@@ -153,6 +172,7 @@ struct Device : Batch {
  std::vector<VkImageView> pass_views;
  std::array<VkFormat,9> pass_formats{};
  bool render_pass = false;
+ UINT pass_targets = 0;
  std::unordered_map<std::string,Pipeline> pipelines;
  std::array<Shader *,3> shaders{};
  std::array<std::array<Resource *,16>,3> cb{};
@@ -195,7 +215,7 @@ bool check(Device *, VkResult);
 bool flush(Device *,bool = false);
 bool begin(Device *);
 void end_pass(Device *);
-void barrier(Device *);
+void access(Device *,Storage &,VkPipelineStageFlags,VkAccessFlags,bool = false);
 VkFormat format(DXGI_FORMAT);
 unsigned pixel_bytes(DXGI_FORMAT);
 VkImageAspectFlags aspects(DXGI_FORMAT);
@@ -212,6 +232,10 @@ bool draw(Device *, UINT, UINT, INT, UINT, UINT, bool);
 bool shader_create(Device *, Shader *, const UINT *, const D3D10DDIARG_STAGE_IO_SIGNATURES *, unsigned);
 bool initialize(Device *);
 void destroy(Device *);
+void capture_present_image(Device *,Resource *);
+HRESULT WINAPI open_present_image(void *,void *,A830_IMAGE *);
+HRESULT WINAPI query_present_image(void *,A830_IMAGE *);
+void WINAPI close_present_image(void *,A830_IMAGE *);
 
 #define DDI(slot,name) std::remove_pointer_t<decltype(D3D10DDI_DEVICEFUNCS::slot)> name;
 #define DXGI(slot,name) std::remove_pointer_t<decltype(DXGI_DDI_BASE_FUNCTIONS::slot)> name;

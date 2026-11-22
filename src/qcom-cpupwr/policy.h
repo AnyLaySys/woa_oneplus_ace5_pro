@@ -1,4 +1,5 @@
 #pragma once
+#include "../qcom-dvfs.h"
 #define SM_DOMAIN_COUNT 2u
 #define SM_LEVEL_COUNT 16u
 
@@ -8,13 +9,6 @@ static const ULONG SmFrequencyKhz[SM_DOMAIN_COUNT][SM_LEVEL_COUNT] = {
     {1017600,1209600,1401600,1689600,1958400,2246400,2438400,2649600,
      2841600,3072000,3283200,3513600,3801600,4089600,4204800,4320000}
 };
-static inline ULONG SmCoolingBand(ULONG band,int temperature) {
-    if(temperature>=990)return 2;
-    if(band>=2)return temperature<=810?1u:2u;
-    if(band==1)return temperature<=780?0u:1u;
-    return temperature>=870?1u:0u;
-}
-
 static inline ULONG SmDomain(ULONG core) { return core < 6 ? 0u : 1u; }
 static inline ULONG SmClampLevel(ULONG level) {
     return level < SM_LEVEL_COUNT ? level : SM_LEVEL_COUNT-1;
@@ -41,15 +35,13 @@ static inline ULONG SmChooseLevel(ULONG domain, ULONG desired,
     return level;
 }
 
-/* A single busy core can raise its domain. OS requests bound active demand;
- * they never force an idle domain to run at a high operating point. */
-static inline ULONG SmDemand(ULONG domain,ULONG current,ULONG busy,ULONG ceiling) {
-    ULONG khz,target;
-    current=SmClampLevel(current);ceiling=SmClampLevel(ceiling);
-    if(busy<=2)return 0;
-    if(busy>100)busy=100;
-    khz=SmFrequencyKhz[domain][current];
-    target=busy>=80?khz*2:khz*busy/70;
-    if(target>=khz*7/8 && target<=khz && current<=ceiling)return current;
-    return SmChooseLevel(domain,target,SmFrequencyKhz[domain][ceiling]);
+static inline ULONG SmSustainableLevel(ULONG domain,ULONG band) {
+    return (domain?13u:14u)-min(band,2u);
+}
+static inline ULONG SmDemand(ULONG domain,ULONG current,ULONG busy,ULONG ceiling,ULONG sweet,int holdRaised) {
+    if(current>ceiling)return ceiling;
+    ULONG target=busy<=2?0:busy>=63?current+2:
+        SmChooseLevel(domain,SmFrequencyKhz[domain][current]*busy/63,SmFrequencyKhz[domain][sweet]);
+    if(holdRaised && target<current)target=current;
+    return min(target,sweet);
 }

@@ -11,6 +11,8 @@
 #include "mnoc-qos.h"
 #include "scm-qos-payload.h"
 #include "dma-ready.h"
+#include "dma-idle.h"
+#include "rdi-frame.h"
 #include "nv12.h"
 #include "rpmh-message.h"
 #include "wait.h"
@@ -621,10 +623,17 @@ static VOID ScmTests(void) {
     assert(CamScmProbe(&c)==STATUS_DEVICE_BUSY&&!c.ScmAvailable);
     ScmMock.QueryStatus=0;ScmMock.Calls=0;
     assert(CamScmQos(&c)==STATUS_SUCCESS&&ScmMock.Calls==3&&c.ScmAvailable);
+    assert(c.StaticQosReady&&CamEnsureStaticQos(&c)==STATUS_SUCCESS&&ScmMock.Calls==3);
+    c.Powered=FALSE;
+    assert(CamEnsureStaticQos(&c)==STATUS_DEVICE_NOT_READY&&ScmMock.Calls==3);
+    c.Powered=TRUE;c.CdmPending=TRUE;
+    assert(CamEnsureStaticQos(&c)==STATUS_DEVICE_BUSY&&ScmMock.Calls==3);
+    c.CdmPending=FALSE;
     assert(c.Diag.Step==151&&c.Diag.Address==0x4200180a&&c.Diag.Count==3);
     assert(CamScmQos(&c)==STATUS_SUCCESS&&ScmMock.Calls==4);
     ScmMock.QosStatus=-1;
     assert(CamScmQos(&c)==STATUS_IO_DEVICE_ERROR&&c.Trace.ScmReturn[0]==MAXULONG);
+    assert(!c.StaticQosReady);
     c.Powered=FALSE;
     assert(CamScmIoProbe(&c)==STATUS_DEVICE_NOT_READY);
     c.Powered=TRUE;
@@ -695,4 +704,32 @@ static VOID ScmTests(void) {
     assert(CamScmContinue(&c)==STATUS_SUCCESS&&!c.ScmPending&&!c.ScmResumeValid&&ScmMock.InterruptResumes==1);
 }
 
-int main(void) {TbuTests();MeasureTests();CdmTests();FrameRouteTests();WaitTests();CrmTests();GdscTests();RcgTests();CciTests();DmaTests();ColorTests();PowerTests();ScmTests();puts("QTBU translation rollback, clock measurement, frame and CDM routing, completion, wait preemption, CRM acknowledgment, GDSC sequencing, RCG restore, CCI, C-PHY, CSID commit, DMA, NV12, RPMh and powered secure QoS passed");return 0;}
+static VOID DmaIdleTests(void) {
+    RtlZeroMemory(regs,sizeof(regs));RtlZeroMemory(tbuRegs,sizeof(tbuRegs));tbuDone=0;
+    PUCHAR tbu=(PUCHAR)tbuRegs;
+    regs[0x5220/4]=0x90001;
+    assert(CamDmaStopped(NULL,NULL,NULL,tbu,tbu));
+    assert(CamDmaDrain(NULL,NULL,NULL,tbu,tbu,5)==STATUS_SUCCESS);
+    const ULONG busyRegs[]={0xf0,0xf8,0x2400,0xe04};
+    for(ULONG i=0;i<RTL_NUMBER_OF(busyRegs);i++) {
+        regs[busyRegs[i]/4]=1;
+        assert(!CamDmaStopped(NULL,NULL,NULL,tbu,tbu));
+        assert(CamDmaDrain(NULL,NULL,NULL,tbu,tbu,5)==STATUS_IO_TIMEOUT);
+        assert(regs[busyRegs[i]/4]==1);regs[busyRegs[i]/4]=0;
+    }
+    for(ULONG port=0;port<2;port++) {
+        ULONG slot=(0xc10+port*0x10)/8;tbuRegs[slot]=1ULL<<40;
+        assert(CamDmaDrain(NULL,NULL,NULL,tbu,tbu,5)==STATUS_IO_TIMEOUT);
+        assert(tbuRegs[slot]==(1ULL<<40));tbuRegs[slot]=0;
+    }
+    assert(CamDmaStopped(NULL,NULL,NULL,tbu,tbu));
+    assert(!CamRdiFrameComplete(0,0xe11e18,0));
+    assert(!CamRdiFrameComplete(QCAM_HEIGHT-1,0xe11e18,0));
+    assert(!CamRdiFrameComplete(QCAM_HEIGHT,0x800010,0));
+    assert(CamRdiFrameComplete(QCAM_HEIGHT,0xe11e18,0));
+    assert(CamRdiFrameComplete(QCAM_HEIGHT,0x10,0x10000));
+    for(ULONG bit=0;bit<32;bit++)if(CAM_RDI_FATAL_IRQ&(1u<<bit))
+        assert(!CamRdiFrameComplete(QCAM_HEIGHT,8|(1u<<bit),0x10000));
+}
+
+int main(void) {TbuTests();MeasureTests();CdmTests();FrameRouteTests();WaitTests();CrmTests();GdscTests();RcgTests();CciTests();DmaTests();ColorTests();PowerTests();ScmTests();DmaIdleTests();puts("DMA idle gating, RDI frame boundaries, TBU translation, clock measurement, frame and CDM routing, completion, wait preemption, CRM acknowledgment, GDSC sequencing, CCI, C-PHY, DMA, NV12, RPMh and powered secure QoS passed");return 0;}

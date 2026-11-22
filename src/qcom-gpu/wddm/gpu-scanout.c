@@ -126,7 +126,7 @@ NTSTATUS QcomGpuScanoutStart(PVOID context) {
     if(KeGetCurrentIrql()!=PASSIVE_LEVEL)return STATUS_INVALID_DEVICE_STATE;
     ULONGLONG physical=(ULONGLONG)a->DisplayInfo.PhysicAddress.QuadPart;
     ULONG offset=(ULONG)(physical&(PAGE_SIZE-1));
-    if(!physical || !a->Framebuffer || !a->FramebufferSize ||
+    if(!physical || !a->FramebufferSize ||
        a->FramebufferSize>FRAME_LIMIT-offset-PAGE_SIZE)return STATUS_INVALID_PARAMETER;
     ULONG bytes=(ULONG)((a->FramebufferSize+offset+PAGE_SIZE-1)&~(SIZE_T)(PAGE_SIZE-1));
     GPU_SCANOUT *s=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*s),GPU_TAG);

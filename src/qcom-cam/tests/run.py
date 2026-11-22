@@ -8,6 +8,8 @@ with tempfile.TemporaryDirectory(prefix='qcom-cam-test-') as directory:
     work = Path(directory)
     for source, name in [(root / 'cci.c', 'cci.c'), (root / 'scm.c', 'scm.c'), (root / 'dma-table.h', 'dma-table.h'),
                          (root / 'dma-address.h', 'dma-address.h'),
+                         (root / 'dma-idle.h', 'dma-idle.h'),
+                         (root / 'rdi-frame.h', 'rdi-frame.h'),
                          (root / 'dma-ready.h', 'dma-ready.h'),
                          (root / 'scm-ready.h', 'scm-ready.h'),
                          (root / 'dma-route.h', 'dma-route.h'),

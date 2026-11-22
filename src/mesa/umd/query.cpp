@@ -9,7 +9,7 @@ void APIENTRY CreateQuery(D3D10DDI_HDEVICE h,const D3D10DDIARG_CREATEQUERY *p,D3
  d->queries.push_back(q);
 }
 void APIENTRY DestroyQuery(D3D10DDI_HDEVICE h,D3D10DDI_HQUERY hq){Device *d=dev(h);Query *q=object<Query>(hq);if(q->pool){if((d->recording || d->submitted || d->pending.submitted) && begin(d))d->retired_queries.push_back(q->pool);else d->vk.DestroyQueryPool(d->device,q->pool,nullptr);}d->queries.erase(std::remove(d->queries.begin(),d->queries.end(),q),d->queries.end());q->~Query();}
-void APIENTRY QueryBegin(D3D10DDI_HDEVICE h,D3D10DDI_HQUERY hq){Device *d=dev(h);Query *q=object<Query>(hq);q->ended=false;q->active=true;q->count=0;if(q->pool){barrier(d);d->vk.CmdResetQueryPool(d->cmd,q->pool,0,256);}}
+void APIENTRY QueryBegin(D3D10DDI_HDEVICE h,D3D10DDI_HQUERY hq){Device *d=dev(h);Query *q=object<Query>(hq);q->ended=false;q->active=true;q->count=0;if(q->pool){if(!begin(d))return;end_pass(d);d->vk.CmdPipelineBarrier(d->cmd,VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,0,0,nullptr,0,nullptr,0,nullptr);d->vk.CmdResetQueryPool(d->cmd,q->pool,0,256);}}
 void APIENTRY QueryEnd(D3D10DDI_HDEVICE,D3D10DDI_HQUERY hq){Query *q=object<Query>(hq);q->active=false;q->ended=true;}
 void APIENTRY QueryGetData(D3D10DDI_HDEVICE h,D3D10DDI_HQUERY hq,void *data,UINT bytes,UINT) {
  Device *d=dev(h);Query *q=object<Query>(hq);if(!q->ended){d->errors.pfnSetErrorCb(d->core,DXGI_DDI_ERR_WASSTILLDRAWING);return;}if(!flush(d,true))return;

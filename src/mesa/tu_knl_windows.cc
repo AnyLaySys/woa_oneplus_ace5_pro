@@ -4,7 +4,12 @@
 #include "tu_device.h"
 #include "tu_knl.h"
 #include "vk_sync_timeline.h"
+#include "vk_fence.h"
+#include "vk_semaphore.h"
+#include "tu_wsi_windows.h"
 static thread_local const A830_HOST *current_host;
+static thread_local windows_context **context_sink;
+void tu_windows_capture_context(windows_context **sink){context_sink=sink;}
 extern "C" __declspec(dllexport) void WINAPI A830SetHost(const A830_HOST *host){current_host=host;}
 
 struct windows_sync { vk_sync base; HANDLE event; SRWLOCK lock; windows_context *ctx; uint64_t fence; };
@@ -52,24 +57,54 @@ static const vk_sync_type windows_sync_type={
    .init=sync_init,.finish=sync_finish,.signal=sync_signal,.reset=sync_reset,.move=sync_move,.wait=sync_wait,
 };
 
+static VkResult acquire_sync(tu_device *dev,VkFence previous,vk_sync **out) {
+   VkResult result=vk_sync_create(&dev->vk,&windows_sync_type,(vk_sync_flags)0,previous?0:1,out);
+   if(result!=VK_SUCCESS || !previous)return result;
+   VK_FROM_HANDLE(vk_fence, fence, previous);
+   auto source=(windows_sync *)vk_fence_get_active_sync(fence);
+   AcquireSRWLockShared(&source->lock);
+   auto ctx=source->ctx;uint64_t value=source->fence;
+   bool signaled=WaitForSingleObject(source->event,0)==WAIT_OBJECT_0;
+   ReleaseSRWLockShared(&source->lock);
+   if(ctx)sync_point((windows_sync *)*out,ctx,value);
+   else if(signaled)result=sync_signal(&dev->vk,*out,0);
+   else result=VK_ERROR_DEVICE_LOST;
+   return result;
+}
+VkResult tu_windows_wsi_signal_acquire(VkDevice handle,VkFence previous,VkSemaphore semaphore,VkFence ready) {
+   VK_FROM_HANDLE(tu_device, dev, handle);
+   if(semaphore) {
+      VK_FROM_HANDLE(vk_semaphore, sem, semaphore);vk_semaphore_reset_temporary(&dev->vk,sem);
+      VkResult result=acquire_sync(dev,previous,&sem->temporary);if(result!=VK_SUCCESS)return result;
+   }
+   if(ready) {
+      VK_FROM_HANDLE(vk_fence, fence, ready);vk_fence_reset_temporary(&dev->vk,fence);
+      return acquire_sync(dev,previous,&fence->temporary);
+   }
+   return VK_SUCCESS;
+}
+
 static VkResult device_init(tu_device *dev) {
    dev->fd=-1;
    if(!DuplicateHandle(GetCurrentProcess(),dev->physical_device->windows_handle,GetCurrentProcess(),&dev->windows_handle,0,FALSE,DUPLICATE_SAME_ACCESS))
       return VK_ERROR_INITIALIZATION_FAILED;
    dev->windows_context=a830_context_new(dev->windows_handle,current_host);
-   if(dev->windows_context)return VK_SUCCESS;
+   if(dev->windows_context) {
+      if(context_sink && current_host)*context_sink=(windows_context *)dev->windows_context;
+      return VK_SUCCESS;
+   }
    CloseHandle(dev->windows_handle);dev->windows_handle=nullptr;return VK_ERROR_INITIALIZATION_FAILED;
 }
 bool tu_windows_cached_memory(tu_physical_device *dev) {
    GPU_INFO info={};
    return a830_ioctl(dev->windows_handle,GPU_IOCTL_QUERY,nullptr,0,&info,sizeof(info)) && info.Version>=3;
 }
-static void device_finish(tu_device *dev) { a830_context_finish((windows_context *)dev->windows_context);CloseHandle(dev->windows_handle); }
+static void device_finish(tu_device *dev) { tu_windows_wsi_finish(dev);a830_context_finish((windows_context *)dev->windows_context);CloseHandle(dev->windows_handle); }
 static int gpu_timestamp(tu_device *,uint64_t *) { return -1; }
 static int suspend_count(tu_device *,uint64_t *value) { *value=0;return 0; }
 static VkResult check_status(tu_device *dev) {
    GPU_INFO info;
-   return a830_ioctl(dev->windows_handle,GPU_IOCTL_QUERY,nullptr,0,&info,sizeof(info)) && !info.Status?VK_SUCCESS:vk_device_set_lost(&dev->vk,"GPU fault");
+   return a830_ioctl(dev->windows_handle,GPU_IOCTL_QUERY,nullptr,0,&info,sizeof(info)) && !info.Status?VK_SUCCESS:vk_device_set_lost(&dev->vk,nullptr);
 }
 static int queue_new(tu_device *,tu_queue *queue) { queue->msm_queue_id=1;return 0; }
 
@@ -105,7 +140,7 @@ void tu_windows_bo_sync_cache(tu_device *dev,tu_bo *bo,VkDeviceSize offset,VkDev
    if(!size || offset>bo->size || size>bo->size-offset)return;
    GPU_CACHE range={bo->gem_handle,(uint32_t)offset,(uint32_t)size,op==TU_MEM_SYNC_CACHE_FROM_GPU};
    if(!a830_ioctl(dev->windows_handle,GPU_IOCTL_CACHE,&range,sizeof(range),nullptr,0))
-      vk_device_set_lost(&dev->vk,"CPU cache synchronization failed");
+      vk_device_set_lost(&dev->vk,nullptr);
 }
 static void bo_finish(tu_device *dev,tu_bo *bo) {
    if(!p_atomic_dec_zero(&bo->refcnt))return;
@@ -178,14 +213,13 @@ static VkResult queue_submit(tu_queue *queue,void *data,struct vk_sync_wait *wai
    }
    auto entries=(GPU_SUBMIT *)submit->entries.data;
    unsigned count=util_dynarray_num_elements(&submit->entries,GPU_SUBMIT);
-   if(!ctx || !ctx->page)return vk_device_set_lost(&dev->vk,"Missing WDDM completion state");
+   if(!ctx || !ctx->page)return vk_device_set_lost(&dev->vk,nullptr);
    uint64_t fence;
    VkResult result=(VkResult)a830_context_submit(ctx,entries,count,&fence);queue->fence=(uint32_t)fence;
    if(result==VK_SUCCESS)for(unsigned i=0;i<signal_count;i++) {
-      assert(signals[i].sync->type==&windows_sync_type);
       sync_point((windows_sync *)signals[i].sync,ctx,fence);
    }
-   return result==VK_SUCCESS?VK_SUCCESS:vk_device_set_lost(&dev->vk,"Asynchronous WDDM submission failed");
+   return result==VK_SUCCESS?VK_SUCCESS:vk_device_set_lost(&dev->vk,nullptr);
 }
 static const tu_knl windows_knl={
    .name="windows",.device_init=device_init,.device_finish=device_finish,

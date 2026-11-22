@@ -34,10 +34,14 @@ static LRESULT CALLBACK Window(HWND window, UINT message, WPARAM wparam, LPARAM 
         HANDLE device = CreateFileW(L"\\\\.\\QcomIr", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
             OPEN_EXISTING, 0, NULL);
         BOOL ok =
-            device != INVALID_HANDLE_VALUE && WriteFile(device, data, count, &sent, NULL) && sent == count;
+            device != INVALID_HANDLE_VALUE && WriteFile(device, data, count, &sent, NULL);
+        DWORD error = ok ? (sent == count ? ERROR_SUCCESS : ERROR_WRITE_FAULT) : GetLastError();
         if (device != INVALID_HANDLE_VALUE) CloseHandle(device);
-        if (!ok)
-            MessageBoxW(window, L"红外发射失败，请确认红外设备可用。", L"红外遥控", MB_OK | MB_ICONERROR);
+        if (error) {
+            WCHAR text[96];
+            wsprintfW(text, L"红外发射失败（系统错误 %lu）。", error);
+            MessageBoxW(window, text, L"红外遥控", MB_OK | MB_ICONERROR);
+        }
         EnableWindow(button, TRUE);
         return 0;
     }

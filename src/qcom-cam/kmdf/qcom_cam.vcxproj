@@ -21,7 +21,7 @@
   <PropertyGroup>
     <TargetName>qcom_cam</TargetName>
     <CamVersionDate Condition="'$(CamVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</CamVersionDate>
-    <CamRevision Condition="'$(CamRevision)' == ''">131</CamRevision>
+    <CamRevision Condition="'$(CamRevision)' == ''">137</CamRevision>
     <CamDriverDate>$([System.DateTime]::Parse('$(CamVersionDate)').ToString('MM/dd/yyyy'))</CamDriverDate>
     <CamDriverVersion>$([System.DateTime]::Parse('$(CamVersionDate)').ToString('yy.M.d')).$(CamRevision)</CamDriverVersion>
     <CamDriverVersionComma>$([System.String]::Copy('$(CamDriverVersion)').Replace('.', ','))</CamDriverVersionComma>

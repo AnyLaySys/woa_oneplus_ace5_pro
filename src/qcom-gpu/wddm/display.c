@@ -19,14 +19,11 @@ NTSTATUS A830DisplayStart(A830_ADAPTER *a) {
     DXGK_DISPLAY_INFORMATION *d=&a->DisplayInfo;
     status=A830DisplayLayout(d,&a->FramebufferSize);if(!NT_SUCCESS(status))return status;
 
-    a->Framebuffer=MmMapIoSpaceEx(d->PhysicAddress,a->FramebufferSize,PAGE_READWRITE|PAGE_WRITECOMBINE);
-    if(!a->Framebuffer)return STATUS_INSUFFICIENT_RESOURCES;
     a->Visible=TRUE;a->PanelOn=a->AdapterOn=a->MonitorOn=TRUE;return STATUS_SUCCESS;
 }
 VOID A830DisplayStop(A830_ADAPTER *a) {
     if(!NT_SUCCESS(A830DpuStop(a)))return;
-    if(a->Framebuffer)MmUnmapIoSpace(a->Framebuffer,a->FramebufferSize);
-    a->Framebuffer=NULL;a->FramebufferSize=0;
+    a->FramebufferSize=0;
 }
 static NTSTATUS Interface(A830_ADAPTER *a,D3DKMDT_HVIDPN h,const DXGK_VIDPN_INTERFACE **v) {
     return a->Dxgk.DxgkCbQueryVidPnInterface(h,DXGK_VIDPN_INTERFACE_VERSION_V1,v);
@@ -125,7 +122,7 @@ static NTSTATUS APIENTRY Commit(HANDLE adapter,const DXGKARG_COMMITVIDPN *p) {
     status=v->pfnGetTopology(p->hFunctionalVidPn,&topology,&t);if(!NT_SUCCESS(status))return status;
     SIZE_T count=0;status=t->pfnGetNumPaths(topology,&count);if(!NT_SUCCESS(status))return status;
 
-    if(!count){a->Visible=FALSE;a->ScanoutPitch=0;InterlockedExchange(&a->FlipPending,0);return STATUS_SUCCESS;}
+    if(!count){a->Visible=FALSE;a->ScanoutPitch=0;return STATUS_SUCCESS;}
     const D3DKMDT_VIDPN_PRESENT_PATH *path=NULL;
     status=t->pfnAcquireFirstPathInfo(topology,&path);if(!NT_SUCCESS(status))return status;
     BOOLEAN valid=A830RotationSupported(path->ContentTransformation.Rotation);
@@ -147,7 +144,7 @@ static NTSTATUS APIENTRY Commit(HANDLE adapter,const DXGKARG_COMMITVIDPN *p) {
 static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDRESS *p) {
     A830_ADAPTER *a=adapter;
 
-    if(p->VidPnSourceId || !a->Framebuffer || !a->Memory.Segment.Cpu)return STATUS_INVALID_PARAMETER;
+    if(p->VidPnSourceId || !a->FramebufferSize || !a->Memory.Segment.Cpu)return STATUS_INVALID_PARAMETER;
     A830_ALLOCATION *allocation=p->hAllocation;
     if(allocation && ((allocation->Resource.Format!=D3DDDIFMT_X8R8G8B8 && allocation->Resource.Format!=D3DDDIFMT_A8R8G8B8) || allocation->Resource.Pitch<a->DisplayInfo.Width*4 || allocation->Resource.Width!=a->DisplayInfo.Width ||
         allocation->Resource.Height!=a->DisplayInfo.Height || allocation->Resource.Size<(SIZE_T)allocation->Resource.Pitch*a->DisplayInfo.Height)) {
@@ -171,9 +168,7 @@ static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDR
             a->ScanoutPitch=pitch;
             return QcomGpuScanoutQueue(a,allocation,0,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
         }
-        a->ScanoutOffset=0;a->ScanoutPitch=pitch;a->ScanoutAddress=(ULONGLONG)p->PrimaryAddress.QuadPart;
-        a->ScanoutCpu=allocation->Buffer.Cpu;
-        InterlockedExchange(&a->FlipPending,1);A830WakeDisplay(a);return STATUS_SUCCESS;
+        return STATUS_DEVICE_NOT_READY;
     }
     if(offset>=A830_SEGMENT_ADDRESS)offset-=A830_SEGMENT_ADDRESS;
     if(p->PrimarySegment!=1 || offset>A830_SEGMENT_BYTES || bytes>A830_SEGMENT_BYTES-offset)return STATUS_INVALID_PARAMETER;
@@ -187,10 +182,7 @@ static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDR
         a->ScanoutPitch=pitch;
         return QcomGpuScanoutQueue(a,NULL,offset,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
     }
-    a->ScanoutOffset=offset;a->ScanoutPitch=pitch;a->ScanoutAddress=(ULONGLONG)p->PrimaryAddress.QuadPart;
-    a->ScanoutCpu=a->Memory.Segment.Cpu+(SIZE_T)offset;
-    InterlockedExchange(&a->FlipPending,1);A830WakeDisplay(a);
-    return STATUS_SUCCESS;
+    return STATUS_DEVICE_NOT_READY;
 }
 static NTSTATUS APIENTRY OverlayAddress(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDRESSWITHMULTIPLANEOVERLAY *p) {
     if(p->VidPnSourceId || p->PlaneCount>1 || (p->PlaneCount && (!p->pPlanes || p->pPlanes[0].LayerIndex)))return STATUS_INVALID_PARAMETER;
@@ -280,19 +272,6 @@ static NTSTATUS StopOwnership(PVOID context,D3DDDI_VIDEO_PRESENT_TARGET_ID targe
     A830_ADAPTER *a=context;if(target && target!=D3DDDI_ID_UNINITIALIZED)return STATUS_INVALID_PARAMETER;
     *display=a->DisplayInfo;return A830AdapterStop(a);
 }
-static NTSTATUS SystemEnable(PVOID context,D3DDDI_VIDEO_PRESENT_TARGET_ID target,PDXGKARG_SYSTEM_DISPLAY_ENABLE_FLAGS flags,UINT *width,UINT *height,D3DDDIFORMAT *format) {
-    UNREFERENCED_PARAMETER(flags);A830_ADAPTER *a=context;
-    if((target && target!=D3DDDI_ID_UNINITIALIZED) || !a->Framebuffer)return STATUS_DEVICE_NOT_READY;
-    *width=a->DisplayInfo.Width;*height=a->DisplayInfo.Height;*format=a->DisplayInfo.ColorFormat;return STATUS_SUCCESS;
-}
-static VOID SystemWrite(PVOID context,PVOID source,UINT width,UINT height,UINT stride,UINT x,UINT y) {
-    A830_ADAPTER *a=context;
-    if(!a->Framebuffer || !source || x>=a->DisplayInfo.Width || y>=a->DisplayInfo.Height || width>stride/4)return;
-    width=min(width,a->DisplayInfo.Width-x);height=min(height,a->DisplayInfo.Height-y);
-    for(UINT row=0;row<height;row++)RtlCopyMemory(a->Framebuffer+(SIZE_T)(row+y)*a->DisplayInfo.Pitch+(SIZE_T)x*4,
-        (PUCHAR)source+(SIZE_T)row*stride,(SIZE_T)width*4);
-    KeMemoryBarrier();
-}
 VOID A830DisplayDdi(DRIVER_INITIALIZATION_DATA *d) {
     d->DxgkDdiSetPalette=Palette;d->DxgkDdiSetPointerPosition=PointerPosition;d->DxgkDdiSetPointerShape=PointerShape;
     d->DxgkDdiGetScanLine=ScanLine;
@@ -304,5 +283,4 @@ VOID A830DisplayDdi(DRIVER_INITIALIZATION_DATA *d) {
     d->DxgkDdiCheckMultiPlaneOverlaySupport2=OverlaySupport2;d->DxgkDdiCheckMultiPlaneOverlaySupport3=OverlaySupport3;
     d->DxgkDdiUpdateActiveVidPnPresentPath=Update;d->DxgkDdiRecommendMonitorModes=MonitorModes;
     d->DxgkDdiQueryVidPnHWCapability=HardwareCaps;d->DxgkDdiStopDeviceAndReleasePostDisplayOwnership=StopOwnership;
-    d->DxgkDdiSystemDisplayEnable=SystemEnable;d->DxgkDdiSystemDisplayWrite=SystemWrite;
 }

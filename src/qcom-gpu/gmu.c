@@ -166,7 +166,8 @@ static NTSTATUS Configure(GPU *g) {
         g->PerfKhz[index]=opp->Khz;g->PerfBw[index]=opp->Bandwidth;
         if(opp->Acd){acd[2]|=1u<<index;acd[5+acd[4]++]=opp->Acd;}
     }
-    g->MaxKhz=g->FixedKhz=g->DownSamples=g->CoolingBand=0;
+    g->MaxKhz=g->FixedKhz=g->DownSamples=g->CoolingBand=g->SweetBand=0;
+    g->TemperatureAverage=MINLONG;
     perf[3]=g->PerfCount;ULONG at=5+g->PerfCount*3;
     perf[at++]=2;perf[at++]=2;perf[at++]=0;perf[at++]=0;perf[at++]=cx;perf[at++]=500000;
     status=Send(g,15,perf,at);if(!NT_SUCCESS(status))return status;
@@ -205,13 +206,17 @@ LONG GpuTemperature(GPU *g) {
 static VOID GovernLocked(GPU *g) {
     if(!g->Online || !g->PerfCount || g->Fault)return;
     ULONGLONG now=KeQueryInterruptTime(),elapsed=now-g->PerfLast;
-    if(elapsed<200000)return;
+    if(elapsed<DVFS_SAMPLE_100NS)return;
     ULONG high,low;do{high=Gr(g,0x1fca1);low=Gr(g,0x1fca0);}while(high!=Gr(g,0x1fca1));
     ULONGLONG busy=((ULONGLONG)high<<32)|low,delta=busy>=g->BusyLast?busy-g->BusyLast:0,ticks=elapsed*192/100;
     g->PerfLast=now;g->BusyLast=busy;
     ULONG utilization=delta>=ticks?100:(ULONG)(delta*100/ticks);
     LONG temperature=GpuTemperature(g);
-    if(temperature!=MINLONG)g->CoolingBand=GpuCoolingBand(g->CoolingBand,temperature);
+    if(temperature!=MINLONG) {
+        g->CoolingBand=DvfsCoolingBand(g->CoolingBand,temperature);
+        g->TemperatureAverage=DvfsTemperatureAverage(g->TemperatureAverage,temperature);
+        g->SweetBand=DvfsSustainableBand(g->SweetBand,g->TemperatureAverage/8);
+    }
     ULONG maximum=g->PerfCount-1;
     if(g->MaxKhz)while(maximum>1 && g->PerfKhz[maximum]>g->MaxKhz)maximum--;
     ULONG limit=GpuCoolingKhz(g->CoolingBand);
@@ -225,12 +230,17 @@ static VOID GovernLocked(GPU *g) {
     if(!pending)g->PendingSince=0;
     else if(!g->PendingSince || completed!=g->PendingCompleted)g->PendingSince=now;
     g->PendingCompleted=completed;
-    BOOLEAN slow=pending && g->PendingSince && now-g->PendingSince>=200000;
-    BOOLEAN hold=g->RaisedAt && now-g->RaisedAt<1000000 &&
-        (pending || (lastSubmit && now-lastSubmit<=2000000));
-    ULONG target=g->FixedKhz?GpuChooseLevel(g->PerfKhz,maximum,g->FixedKhz):
-        GpuResponsiveDemand(g->PerfKhz,g->PerfIndex,utilization,maximum,slow,hold);
-    target=GpuDelayDown(target,g->PerfIndex,utilization,maximum,&g->DownSamples);
+    BOOLEAN slow=pending && g->PendingSince && now-g->PendingSince>=DVFS_SAMPLE_100NS;
+    if(utilization>=63 || slow)g->RaisedAt=now;
+    BOOLEAN hold=DvfsHold(now,g->RaisedAt,pending,lastSubmit);
+    ULONG target;
+    if(g->FixedKhz)target=GpuChooseLevel(g->PerfKhz,maximum,g->FixedKhz);
+    else {
+        ULONG sweet=GpuChooseLevel(g->PerfKhz,maximum,GpuSustainableKhz(g->SweetBand));
+        if(slow && !g->SweetBand && sweet<maximum)++sweet;
+        target=GpuResponsiveDemand(g->PerfKhz,g->PerfIndex,utilization,maximum,sweet,slow,hold);
+    }
+    target=DvfsDelayDown(target,g->PerfIndex,utilization,maximum,&g->DownSamples);
     if(target!=g->PerfIndex) {
         ULONG previous=g->PerfIndex;
         NTSTATUS status=GpuSetFrequency(g,target);

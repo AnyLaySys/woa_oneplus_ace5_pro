@@ -20,11 +20,13 @@ if /i "%NAME%"=="qcom-keys" (set "NAME=qcom-keys"& set "TARGET=qcom_keys")
 if /i "%NAME%"=="qcom-sensors" (set "NAME=qcom-sensors"& set "TARGET=qcom_sensors")
 if /i "%NAME%"=="nxp-nfc" (set "NAME=nxp-nfc"& set "TARGET=nxp_nfc")
 if /i "%NAME%"=="qcom-ir" (set "NAME=qcom-ir"& set "TARGET=qcom_ir")
+if /i "%NAME%"=="ir-remote" (set "NAME=ir-remote"& set "TARGET=ir_remote")
 if /i "%NAME%"=="qcom-cam" (set "NAME=qcom-cam"& set "TARGET=qcom_cam")
 if /i "%NAME%"=="qcom-gpu" (set "NAME=qcom-gpu"& set "TARGET=qcom_gpu")
 if not defined TARGET goto invalid
 set "DRIVER_EXT=sys"
 if /i "%NAME%"=="nxp-nfc" set "DRIVER_EXT=dll"
+if /i "%NAME%"=="ir-remote" set "DRIVER_EXT=exe"
 set "CREDENTIAL="
 if /i "%NAME%"=="qcom-audio" (
   set "CREDENTIAL=%ROOT%\fw\charge\credential.bin"
@@ -34,6 +36,7 @@ if /i "%NAME%"=="qcom-audio" (
   )
 )
 set "SRC=%ROOT%\src\%NAME%"
+if /i "%NAME%"=="ir-remote" set "SRC=%ROOT%\src\qcom-ir\app"
 if /i "%NAME%"=="qcom-gpu" set "SRC=%ROOT%\src\qcom-gpu\wddm"
 set "GPU_PACKAGE="
 if /i "%NAME%"=="qcom-gpu" set "GPU_PACKAGE=1"
@@ -48,6 +51,7 @@ if not "%PROJECT_COUNT%"=="1" (
   exit /b 1
 )
 set "DST=%ROOT%\out\drv\%NAME%"
+if /i "%NAME%"=="ir-remote" set "DST=%ROOT%\out\app\ir-remote"
 set "WORK=%ROOT%\out\%NAME%\ARM64\Release"
 set "BIN=%WORK%\bin"
 set "VS=C:\Program Files\Microsoft Visual Studio\18\Insiders"
@@ -83,8 +87,10 @@ if errorlevel 1 exit /b 1
 if defined GPU_PACKAGE for %%E in (sys inf cat) do if exist "%DST%\*.%%E" del /q "%DST%\*.%%E"
 copy /y "%BIN%\%TARGET%.%DRIVER_EXT%" "%DST%\%TARGET%.%DRIVER_EXT%" >nul
 if errorlevel 1 exit /b 1
-copy /y "%BIN%\%TARGET%.inf" "%DST%\%TARGET%.inf" >nul
-if errorlevel 1 exit /b 1
+if /i not "%NAME%"=="ir-remote" (
+  copy /y "%BIN%\%TARGET%.inf" "%DST%\%TARGET%.inf" >nul
+  if errorlevel 1 exit /b 1
+)
 if defined GPU_PACKAGE (
   for %%F in (a830_umd.dll a830_umd_arm64.dll a830_umd_x64.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll) do (
     copy /y "%BIN%\%%F" "%DST%\%%F" >nul
@@ -99,6 +105,7 @@ if defined GPU_PACKAGE (
 )
 "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%TARGET%.%DRIVER_EXT%"
 if errorlevel 1 exit /b 1
+if /i "%NAME%"=="ir-remote" goto build_done
 if /i "%NAME%"=="qcom-cam" (
   for %%F in (qcom_cam_video.sys qcom_cam_video.inf) do (
     copy /y "%BIN%\%%F" "%DST%\%%F" >nul
@@ -123,9 +130,9 @@ if /i "%NAME%"=="qcom-sensors" (
   )
   "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_sensors_native.dll"
   if errorlevel 1 exit /b 1
-  copy /y "%BIN%\qcom_sensors_service.exe" "%DST%\qcom_sensors_service.exe" >nul
+  copy /y "%BIN%\qcom_sensors.exe" "%DST%\qcom_sensors.exe" >nul
   if errorlevel 1 exit /b 1
-  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_sensors_service.exe"
+  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_sensors.exe"
   if errorlevel 1 exit /b 1
 )
 if /i "%NAME%"=="qcom-audio" (
@@ -136,12 +143,6 @@ if /i "%NAME%"=="qcom-audio" (
   copy /y "%ROOT%\fw\adsp\adsp.*" "%DST%\ADSP\" >nul
   if errorlevel 1 exit /b 1
   copy /y "%ROOT%\fw\adsp\adsp_dtb.*" "%DST%\ADSP\" >nul
-  if errorlevel 1 exit /b 1
-)
-if /i "%NAME%"=="qcom-ir" (
-  copy /y "%BIN%\qcom_ir_power.exe" "%DST%\qcom_ir_power.exe" >nul
-  if errorlevel 1 exit /b 1
-  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_ir_power.exe"
   if errorlevel 1 exit /b 1
 )
 "%INF2CAT%" /driver:"%DST%" /os:10_CO_ARM64 /uselocaltime
@@ -157,7 +158,8 @@ if /i "%NAME%"=="qcom-cam" (
   if errorlevel 1 exit /b 1
 )
 echo.
-echo DRIVER=%DST%
+:build_done
+if /i "%NAME%"=="ir-remote" (echo APP=%DST%) else echo DRIVER=%DST%
 dir "%DST%" /b
 exit /b 0
 
@@ -249,6 +251,7 @@ echo        build.cmd qcom-keys
 echo        build.cmd qcom-sensors
 echo        build.cmd nxp-nfc
 echo        build.cmd qcom-ir
+echo        build.cmd ir-remote
 echo        build.cmd qcom-cam
 echo        build.cmd qcom-gpu
 echo        build.cmd install-fw -WindowsDirectory "W:\Windows" [-BluetoothAddress "XX:XX:XX:XX:XX:XX"] [-WhatIf] [-Force]
@@ -336,7 +339,8 @@ if subprocess.run(['git', '-C', str(source), 'apply', '--ignore-whitespace', '--
     run('git', '-C', source, 'apply', '--ignore-whitespace', '--check', patch)
     run('git', '-C', source, 'apply', '--ignore-whitespace', patch)
 vulkan = source / 'src/freedreno/vulkan'
-copy(local / 'tu_knl_windows.cc', vulkan / 'tu_knl_windows.cc')
+for name in ['tu_knl_windows.cc', 'tu_wsi_windows.cc', 'tu_wsi_windows.h', 'a830_composition.h']:
+    copy(local / name, vulkan / name)
 abi = (root / 'src/qcom-gpu/wddm/abi.h').read_text().replace('#include "../uapi.h"', '#include "qcom_gpu_uapi.h"')
 for backend in [vulkan, source / 'src/freedreno/drm']:
     for name in ['a830_windows.h', 'a830_host.h', 'a830_completion.h']:
@@ -499,7 +503,7 @@ def build_umd(arch, compiler, link):
     with ThreadPoolExecutor(max_workers=6) as pool:
         objects = list(pool.map(compile_file, files))
         objects += list(pool.map(compile_file, [
-            umd / (name + '.cpp') for name in ['core', 'driver', 'pipeline', 'query', 'resource', 'shader', 'state']]))
+            umd / (name + '.cpp') for name in ['core', 'driver', 'interop', 'pipeline', 'query', 'resource', 'shader', 'state']]))
     definition = umd_build / 'a830_umd.def'
     write(definition, 'LIBRARY a830_umd\nEXPORTS\nOpenAdapter10\nOpenAdapter10_2\n')
     run('lld-link', '/DLL', '/MACHINE:' + machine, '/OUT:' + str(umd_build / ('a830_umd_' + arch + '.dll')),
@@ -543,6 +547,8 @@ dxgi_source = patched_source('dxvk-2.7.1', 'https://github.com/doitsujin/dxvk.gi
     'v2.7.1', 'c3dd74be6baec53786d4e064a572185b70347a17', 'dxgi.patch')
 copy(local / 'qcom_vulkan.h', d3d12_source / 'libs/d3d12core/qcom_vulkan.h')
 copy(local / 'qcom_vulkan.h', dxgi_source / 'src/vulkan/qcom_vulkan.h')
+for name in ['a830_composition.h', 'dxgi_composition.h']:
+    copy(local / name, dxgi_source / 'src/dxgi' / name)
 d3d12_cross = output / 'd3d12.ini'
 write(d3d12_cross, """[binaries]
 widl = ['x86_64-w64-mingw32-widl', '-I/usr/share/mingw-w64/include']
@@ -596,6 +602,9 @@ for arch in ['arm64', 'x64']:
     definitions[arch] = 'EXPORTS\n' + '\n'.join(entries) + '\n'
 build_forwarder(forwarder, destination / 'd3d12.dll', definitions)
 copy(local / 'install-d3d12.ps1', destination / 'install-d3d12.ps1')
+copy(local / 'install-composition.ps1', destination / 'install-composition.ps1')
+for name in ['vulkan_freedreno.dll', 'vulkan_freedreno_x64.dll']:
+    copy(package / name, destination / name)
 for name, path in [('vkd3d', d3d12_source / 'LICENSE'), ('dxvk', dxgi_source / 'LICENSE'),
     ('dxil-spirv', d3d12_source / 'subprojects/dxil-spirv/LICENSE.MIT'),
     ('dxbc-spirv', d3d12_source / 'subprojects/dxil-spirv/subprojects/dxbc-spirv/LICENSE'),

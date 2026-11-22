@@ -20,7 +20,7 @@
   <PropertyGroup>
     <TargetName>qcom_sensors</TargetName>
     <SensorsVersionDate Condition="'$(SensorsVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</SensorsVersionDate>
-    <SensorsRevision Condition="'$(SensorsRevision)' == ''">45</SensorsRevision>
+    <SensorsRevision Condition="'$(SensorsRevision)' == ''">46</SensorsRevision>
     <SensorsDriverDate>$([System.DateTime]::Parse('$(SensorsVersionDate)').ToString('MM/dd/yyyy'))</SensorsDriverDate>
     <SensorsDriverVersion>$([System.DateTime]::Parse('$(SensorsVersionDate)').ToString('yy.M.d')).$(SensorsRevision)</SensorsDriverVersion>
     <SensorsDriverVersionComma>$([System.String]::Copy('$(SensorsDriverVersion)').Replace('.', ','))</SensorsDriverVersionComma>
@@ -37,7 +37,7 @@
   <ItemGroup>
     <ClCompile Include="..\hid.c" />
     <ResourceCompile Include="qcom_sensors.rc" /><Inf Include="qcom_sensors.inx" /><FilesToPackage Include="$(TargetPath)" />
-    <FilesToPackage Include="$(OutDir)qcom_sensors_service.exe" />
+    <FilesToPackage Include="$(OutDir)qcom_sensors.exe" />
   </ItemGroup>
   <Target Name="BuildSensorService" BeforeTargets="PrepareForBuild">
     <MSBuild Projects="$(MSBuildThisFileDirectory)..\service.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=$(Platform);OutDir=$(OutDir);IntDir=$(IntDir)service\;SensorsDriverVersion=$(SensorsDriverVersion);SensorsDriverVersionComma=$(SensorsDriverVersionComma)" />

@@ -1,6 +1,7 @@
 #pragma once
 #include <ntifs.h>
 #include "uapi.h"
+#include "../qcom-dvfs.h"
 
 #define GPU_TAG '083G'
 #define GPU_WINDOW 0xE0000
@@ -28,7 +29,8 @@ typedef struct {
     ULONG SpeedBin,PerfCount,PerfIndex,FixedKhz,MaxKhz;
     ULONG PerfKhz[GPU_PERF_LEVELS],PerfBw[GPU_PERF_LEVELS];
     ULONGLONG PerfLast,BusyLast;
-    ULONG CoolingBand,DownSamples;
+    ULONG CoolingBand,SweetBand,DownSamples;
+    LONG TemperatureAverage;
     BOOLEAN LastContextValid;
     ULONGLONG LastContextCookie;
     ULONGLONG LastRoot;

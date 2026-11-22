@@ -5,11 +5,11 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v145</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries></PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-  <PropertyGroup><TargetName>qcom_ir_power</TargetName></PropertyGroup>
+  <PropertyGroup><TargetName>ir_remote</TargetName><OutDir>$(MSBuildThisFileDirectory)..\..\..\out\ir-remote\$(Platform)\$(Configuration)\bin\</OutDir><IntDir>$(MSBuildThisFileDirectory)..\..\..\out\ir-remote\$(Platform)\$(Configuration)\obj\</IntDir></PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions><Optimization>MinSpace</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><DebugInformationFormat>None</DebugInformationFormat><AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions><LanguageStandard_C>stdc17</LanguageStandard_C></ClCompile>
     <Link><AdditionalDependencies>user32.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies><GenerateDebugInformation>false</GenerateDebugInformation><SubSystem>Windows</SubSystem><OptimizeReferences>true</OptimizeReferences><EnableCOMDATFolding>true</EnableCOMDATFolding></Link>
   </ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="power.c" /></ItemGroup>
+  <ItemGroup><ClCompile Include="remote.c" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

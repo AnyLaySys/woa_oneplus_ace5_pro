@@ -481,7 +481,7 @@ static void WINAPI Control(DWORD code) {
 static void WINAPI Main(DWORD argc, LPWSTR *argv) {
     (void)argc;
     (void)argv;
-    ServiceHandle = RegisterServiceCtrlHandlerW(L"qcom_sensors_service", Control);
+    ServiceHandle = RegisterServiceCtrlHandlerW(L"QcomSensors", Control);
     if (!ServiceHandle) return;
     Stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!Stop) {
@@ -505,7 +505,7 @@ static void WINAPI Main(DWORD argc, LPWSTR *argv) {
     CloseHandle(Stop);
 }
 int wmain() {
-    SERVICE_TABLE_ENTRYW table[] = { { const_cast<LPWSTR>(L"qcom_sensors_service"), Main },
+    SERVICE_TABLE_ENTRYW table[] = { { const_cast<LPWSTR>(L"QcomSensors"), Main },
         { nullptr, nullptr } };
     return StartServiceCtrlDispatcherW(table) ? 0 : (int)GetLastError();
 }

@@ -673,7 +673,7 @@ fail:
 NTSTATUS
 HspStartDma (_Inout_ PHSP_CTX Ctx)
 {
-    ULONG Instance, Channel, Value, ErrorBefore;
+    ULONG Channel, Value, ErrorBefore;
     NTSTATUS Status;
 
     if (Ctx == NULL || Ctx->DmaEnabler == NULL || !Ctx->SmmuReady || Ctx->Ready || Ctx->MasksSaved) {
@@ -684,16 +684,12 @@ HspStartDma (_Inout_ PHSP_CTX Ctx)
         (HspSeRd(Ctx, HSP_SE_CGC_CTRL) & 0x7Fu) != 0x7Fu ||
         (HspSeRd(Ctx, HSP_SE_GENI_DMA_MODE_EN) & 1u) == 0 ||
         (HspSeRd(Ctx, HSP_SE_GSI_EVENT_EN) & 0xFu) != 0xFu) return STATUS_IO_DEVICE_ERROR;
-    for (Instance = 1; Instance <= 4; Instance++) {
-        Value = HspGpiRd(Ctx, HSP_EE_STATUS(Instance));
-        if (Value == MAXULONG || (Value & 1) == 0) continue;
-        if (HSP_C0_CHSTATE(HspGpiRd(Ctx, HSP_CH_CNTXT(Instance, 0))) != 0 ||
-            HSP_C0_CHSTATE(HspGpiRd(Ctx, HSP_CH_CNTXT(Instance, 1))) != 0 ||
-            HSP_C0_CHSTATE(HspGpiRd(Ctx, HSP_EV_CNTXT(Instance))) != 0) continue;
-        break;
-    }
-    if (Instance > 4) return STATUS_DEVICE_BUSY;
-    Ctx->Gpii = Instance;
+    Ctx->Gpii = 1;
+    Value = HspGpiRd(Ctx, HSP_EE_STATUS(Ctx->Gpii));
+    if (Value == MAXULONG || (Value & 1) == 0 ||
+        HSP_C0_CHSTATE(HspGpiRd(Ctx, HSP_CH_CNTXT(Ctx->Gpii, 0))) != 0 ||
+        HSP_C0_CHSTATE(HspGpiRd(Ctx, HSP_CH_CNTXT(Ctx->Gpii, 1))) != 0 ||
+        HSP_C0_CHSTATE(HspGpiRd(Ctx, HSP_EV_CNTXT(Ctx->Gpii))) != 0) return STATUS_DEVICE_BUSY;
     HspMasks(Ctx, FALSE);
     if (Ctx->Faulted || !Ctx->MasksSaved) {
         if (Ctx->MasksSaved) {

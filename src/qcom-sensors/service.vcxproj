@@ -12,7 +12,7 @@
     <ConfigurationType>Application</ConfigurationType><PlatformToolset>v145</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-  <PropertyGroup><TargetName>qcom_sensors_service</TargetName><LinkIncremental>false</LinkIncremental></PropertyGroup>
+  <PropertyGroup><TargetName>qcom_sensors</TargetName><LinkIncremental>false</LinkIncremental></PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard>stdcpp17</LanguageStandard><Optimization>MinSpace</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><ExceptionHandling>Sync</ExceptionHandling><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
     <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=$(SensorsDriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(SensorsDriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>

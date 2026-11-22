@@ -55,13 +55,14 @@ NTSTATUS EvtDeviceAdd(WDFDRIVER driver,PWDFDEVICE_INIT init) {
 NTSTATUS OnPrepareHardware(WDFDEVICE device,WDFCMRESLIST raw,WDFCMRESLIST resources) {
     UNREFERENCED_PARAMETER(raw);
     static const ULONG bases[]={0x00A90000,0x00A14000,0x0F130000,0x00100000,0x16520000,0x81C60000,0x15000000,0x0F1A1000};
-    static const ULONG sizes[]={0x4000,0x10000,0x4000,0x60000,0x10000,0x20000,0x1000,0x2000};
+    static const ULONG sizes[]={0x4000,0x4000,0x4000,0x60000,0x10000,0x20000,0x1000,0x2000};
     PDEVICE_CONTEXT d=GetDeviceContext(device);d->MappedCount=0;
     for(ULONG i=0;i<WdfCmResourceListGetCount(resources);i++) {
         PCM_PARTIAL_RESOURCE_DESCRIPTOR r=WdfCmResourceListGetDescriptor(resources,i);
         if(r->Type!=CmResourceTypeMemory)continue;
         ULONG n=d->MappedCount;
-        if(n>=2 || r->u.Memory.Start.QuadPart!=bases[n] || r->u.Memory.Length!=sizes[n])return STATUS_DEVICE_CONFIGURATION_ERROR;
+        if(n>=2 || r->u.Memory.Start.QuadPart!=bases[n] ||
+            (r->u.Memory.Length!=sizes[n] && !(n==1 && r->u.Memory.Length==0x10000)))return STATUS_DEVICE_CONFIGURATION_ERROR;
         d->MappedBase[n]=MmMapIoSpaceEx(r->u.Memory.Start,sizes[n],PAGE_READWRITE|PAGE_NOCACHE);
         if(!d->MappedBase[n])return STATUS_INSUFFICIENT_RESOURCES;
         d->MappedSize[n]=sizes[n];d->MappedCount++;

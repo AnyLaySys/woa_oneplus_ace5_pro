@@ -3,7 +3,7 @@ Signature="$WINDOWS NT$"
 Class=System
 ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider=%Provider%
-DriverVer=11/20/2026,26.11.20.5
+DriverVer=11/20/2026,26.11.20.8
 CatalogFile=qcom_cpupwr.cat
 PnpLockdown=1
 
@@ -14,12 +14,16 @@ DefaultDestDir=13
 [SourceDisksFiles]
 qcom_cpupwr.sys=1
 
-; A primitive boot driver: no fabricated ACPI node or processor replacement.
-[DefaultInstall.NT$ARCH$]
+[Manufacturer]
+%Provider%=Qualcomm,NT$ARCH$
+[Qualcomm.NT$ARCH$]
+%Service%=CpuPower,ROOT\QCOM_CPUPWR
+
+[CpuPower.NT]
 CopyFiles=CopyDriver
 [CopyDriver]
 qcom_cpupwr.sys
-[DefaultInstall.NT$ARCH$.Services]
+[CpuPower.NT.Services]
 DelService=qcom_cpupower
 AddService=qcom_cpupwr,0x00000002,CpuPowerService
 [CpuPowerService]

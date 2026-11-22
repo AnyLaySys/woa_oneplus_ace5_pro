@@ -152,6 +152,7 @@ int wmain(int argc,wchar_t **argv) {
                 t.SmmuState[0],t.SmmuState[1],t.SmmuState[2],t.SmmuState[3],t.SmmuState[4],t.SmmuState[5],t.SmmuState[6],t.SmmuState[7]);
             printf("sensor stream=%lu counter=%lu\n",t.SensorStream,t.SensorCounter);
             printf("frame prefix:");for(ULONG i=0;i<8;i++)printf(" %08lx",t.FrameWords[i]);printf("\n");
+            printf("stopped frame nonzero page samples=%lu/%lu\n",t.FrameNonzeroSamples,t.FrameSampleCount);
             for(ULONG i=0;i<sizeof(CamPhyTraceRegs)/sizeof(CamPhyTraceRegs[0]);i++)printf("phy[%lx]=%08lx\n",CamPhyTraceRegs[i],t.Phy[i]);
             for(ULONG i=0;i<sizeof(CamCsidTraceRegs)/sizeof(CamCsidTraceRegs[0]);i++)printf("csid[%lx]=%08lx\n",CamCsidTraceRegs[i],t.Csid[i]);
             for(ULONG i=0;i<sizeof(CamWriterTraceRegs)/sizeof(CamWriterTraceRegs[0]);i++)printf("writer[%lx]=%08lx\n",CamWriterTraceRegs[i],t.Writer[i]);
@@ -256,9 +257,10 @@ int wmain(int argc,wchar_t **argv) {
             QCAM_EXPOSURE_OPTIONS options={sizeof(options),QCAM_ABI,lines,gain};
             ok=DeviceIoControl(device,QCAM_EXPOSURE,&options,sizeof(options),NULL,0,&bytes,NULL);error=GetLastError();
         }
-    } else if((!wcscmp(argv[1],L"capture")||!wcscmp(argv[1],L"capture-diag")||!wcscmp(argv[1],L"capture-frame")||!wcscmp(argv[1],L"capture-auto")||!wcscmp(argv[1],L"capture-prefetch")||!wcscmp(argv[1],L"capture-context")||!wcscmp(argv[1],L"capture-primed")||!wcscmp(argv[1],L"dump-frame"))&&argc>=3&&argc<=5) {
+    } else if((!wcscmp(argv[1],L"capture")||!wcscmp(argv[1],L"capture-packed")||!wcscmp(argv[1],L"capture-diag")||!wcscmp(argv[1],L"capture-frame")||!wcscmp(argv[1],L"capture-auto")||!wcscmp(argv[1],L"capture-prefetch")||!wcscmp(argv[1],L"capture-context")||!wcscmp(argv[1],L"capture-primed")||!wcscmp(argv[1],L"dump-frame"))&&argc>=3&&argc<=5) {
         BOOLEAN context=!wcscmp(argv[1],L"capture-context"),primed=!wcscmp(argv[1],L"capture-primed"),prefetch=!wcscmp(argv[1],L"capture-prefetch"),automatic=!wcscmp(argv[1],L"capture-auto"),frameMode=!wcscmp(argv[1],L"capture-frame");
-        BOOLEAN diagnostic=!wcscmp(argv[1],L"capture-diag")||frameMode||automatic||prefetch||primed||context,dump=!wcscmp(argv[1],L"dump-frame");
+        BOOLEAN packed=!wcscmp(argv[1],L"capture-packed");
+        BOOLEAN diagnostic=!wcscmp(argv[1],L"capture-diag")||frameMode||automatic||prefetch||primed||context||packed,dump=!wcscmp(argv[1],L"dump-frame");
         QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,diagnostic?1000:15000,0,4980000000ULL};
         wchar_t *end=NULL;
         if(argc>3){options.DataRate=_wcstoui64(argv[3],&end,0);if(*end)goto done;}
@@ -266,7 +268,7 @@ int wmain(int argc,wchar_t **argv) {
         UCHAR *raw=VirtualAlloc(NULL,QCAM_FRAME_BYTES,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
         if(!raw){error=GetLastError();goto done;}
         printf(dump?"Reading stopped frame buffer\n":"Starting RAW10 capture, timeout=%lu ms\n",options.TimeoutMs);fflush(stdout);
-        ok=DeviceIoControl(device,dump?QCAM_FRAME_DIAGNOSTIC:context?QCAM_CAPTURE_CONTEXT_DIAGNOSTIC:primed?QCAM_CAPTURE_PRIMED_DIAGNOSTIC:prefetch?QCAM_CAPTURE_PREFETCH_DIAGNOSTIC:automatic?QCAM_CAPTURE_AUTO_DIAGNOSTIC:frameMode?QCAM_CAPTURE_FRAME_DIAGNOSTIC:diagnostic?QCAM_CAPTURE_DIAGNOSTIC:QCAM_CAPTURE,dump?NULL:&options,dump?0:sizeof(options),raw,QCAM_FRAME_BYTES,&bytes,NULL);
+        ok=DeviceIoControl(device,dump?QCAM_FRAME_DIAGNOSTIC:packed?QCAM_CAPTURE_PACKED_DIAGNOSTIC:context?QCAM_CAPTURE_CONTEXT_DIAGNOSTIC:primed?QCAM_CAPTURE_PRIMED_DIAGNOSTIC:prefetch?QCAM_CAPTURE_PREFETCH_DIAGNOSTIC:automatic?QCAM_CAPTURE_AUTO_DIAGNOSTIC:frameMode?QCAM_CAPTURE_FRAME_DIAGNOSTIC:diagnostic?QCAM_CAPTURE_DIAGNOSTIC:QCAM_CAPTURE,dump?NULL:&options,dump?0:sizeof(options),raw,QCAM_FRAME_BYTES,&bytes,NULL);
         error=GetLastError();Info(device);
         if(ok&&bytes!=QCAM_FRAME_BYTES){ok=FALSE;error=ERROR_INVALID_DATA;}
         if(ok) {

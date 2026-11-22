@@ -62,7 +62,7 @@ void APIENTRY SetRenderTargets(D3D10DDI_HDEVICE h,const D3D10DDI_HRENDERTARGETVI
 void APIENTRY GenMips(D3D10DDI_HDEVICE h,D3D10DDI_HSHADERRESOURCEVIEW hv) {
  Device *d=dev(h);View *v=object<View>(hv);Resource *r=v->resource;
  for(UINT i=v->level+1;i<v->level+v->levels;i++) {
-   barrier(d);VkImageBlit b{};b.srcSubresource={aspects(v->format),i-1,v->layer,v->layers};b.dstSubresource={aspects(v->format),i,v->layer,v->layers};b.srcOffsets[1]={(INT)std::max(1u,r->width>>(i-1)),(INT)std::max(1u,r->height>>(i-1)),(INT)std::max(1u,r->depth>>(i-1))};b.dstOffsets[1]={(INT)std::max(1u,r->width>>i),(INT)std::max(1u,r->height>>i),(INT)std::max(1u,r->depth>>i)};
-   r->storage.used=d->next_submit;d->vk.CmdBlitImage(d->cmd,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,1,&b,VK_FILTER_LINEAR);
+   access(d,r->storage,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT);VkImageBlit b{};b.srcSubresource={aspects(v->format),i-1,v->layer,v->layers};b.dstSubresource={aspects(v->format),i,v->layer,v->layers};b.srcOffsets[1]={(INT)std::max(1u,r->width>>(i-1)),(INT)std::max(1u,r->height>>(i-1)),(INT)std::max(1u,r->depth>>(i-1))};b.dstOffsets[1]={(INT)std::max(1u,r->width>>i),(INT)std::max(1u,r->height>>i),(INT)std::max(1u,r->depth>>i)};
+   d->vk.CmdBlitImage(d->cmd,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,1,&b,VK_FILTER_LINEAR);
  }
 }

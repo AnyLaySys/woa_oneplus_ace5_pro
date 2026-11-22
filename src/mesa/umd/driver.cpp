@@ -68,12 +68,15 @@ HRESULT APIENTRY _QueryResourceResidency(DXGI_DDI_ARG_QUERYRESOURCERESIDENCY *p)
 HRESULT APIENTRY _GetGammaCaps(DXGI_DDI_ARG_GET_GAMMA_CONTROL_CAPS *){return DXGI_ERROR_UNSUPPORTED;}
 HRESULT APIENTRY _RotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *p) {
  Device *d=dev(p->hDevice);if(p->Resources<2)return S_OK;if(!flush(d))return d->failure;
- Resource *first=res(p->pResources[0]);if(!first)return E_INVALIDARG;
+ EnterCriticalSection(&d->lock);
+ for(UINT i=0;i<p->Resources;i++)if(!res(p->pResources[i])){LeaveCriticalSection(&d->lock);return E_INVALIDARG;}
+ Resource *first=res(p->pResources[0]);
  Storage saved=first->storage;D3DKMT_HANDLE allocation=first->allocation,kmresource=first->kmresource;
  for(UINT i=0;i<p->Resources;i++) {
    Resource *dst=res(p->pResources[i]);Resource *src=i+1<p->Resources?res(p->pResources[i+1]):nullptr;
-   if(!dst)return E_INVALIDARG;dst->storage=src?src->storage:saved;dst->allocation=src?src->allocation:allocation;dst->kmresource=src?src->kmresource:kmresource;dst->generation++;
+   dst->storage=src?src->storage:saved;dst->allocation=src?src->allocation:allocation;dst->kmresource=src?src->kmresource:kmresource;dst->generation++;
  }
+ LeaveCriticalSection(&d->lock);
  return S_OK;
 }
 static HRESULT rotated_blt(Device *d,DXGI_DDI_ARG_BLT *p) {
@@ -97,7 +100,7 @@ static HRESULT rotated_blt(Device *d,DXGI_DDI_ARG_BLT *p) {
  auto shaders=d->shaders;auto cb=d->cb;auto samplers=d->samplers;auto textures=d->textures;auto vertices=d->vertices;auto targets=d->targets;
  Layout *layout=d->layout;Blend *blend=d->blend;Depth *depth=d->depth;Raster *old_raster=d->raster;View *depth_view=d->depth_view;
  UINT target_count=d->target_count,sample_mask=d->sample_mask;auto topology=d->topology;auto viewport=d->viewport;
- barrier(d);d->shaders={&d->rotation_vertex,&d->rotation_pixel,nullptr};d->cb={};d->cb[0][0]=&d->rotation_constants;
+ end_pass(d);d->shaders={&d->rotation_vertex,&d->rotation_pixel,nullptr};d->cb={};d->cb[0][0]=&d->rotation_constants;
  d->samplers={};d->samplers[1][0]=&d->rotation_sampler;d->textures={};d->textures[1][0]=&source;d->vertices={};
  d->targets={&target};d->target_count=1;d->depth_view=nullptr;d->layout=nullptr;d->blend=nullptr;d->depth=nullptr;d->raster=&raster;d->sample_mask=~0u;
  d->topology=D3D10_DDI_PRIMITIVE_TOPOLOGY_TRIANGLELIST;d->viewport={(FLOAT)p->DstLeft,(FLOAT)p->DstTop,(FLOAT)(p->DstRight-p->DstLeft),(FLOAT)(p->DstBottom-p->DstTop),0,1};
@@ -113,7 +116,9 @@ HRESULT APIENTRY _Blt(DXGI_DDI_ARG_BLT *p) {
  if(!src || !dst)return E_INVALIDARG;
  if(p->Rotate>=DXGI_DDI_MODE_ROTATION_ROTATE90 && p->Rotate<=DXGI_DDI_MODE_ROTATION_ROTATE270)return rotated_blt(d,p);
  if(p->Rotate!=DXGI_DDI_MODE_ROTATION_IDENTITY && p->Rotate!=DXGI_DDI_MODE_ROTATION_UNSPECIFIED)return DXGI_ERROR_UNSUPPORTED;
- UINT sl=p->SrcSubresource%src->levels,dl=p->DstSubresource%dst->levels;barrier(d);
+ UINT sl=p->SrcSubresource%src->levels,dl=p->DstSubresource%dst->levels;
+ if(src->format==dst->format && (src==dst || (src->storage.external && src->storage.address==dst->storage.address)) && p->SrcSubresource==p->DstSubresource && !p->DstLeft && !p->DstTop && p->DstRight==std::max(1u,src->width>>sl) && p->DstBottom==std::max(1u,src->height>>sl))return S_OK;
+ access(d,src->storage,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);access(d,dst->storage,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
  VkImageBlit b{};b.srcSubresource={aspects(src->format),sl,p->SrcSubresource/src->levels,1};b.dstSubresource={aspects(dst->format),dl,p->DstSubresource/dst->levels,1};b.srcOffsets[1]={(INT)std::max(1u,src->width>>sl),(INT)std::max(1u,src->height>>sl),1};b.dstOffsets[0]={(INT)p->DstLeft,(INT)p->DstTop,0};b.dstOffsets[1]={(INT)p->DstRight,(INT)p->DstBottom,1};
  d->vk.CmdBlitImage(d->cmd,src->storage.image,VK_IMAGE_LAYOUT_GENERAL,dst->storage.image,VK_IMAGE_LAYOUT_GENERAL,1,&b,VK_FILTER_NEAREST);return S_OK;
 }

@@ -19,7 +19,7 @@
   <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.props" />
   <PropertyGroup>
     <TargetName>qcom_gpu</TargetName>
-    <A830Revision>44</A830Revision>
+    <A830Revision>67</A830Revision>
     <A830Version>26.11.20.$(A830Revision)</A830Version>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
     <OutDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-gpu\ARM64\Release\bin\</OutDir>
@@ -33,10 +33,9 @@
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="miniport.c" /><ClCompile Include="bridge.c" /><ClCompile Include="display.c" /><ClCompile Include="display-power.c" /><ClCompile Include="dpu.c" /><ClCompile Include="gpu-scanout.c" /><ClCompile Include="scanout.c" /><ClInclude Include="dpu.h" /><ClCompile Include="adapter-info.c" /><ClCompile Include="memory.c" /><ClCompile Include="scheduler.c" /><ClInclude Include="adapter.h" /><ClInclude Include="abi.h" /><ResourceCompile Include="qcom_gpu.rc" /><Inf Include="qcom_gpu.inx" /><FilesToPackage Include="$(TargetPath)" /><FilesToPackage Include="$(OutDir)a830_umd.dll" /><FilesToPackage Include="$(OutDir)a830_umd_arm64.dll" /><FilesToPackage Include="$(OutDir)a830_umd_x64.dll" /><FilesToPackage Include="$(OutDir)a830_gl.dll" /><FilesToPackage Include="$(OutDir)a830_gl_x64.dll" /></ItemGroup>
   <Import Project="..\core\core.vcxitems" />
-  <ItemGroup><ClCompile Include="present.c" /></ItemGroup>
   <ItemGroup><ClCompile Include="shared-memory.c" /><ClInclude Include="memory-layout.h" /></ItemGroup>
   <ItemGroup><FilesToPackage Include="$(OutDir)vulkan_freedreno.dll" /><FilesToPackage Include="$(OutDir)vulkan_freedreno_x64.dll" /><FilesToPackage Include="$(OutDir)freedreno_icd.json" /><FilesToPackage Include="$(OutDir)freedreno_icd_x64.json" /><FilesToPackage Include="$(OutDir)msvcp140.dll" /><FilesToPackage Include="$(OutDir)vcruntime140.dll" /></ItemGroup>
-  <ItemGroup><FilesToPackage Include="$(OutDir)gen80000_zap.mbn" /></ItemGroup>
+  <ItemGroup><FilesToPackage Include="$(OutDir)gen80000_zap.mbn" /><ClInclude Include="..\..\qcom-dvfs.h" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.targets" />
 </Project>

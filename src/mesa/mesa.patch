@@ -664,7 +664,7 @@ diff --git a/src/freedreno/drm/meson.build b/src/freedreno/drm/meson.build
 +  libfreedreno_drm_files += 'fd_windows.c'
 +  libfreedreno_drm_flags += cc.get_supported_arguments('/EHa')
 +endif
- 
+
  libfreedreno_drm_virtio_files = files(
    'virtio/virtio_bo.c',
 diff --git a/src/freedreno/ir2/disasm-a2xx.c b/src/freedreno/ir2/disasm-a2xx.c
@@ -911,25 +911,26 @@ diff --git a/src/freedreno/perfcntrs/meson.build b/src/freedreno/perfcntrs/meson
 diff --git a/src/freedreno/vulkan/meson.build b/src/freedreno/vulkan/meson.build
 --- a/src/freedreno/vulkan/meson.build
 +++ b/src/freedreno/vulkan/meson.build
-@@ -103,7 +103,13 @@
+@@ -103,7 +103,14 @@
  tu_deps = []
  tu_flags = [sse2_args]
- 
+
 -tu_wsi = false
 +tu_wsi = with_platform_windows
 +
 +if freedreno_kmds.contains('windows')
 +  tu_flags += '-DTU_HAS_WINDOWS'
-+  libtu_files += files('tu_knl_windows.cc')
++  libtu_files += files('tu_knl_windows.cc', 'tu_wsi_windows.cc')
++  tu_deps += cc.find_library('gdi32')
 +  tu_deps += cc.find_library('cfgmgr32')
 +endif
- 
+
  if with_platform_x11
    tu_deps += dep_xcb_dri3
-@@ -199,6 +205,10 @@
+@@ -199,6 +206,10 @@
    tu_cpp_args += cpp.get_supported_arguments(['-Wno-misleading-indentation'])
  endif
- 
+
 +if with_platform_windows
 +  tu_cpp_args += cpp.get_supported_arguments('/EHa')
 +endif
@@ -937,7 +938,7 @@ diff --git a/src/freedreno/vulkan/meson.build b/src/freedreno/vulkan/meson.build
  libvulkan_freedreno = shared_library(
    'vulkan_freedreno',
    [libtu_files, tu_drirc, tu_entrypoints, tu_tracepoints, freedreno_xml_header_files, sha1_h, u_format_pack_h, bvh_spv],
-@@ -226,7 +236,8 @@
+@@ -226,7 +237,8 @@
    c_args : [no_override_init_args, tu_flags, soong_compat_c_args],
    cpp_args : [tu_cpp_args, tu_flags, soong_compat_cpp_args],
    gnu_symbol_visibility : 'hidden',
@@ -1220,18 +1221,19 @@ diff --git a/src/freedreno/vulkan/tu_device.h b/src/freedreno/vulkan/tu_device.h
     bool has_local;
     int64_t local_major;
     int64_t local_minor;
-@@ -302,6 +305,10 @@
+@@ -302,6 +305,11 @@
  struct tu_device
  {
     struct vk_device vk;
 +#ifdef TU_HAS_WINDOWS
 +   void *windows_handle;
 +   void *windows_context;
++   void *windows_wsi;
 +#endif
     struct tu_instance *instance;
 
     struct tu_queue *queues[TU_MAX_QUEUE_FAMILIES];
-@@ -447,8 +454,8 @@
+@@ -447,8 +455,8 @@
 
     /* Condition variable for timeline semaphore to notify waiters when a
      * new submit is executed. */
@@ -1553,15 +1555,29 @@ diff --git a/src/freedreno/vulkan/tu_util.cc b/src/freedreno/vulkan/tu_util.cc
 diff --git a/src/freedreno/vulkan/tu_wsi.cc b/src/freedreno/vulkan/tu_wsi.cc
 --- a/src/freedreno/vulkan/tu_wsi.cc
 +++ b/src/freedreno/vulkan/tu_wsi.cc
-@@ -38,7 +38,7 @@
- {
-    VkResult result;
+@@ -14,6 +14,10 @@
+ #include "wsi_common_drm.h"
 
--   const struct wsi_device_options options = { .sw_device = false };
-+   const struct wsi_device_options options = { .sw_device = DETECT_OS_WINDOWS };
-    result = wsi_device_init(&physical_device->wsi_device,
-                             tu_physical_device_to_handle(physical_device),
-                             tu_wsi_proc_addr,
+ #include "tu_device.h"
++#ifdef TU_HAS_WINDOWS
++#include "a830_windows.h"
++#include "tu_wsi_windows.h"
++#endif
+
+ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+ tu_wsi_proc_addr(VkPhysicalDevice physicalDevice, const char *pName)
+@@ -49,7 +53,10 @@
+    if (result != VK_SUCCESS)
+       return result;
+
+-   physical_device->wsi_device.supports_modifiers = true;
++   physical_device->wsi_device.supports_modifiers = !DETECT_OS_WINDOWS;
++#ifdef TU_HAS_WINDOWS
++   tu_windows_wsi_init(&physical_device->wsi_device);
++#endif
+    physical_device->wsi_device.can_present_on_device =
+       tu_wsi_can_present_on_device;
+
 diff --git a/src/freedreno/vulkan/tu_wsi.h b/src/freedreno/vulkan/tu_wsi.h
 --- a/src/freedreno/vulkan/tu_wsi.h
 +++ b/src/freedreno/vulkan/tu_wsi.h
@@ -1661,7 +1677,7 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_context.c b/src/gallium/dri
     }
 +#endif
  }
- 
+
  void
 @@ -540,7 +542,7 @@
         * changes the behavior of what we are trying to measure:
@@ -1677,7 +1693,7 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_context.h b/src/gallium/dri
 +++ b/src/gallium/drivers/freedreno/freedreno_context.h
 @@ -10,7 +10,9 @@
  #define FREEDRENO_CONTEXT_H_
- 
+
  #include "pipe/p_context.h"
 +#ifndef _WIN32
  #include "util/libsync.h"
@@ -1799,7 +1815,7 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/dr
     if (rsc->scanout)
        renderonly_scanout_destroy(rsc->scanout, fd_screen(pscreen)->ro);
 +#endif
- 
+
     if (prsc->target == PIPE_BUFFER)
        util_idalloc_mt_free(&screen->buffer_ids, rsc->b.buffer_id_unique);
 @@ -1450,6 +1452,7 @@
@@ -1818,11 +1834,11 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/dr
 +      close((int)(uintptr_t)handle.handle);
        if (!rsc)
           return NULL;
- 
+
        return &rsc->b.b;
     }
 +#endif
- 
+
     prsc =
        fd_resource_allocate_and_resolve(pscreen, tmpl, modifiers, count, &size);
 @@ -1511,6 +1515,8 @@
@@ -1833,7 +1849,7 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/dr
 +
     struct fd_screen *screen = fd_screen(pscreen);
     struct fd_resource *rsc = alloc_resource_struct(pscreen, tmpl);
- 
+
 @@ -1568,6 +1574,10 @@
  fail:
     fd_resource_destroy(pscreen, prsc);
@@ -1843,7 +1859,7 @@ diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/dr
 +   return NULL;
 +#endif
  }
- 
+
  bool
 diff --git a/src/gallium/drivers/freedreno/freedreno_resource.h b/src/gallium/drivers/freedreno/freedreno_resource.h
 --- a/src/gallium/drivers/freedreno/freedreno_resource.h
@@ -2254,3 +2270,490 @@ diff --git a/src/freedreno/vulkan/tu_pipeline.cc b/src/freedreno/vulkan/tu_pipel
        /* VK_EXT_rasterization_order_attachment_access:
         *
         * This extension allow access to framebuffer attachments when used as
+diff --git a/src/vulkan/wsi/wsi_common.c b/src/vulkan/wsi/wsi_common.c
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -2291,20 +2291,28 @@
+
+    image->acquired = true;
+
+-   if (pAcquireInfo->semaphore != VK_NULL_HANDLE) {
+-      VkResult signal_result =
+-         wsi_signal_semaphore_for_image(device, swapchain, image,
+-                                        pAcquireInfo->semaphore);
++   if (wsi->win32.signal_d3d11_acquire) {
++      VkResult signal_result = wsi->win32.signal_d3d11_acquire(
++         _device, swapchain->fences[*pImageIndex],
++         pAcquireInfo->semaphore, pAcquireInfo->fence);
+       if (signal_result != VK_SUCCESS)
+          return signal_result;
+-   }
+-
+-   if (pAcquireInfo->fence != VK_NULL_HANDLE) {
+-      VkResult signal_result =
+-         wsi_signal_fence_for_image(device, swapchain, image,
+-                                    pAcquireInfo->fence);
+-      if (signal_result != VK_SUCCESS)
+-         return signal_result;
++   } else {
++      if (pAcquireInfo->semaphore != VK_NULL_HANDLE) {
++         VkResult signal_result =
++            wsi_signal_semaphore_for_image(device, swapchain, image,
++                                           pAcquireInfo->semaphore);
++         if (signal_result != VK_SUCCESS)
++            return signal_result;
++      }
++
++      if (pAcquireInfo->fence != VK_NULL_HANDLE) {
++         VkResult signal_result =
++            wsi_signal_fence_for_image(device, swapchain, image,
++                                       pAcquireInfo->fence);
++         if (signal_result != VK_SUCCESS)
++            return signal_result;
++      }
+    }
+
+    if (wsi->set_memory_ownership)
+@@ -2446,8 +2454,11 @@
+    VkResult final_result = handle_trace(queue, dev, current_frame);
+
+    STACK_ARRAY(VkResult, results, pPresentInfo->swapchainCount);
+-   for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++)
++   STACK_ARRAY(bool, prepared, pPresentInfo->swapchainCount);
++   for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
+       results[i] = VK_SUCCESS;
++      prepared[i] = false;
++   }
+
+    /* First, do the throttle waits, creating the throttle fences if needed */
+    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
+@@ -2476,6 +2487,16 @@
+                                        1, &swapchain->fences[image_index]);
+          if (results[i] != VK_SUCCESS)
+             continue;
++      }
++   }
++
++   /* Select platform backbuffers after throttle waits have retired the
++    * previous use of each source image's recorded transfer commands. */
++   for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
++      VK_FROM_HANDLE(wsi_swapchain, swapchain, pPresentInfo->pSwapchains[i]);
++      if (results[i] == VK_SUCCESS && swapchain->prepare_present) {
++         results[i] = swapchain->prepare_present(swapchain, pPresentInfo->pImageIndices[i]);
++         prepared[i] = results[i] == VK_SUCCESS;
+       }
+    }
+
+@@ -2908,6 +2929,10 @@
+    }
+
+    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
++      if (prepared[i]) {
++         VK_FROM_HANDLE(wsi_swapchain, swapchain, pPresentInfo->pSwapchains[i]);
++         swapchain->finish_present(swapchain);
++      }
+       if (pPresentInfo->pResults != NULL)
+          pPresentInfo->pResults[i] = results[i];
+
+@@ -2918,6 +2943,7 @@
+
+    STACK_ARRAY_FINISH(image_signal_infos);
+    STACK_ARRAY_FINISH(semaphore_wait_infos);
++   STACK_ARRAY_FINISH(prepared);
+    STACK_ARRAY_FINISH(results);
+
+    return final_result;
+diff --git a/src/vulkan/wsi/wsi_common.h b/src/vulkan/wsi/wsi_common.h
+--- a/src/vulkan/wsi/wsi_common.h
++++ b/src/vulkan/wsi/wsi_common.h
+@@ -140,6 +140,17 @@
+
+    struct {
+       void *(*get_d3d12_command_queue)(VkDevice device);
++      void *(*get_d3d11_device)(VkDevice device);
++      VkResult (*create_d3d11_image)(VkDevice device, void *resource, VkImage image,
++                                    const VkAllocationCallbacks *alloc,
++                                    VkDeviceMemory *memory, void **data);
++      void (*destroy_d3d11_image)(VkDevice device, void *data);
++      VkResult (*prepare_d3d11_image)(VkDevice device, void *first, void *second,
++                                     uint32_t *selected);
++      void (*finish_d3d11_present)(VkDevice device);
++      VkResult (*present_d3d11_image)(VkDevice device, VkFence ready);
++      VkResult (*signal_d3d11_acquire)(VkDevice device, VkFence previous,
++                                      VkSemaphore semaphore, VkFence ready);
+       /* Needs to be per VkDevice, not VkPhysicalDevice, depends on queue config */
+       bool (*requires_blits)(VkDevice device);
+       VkResult (*create_image_memory)(VkDevice device, void *resource,
+diff --git a/src/vulkan/wsi/wsi_common_win32.cpp b/src/vulkan/wsi/wsi_common_win32.cpp
+--- a/src/vulkan/wsi/wsi_common_win32.cpp
++++ b/src/vulkan/wsi/wsi_common_win32.cpp
+@@ -37,6 +37,7 @@
+ #include "wsi_common_private.h"
+
+ #include <dxgi1_4.h>
++#include <d3d11.h>
+ #include <directx/d3d12.h>
+ #include <dxguids/dxguids.h>
+
+@@ -72,7 +73,13 @@
+    enum wsi_win32_image_state state;
+    struct wsi_win32_swapchain *chain;
+    struct {
+-      ID3D12Resource *swapchain_res;
++      struct {
++         IUnknown *resource;
++         void *data;
++         VkImage image;
++         VkDeviceMemory memory;
++         VkCommandBuffer *commands;
++      } buffers[2];
+    } dxgi;
+    struct {
+       HDC dc;
+@@ -185,7 +192,14 @@
+
+    caps->surfaceCapabilities.minImageCount = 1;
+
+-   if (!wsi_device->sw && wsi_device->win32.get_d3d12_command_queue) {
++   if (!wsi_device->sw && wsi_device->win32.get_d3d11_device) {
++      /* Vulkan renders into independent images and copies each presented frame
++       * to the current native backbuffer. Its image pool need not match DXGI's
++       * two imported allocations or their presentation order.
++       */
++      caps->surfaceCapabilities.minImageCount = 2;
++      caps->surfaceCapabilities.maxImageCount = 0;
++   } else if (!wsi_device->sw && wsi_device->win32.get_d3d12_command_queue) {
+       /* DXGI doesn't support random presenting order (images need to
+        * be presented in the order they were acquired), so we can't
+        * expose more than two image per swapchain.
+@@ -399,7 +413,7 @@
+ {
+    const VkPresentModeKHR *array;
+    size_t array_size;
+-   if (wsi_device->sw || !wsi_device->win32.get_d3d12_command_queue) {
++   if (wsi_device->sw || !(wsi_device->win32.get_d3d12_command_queue || wsi_device->win32.get_d3d11_device)) {
+       array = present_modes_gdi;
+       array_size = ARRAY_SIZE(present_modes_gdi);
+    } else {
+@@ -441,6 +455,34 @@
+ }
+
+ static VkResult
++wsi_create_d3d11_buffer(const struct wsi_swapchain *base,
++                         const struct wsi_image_info *info,
++                         struct wsi_win32_image *image, uint32_t index)
++{
++   auto chain = (struct wsi_win32_swapchain *)base;
++   auto &buffer = image->dxgi.buffers[index];
++   const struct wsi_device *wsi = base->wsi;
++   if (FAILED(chain->dxgi->GetBuffer(index, __uuidof(ID3D11Texture2D),
++                                     (void **)&buffer.resource)))
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++
++   VkImageCreateInfo create = info->create;
++   create.pNext = nullptr;
++   create.flags = VK_IMAGE_CREATE_ALIAS_BIT;
++   create.tiling = VK_IMAGE_TILING_LINEAR;
++   create.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++   create.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++   VkResult result = wsi->CreateImage(base->device, &create, &base->alloc, &buffer.image);
++   if (result != VK_SUCCESS)
++      return result;
++   result = wsi->win32.create_d3d11_image(base->device, buffer.resource, buffer.image,
++                                         &base->alloc, &buffer.memory, &buffer.data);
++   if (result != VK_SUCCESS)
++      return result;
++   return wsi->BindImageMemory(base->device, buffer.image, buffer.memory, 0);
++}
++
++static VkResult
+ wsi_create_dxgi_image_mem(const struct wsi_swapchain *drv_chain,
+                           const struct wsi_image_info *info,
+                           struct wsi_image *image)
+@@ -452,16 +494,34 @@
+
+    struct wsi_win32_image *win32_image =
+       container_of(image, struct wsi_win32_image, base);
+-   uint32_t image_idx =
+-      ((uintptr_t)win32_image - (uintptr_t)chain->images) /
+-      sizeof(*win32_image);
+-   if (FAILED(chain->dxgi->GetBuffer(image_idx,
+-                                     IID_PPV_ARGS(&win32_image->dxgi.swapchain_res))))
++   if (wsi->win32.get_d3d11_device) {
++      VkResult result = wsi_create_d3d11_buffer(drv_chain, info, win32_image, 0);
++      image->blit.image = win32_image->dxgi.buffers[0].image;
++      image->blit.memory = win32_image->dxgi.buffers[0].memory;
++      if (result != VK_SUCCESS)
++         return result;
++      result = wsi_create_d3d11_buffer(drv_chain, info, win32_image, 1);
++      if (result != VK_SUCCESS)
++         return result;
++      VkMemoryRequirements reqs;
++      wsi->GetImageMemoryRequirements(chain->base.device, image->image, &reqs);
++      VkMemoryDedicatedAllocateInfo dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
++      dedicated.image = image->image;
++      VkMemoryAllocateInfo memory = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
++      memory.pNext = &dedicated;
++      memory.allocationSize = reqs.size;
++      memory.memoryTypeIndex = info->select_image_memory_type(wsi, reqs.memoryTypeBits);
++      return wsi->AllocateMemory(chain->base.device, &memory, &chain->base.alloc, &image->memory);
++   }
++
++   uint32_t image_idx = win32_image - chain->images;
++   if (FAILED(chain->dxgi->GetBuffer(image_idx, __uuidof(ID3D12Resource),
++                                     (void **)&win32_image->dxgi.buffers[0].resource)))
+       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+    VkResult result =
+       wsi->win32.create_image_memory(chain->base.device,
+-                                     win32_image->dxgi.swapchain_res,
++                                     win32_image->dxgi.buffers[0].resource,
+                                      &chain->base.alloc,
+                                      chain->base.blit.type == WSI_SWAPCHAIN_NO_BLIT ?
+                                      &image->memory : &image->blit.memory);
+@@ -540,6 +600,35 @@
+    return VK_SUCCESS;
+ }
+
++static void
++wsi_win32_release_dxgi(struct wsi_win32_swapchain *chain,
++                       struct wsi_win32_image *image)
++{
++   const struct wsi_device *wsi = chain->base.wsi;
++   if (image->dxgi.buffers[1].commands) {
++      uint32_t count = chain->base.blit.queue ? 1 : wsi->queue_family_count;
++      for (uint32_t i = 0; i < count; i++)
++         if (chain->base.cmd_pools[i] && image->dxgi.buffers[1].commands[i])
++            wsi->FreeCommandBuffers(chain->base.device, chain->base.cmd_pools[i],
++                                     1, &image->dxgi.buffers[1].commands[i]);
++      vk_free(&chain->base.alloc, image->dxgi.buffers[1].commands);
++   }
++   wsi->DestroyImage(chain->base.device, image->dxgi.buffers[1].image, &chain->base.alloc);
++   wsi->FreeMemory(chain->base.device, image->dxgi.buffers[1].memory, &chain->base.alloc);
++   for (auto &buffer : image->dxgi.buffers) {
++      if (buffer.data)
++         wsi->win32.destroy_d3d11_image(chain->base.device, buffer.data);
++      if (buffer.resource)
++         buffer.resource->Release();
++   }
++   if (image->dxgi.buffers[0].image) {
++      image->base.blit.image = image->dxgi.buffers[0].image;
++      image->base.blit.memory = image->dxgi.buffers[0].memory;
++      image->base.blit.cmd_buffers = image->dxgi.buffers[0].commands;
++   }
++   image->dxgi = {};
++}
++
+ static VkResult
+ wsi_win32_image_init(VkDevice device_h,
+                      struct wsi_win32_swapchain *chain,
+@@ -549,15 +638,34 @@
+ {
+    VkResult result = wsi_create_image(&chain->base, &chain->base.image_info,
+                                       &image->base);
+-   if (result != VK_SUCCESS)
++   if (result != VK_SUCCESS) {
++      /* wsi_create_image already freed the primary blit target. */
++      image->dxgi.buffers[0].image = VK_NULL_HANDLE;
++      wsi_win32_release_dxgi(chain, image);
+       return result;
++   }
+
+    VkIcdSurfaceWin32 *win32_surface = (VkIcdSurfaceWin32 *)create_info->surface;
+    chain->wnd = win32_surface->hwnd;
+    image->chain = chain;
+
+-   if (chain->dxgi)
++   if (chain->dxgi) {
++      if (chain->base.wsi->win32.get_d3d11_device) {
++         image->dxgi.buffers[0].commands = image->base.blit.cmd_buffers;
++         struct wsi_image alternate = {};
++         alternate.image = image->base.image;
++         alternate.blit.image = image->dxgi.buffers[1].image;
++         alternate.blit.memory = image->dxgi.buffers[1].memory;
++         result = wsi_finish_create_blit_context(&chain->base, &chain->base.image_info, &alternate);
++         image->dxgi.buffers[1].commands = alternate.blit.cmd_buffers;
++         if (result != VK_SUCCESS) {
++            wsi_win32_release_dxgi(chain, image);
++            wsi_destroy_image(&chain->base, &image->base);
++            return result;
++         }
++      }
+       return VK_SUCCESS;
++   }
+
+    chain->chain_dc = GetDC(chain->wnd);
+    image->sw.dc = CreateCompatibleDC(chain->chain_dc);
+@@ -590,8 +698,7 @@
+                        const VkAllocationCallbacks *allocator,
+                        struct wsi_win32_image *image)
+ {
+-   if (image->dxgi.swapchain_res)
+-      image->dxgi.swapchain_res->Release();
++   wsi_win32_release_dxgi(chain, image);
+
+    if (image->sw.dc)
+       DeleteDC(image->sw.dc);
+@@ -740,6 +847,22 @@
+    if (!chain->dxgi)
+       return wsi_win32_acquire_idle_cpu_image(chain, info, image_index);
+
++   if (chain->base.wsi->win32.get_d3d11_device) {
++      if (wsi_win32_find_idle_image(chain, image_index))
++         return VK_SUCCESS;
++      const uint32_t count = chain->base.image_count;
++      const uint32_t first = chain->flip_sequence++ % count;
++      for (uint32_t offset = 0; offset < count; offset++) {
++         uint32_t index = (first + offset) % count;
++         if (chain->images[index].state == WSI_IMAGE_DRAWING)
++            continue;
++         *image_index = index;
++         chain->images[index].state = WSI_IMAGE_DRAWING;
++         return VK_SUCCESS;
++      }
++      return info->timeout == 0 ? VK_NOT_READY : VK_TIMEOUT;
++   }
++
+    if (wsi_win32_find_idle_image(chain, image_index))
+       return VK_SUCCESS;
+
+@@ -760,6 +883,29 @@
+ }
+
+ static VkResult
++wsi_win32_prepare_present(struct wsi_swapchain *base, uint32_t index)
++{
++   auto chain = (struct wsi_win32_swapchain *)base;
++   auto image = &chain->images[index];
++   uint32_t selected;
++   VkResult result = base->wsi->win32.prepare_d3d11_image(
++      base->device, image->dxgi.buffers[0].data, image->dxgi.buffers[1].data, &selected);
++   if (result != VK_SUCCESS)
++      return result;
++   const auto &target = image->dxgi.buffers[selected];
++   image->base.blit.image = target.image;
++   image->base.blit.memory = target.memory;
++   image->base.blit.cmd_buffers = target.commands;
++   return VK_SUCCESS;
++}
++
++static void
++wsi_win32_finish_present(struct wsi_swapchain *base)
++{
++   base->wsi->win32.finish_d3d11_present(base->device);
++}
++
++static VkResult
+ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
+                              struct wsi_win32_image *image,
+                              const VkPresentRegionKHR *damage)
+@@ -779,6 +925,12 @@
+       rects,
+    };
+
++   if (chain->base.wsi->win32.get_d3d11_device) {
++      VkResult result = chain->base.wsi->win32.present_d3d11_image(
++         chain->base.device, chain->base.fences[image - chain->images]);
++      if (result != VK_SUCCESS)
++         return result;
++   }
+    image->state = WSI_IMAGE_QUEUED;
+    UINT sync_interval = chain->base.present_mode == VK_PRESENT_MODE_FIFO_KHR ? 1 : 0;
+    UINT present_flags = chain->base.present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR ?
+@@ -845,8 +997,11 @@
+    struct wsi_win32_swapchain *chain)
+ {
+    IDXGIFactory4 *factory = wsi->dxgi.factory;
+-   ID3D12CommandQueue *queue =
+-      (ID3D12CommandQueue *)wsi->wsi->win32.get_d3d12_command_queue(device);
++   IUnknown *queue = wsi->wsi->win32.get_d3d11_device ?
++      (IUnknown *)wsi->wsi->win32.get_d3d11_device(device) :
++      (IUnknown *)wsi->wsi->win32.get_d3d12_command_queue(device);
++   if (!queue)
++      return VK_ERROR_INITIALIZATION_FAILED;
+
+    DXGI_ALPHA_MODE alpha_mode;
+    switch (create_info->compositeAlpha) {
+@@ -867,11 +1022,17 @@
+    DXGI_SWAP_CHAIN_DESC1 desc = {
+       create_info->imageExtent.width,
+       create_info->imageExtent.height,
+-      DXGI_FORMAT_B8G8R8A8_UNORM,
++      wsi->wsi->win32.get_d3d11_device &&
++         (create_info->imageFormat == VK_FORMAT_R8G8B8A8_UNORM ||
++          create_info->imageFormat == VK_FORMAT_R8G8B8A8_SRGB) ?
++         DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM,
+       create_info->imageArrayLayers > 1,  // Stereo
+       { 1 },                              // SampleDesc
+       0,                                  // Usage (filled in below)
+-      create_info->minImageCount,
++      /* The D3D11 transfer targets import exactly two native allocations.
++       * Additional Vulkan images only expand the independent render pool.
++       */
++      wsi->wsi->win32.get_d3d11_device ? 2u : create_info->minImageCount,
+       DXGI_SCALING_STRETCH,
+       DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+       alpha_mode,
+@@ -884,7 +1045,7 @@
+    if (image_usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT))
+       desc.BufferUsage |= DXGI_USAGE_SHADER_INPUT;
+
+-   if (image_usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
++   if ((image_usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || wsi->wsi->win32.get_d3d11_device)
+       desc.BufferUsage |= DXGI_USAGE_RENDER_TARGET_OUTPUT;
+
+    IDXGISwapChain1 *swapchain1;
+@@ -961,7 +1122,8 @@
+
+    bool supports_dxgi = wsi->dxgi.factory &&
+                         wsi->dxgi.dcomp &&
+-                        wsi->wsi->win32.get_d3d12_command_queue;
++                        (wsi->wsi->win32.get_d3d12_command_queue ||
++                         wsi->wsi->win32.get_d3d11_device);
+    struct wsi_base_image_params *image_params = supports_dxgi ?
+       &dxgi_image_params.base : &cpu_image_params.base;
+
+@@ -980,6 +1142,10 @@
+    chain->base.acquire_next_image = wsi_win32_acquire_next_image;
+    chain->base.release_images = wsi_win32_release_images;
+    chain->base.queue_present = wsi_win32_queue_present;
++   if (wsi_device->win32.get_d3d11_device) {
++      chain->base.prepare_present = wsi_win32_prepare_present;
++      chain->base.finish_present = wsi_win32_finish_present;
++   }
+    chain->base.present_mode = wsi_swapchain_get_present_mode(wsi_device, create_info);
+    chain->extent = create_info->imageExtent;
+
+diff --git a/src/vulkan/wsi/wsi_common_private.h b/src/vulkan/wsi/wsi_common_private.h
+--- a/src/vulkan/wsi/wsi_common_private.h
++++ b/src/vulkan/wsi/wsi_common_private.h
+@@ -307,6 +307,8 @@
+    VkResult (*acquire_next_image)(struct wsi_swapchain *swap_chain,
+                                   const VkAcquireNextImageInfoKHR *info,
+                                   uint32_t *image_index);
++   VkResult (*prepare_present)(struct wsi_swapchain *swap_chain, uint32_t image_index);
++   void (*finish_present)(struct wsi_swapchain *swap_chain);
+    VkResult (*queue_present)(struct wsi_swapchain *swap_chain,
+                              uint32_t image_index,
+                              uint64_t present_id,
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -10,6 +10,7 @@
+ #include "tu_device.h"
+ #ifdef TU_HAS_WINDOWS
+ #include <io.h>
++extern const void *VKAPI_CALL tu_windows_get_composition_api();
+ #define close _close
+ #endif
+
+@@ -3487,6 +3488,10 @@
+ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+ tu_GetInstanceProcAddr(VkInstance _instance, const char *pName)
+ {
++#ifdef TU_HAS_WINDOWS
++   if (pName && !strcmp(pName, "vkGetA830CompositionInterface"))
++      return (PFN_vkVoidFunction)tu_windows_get_composition_api;
++#endif
+    VK_FROM_HANDLE(tu_instance, instance, _instance);
+    return vk_instance_get_proc_addr(instance != NULL ? &instance->vk : NULL,
+                                     &tu_instance_entrypoints,

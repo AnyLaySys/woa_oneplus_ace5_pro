@@ -23,6 +23,7 @@ typedef struct {
     ULONG CrmBwStates[2],CrmPerfStates[3][2];
     BOOLEAN CrmOwned,CrmPending;
     BOOLEAN ScmPending;
+    BOOLEAN StaticQosReady;
     BOOLEAN ScmResumeValid;
     ULONGLONG ScmResumeArgs[8];
     ULONG ScmAuditSequence;
@@ -43,6 +44,7 @@ typedef struct {
     ULONGLONG Deadline;
     WDFDMAENABLER DmaEnabler;
     WDFCOMMONBUFFER FrameBuffer;
+    BOOLEAN FrameContiguous;
     PVOID Frame;
     PMDL FrameMdl;
     PHYSICAL_ADDRESS FrameAddress;
@@ -85,6 +87,7 @@ NTSTATUS CamMnocQos(CAM *c,BOOLEAN apply);
 VOID CamDiagnostics(CAM *c,QCAM_DIAG *diag);
 NTSTATUS CamScmProbe(CAM *c);
 NTSTATUS CamScmQos(CAM *c);
+NTSTATUS CamEnsureStaticQos(CAM *c);
 NTSTATUS CamScmQosDiagnostic(CAM *c);
 NTSTATUS CamScmWaitqProbe(CAM *c);
 NTSTATUS CamScmWaitqContext(CAM *c);

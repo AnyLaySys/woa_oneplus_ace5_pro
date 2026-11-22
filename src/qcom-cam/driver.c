@@ -129,7 +129,19 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         goto done;
     }
     if(code==QCAM_FRAME_DIAGNOSTIC) {
-        if(input||c->DmaActive||c->RxActive||c->ScmPending||c->CdmPending){status=STATUS_DEVICE_BUSY;goto done;}
+        if(input||c->ScmPending||c->CdmPending||c->CrmPending||c->TbuPending){status=STATUS_DEVICE_BUSY;goto done;}
+        if(c->DmaActive||c->RxActive) {
+            if(!c->Powered||c->BusOn||c->PhyOn||
+               (CamRead(c->Base[CamTfe],0x2400)&1)||CamRead(c->Base[CamCsid],0xe04)||
+               ((CamRead(c->Base[CamCpas],0xf0)|CamRead(c->Base[CamCpas],0xf8))&1)) {
+                status=STATUS_DEVICE_BUSY;goto done;
+            }
+            const ULONG tbus[]={CamHfTbu,CamSfTbu};
+            for(ULONG i=0;i<RTL_NUMBER_OF(tbus);i++)
+                if(CamRead64(c->Base[tbus[i]],0xc10)||CamRead64(c->Base[tbus[i]],0xc20)) {
+                    status=STATUS_DEVICE_BUSY;goto done;
+                }
+        }
         if(!c->Frame||!c->FrameMdl){status=STATUS_DEVICE_NOT_READY;goto done;}
         PVOID buffer;status=WdfRequestRetrieveOutputBuffer(request,QCAM_FRAME_BYTES,&buffer,NULL);
         if(NT_SUCCESS(status)){KeFlushIoBuffers(c->FrameMdl,TRUE,TRUE);RtlCopyMemory(buffer,c->Frame,QCAM_FRAME_BYTES);bytes=QCAM_FRAME_BYTES;}
@@ -350,8 +362,8 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         if(!NT_SUCCESS(status)||NT_SUCCESS(off))c->Diag=diag;c->ProbeLimit=0;
         if(NT_SUCCESS(status))status=off;c->Info.Status=status;c->Diag.Status=status;goto done;
     }
-    if(code==QCAM_CAPTURE||code==QCAM_CAPTURE_DIAGNOSTIC||code==QCAM_CAPTURE_FRAME_DIAGNOSTIC||code==QCAM_CAPTURE_AUTO_DIAGNOSTIC||code==QCAM_CAPTURE_PREFETCH_DIAGNOSTIC||code==QCAM_CAPTURE_PRIMED_DIAGNOSTIC||code==QCAM_CAPTURE_CONTEXT_DIAGNOSTIC) {
-        c->ProbeLimit=0;c->PipelineLimit=code==QCAM_CAPTURE_CONTEXT_DIAGNOSTIC?11:code==QCAM_CAPTURE_PRIMED_DIAGNOSTIC?10:code==QCAM_CAPTURE_PREFETCH_DIAGNOSTIC?9:code==QCAM_CAPTURE_AUTO_DIAGNOSTIC?8:code==QCAM_CAPTURE_FRAME_DIAGNOSTIC?7:code==QCAM_CAPTURE_DIAGNOSTIC?6:0;
+    if(code==QCAM_CAPTURE||code==QCAM_CAPTURE_DIAGNOSTIC||code==QCAM_CAPTURE_FRAME_DIAGNOSTIC||code==QCAM_CAPTURE_AUTO_DIAGNOSTIC||code==QCAM_CAPTURE_PREFETCH_DIAGNOSTIC||code==QCAM_CAPTURE_PRIMED_DIAGNOSTIC||code==QCAM_CAPTURE_CONTEXT_DIAGNOSTIC||code==QCAM_CAPTURE_PACKED_DIAGNOSTIC) {
+        c->ProbeLimit=0;c->PipelineLimit=code==QCAM_CAPTURE_PACKED_DIAGNOSTIC?12:code==QCAM_CAPTURE_CONTEXT_DIAGNOSTIC?11:code==QCAM_CAPTURE_PRIMED_DIAGNOSTIC?10:code==QCAM_CAPTURE_PREFETCH_DIAGNOSTIC?9:code==QCAM_CAPTURE_AUTO_DIAGNOSTIC?8:code==QCAM_CAPTURE_FRAME_DIAGNOSTIC?7:code==QCAM_CAPTURE_DIAGNOSTIC?6:0;
         QCAM_CAPTURE_OPTIONS *source;PVOID buffer;
         status=WdfRequestRetrieveInputBuffer(request,sizeof(*source),(PVOID *)&source,NULL);
         if(!NT_SUCCESS(status))goto done;

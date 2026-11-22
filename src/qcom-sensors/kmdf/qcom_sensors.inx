@@ -15,7 +15,7 @@ KMDriverCopy=13
 
 [SourceDisksFiles]
 qcom_sensors.sys=1
-qcom_sensors_service.exe=1
+qcom_sensors.exe=1
 
 [Manufacturer]
 %ManufacturerString%=Qualcomm,NT$ARCH$.10.0...22000
@@ -35,7 +35,7 @@ FilterPosition=Lower
 [qcom_sensors.NT.Services]
 AddService=qcom_sensors,0,qcom_sensors_Service_Inst
 AddService=mshidkmdf,0x2,mshidkmdf_Service_Inst
-AddService=qcom_sensors_service,0,qcom_sensors_Daemon_Inst
+AddService=QcomSensors,0,QcomSensors_Service_Inst
 
 [mshidkmdf_Service_Inst]
 DisplayName    = %mshidkmdf.SvcName%
@@ -51,12 +51,12 @@ StartType      = 3
 ErrorControl   = 1
 ServiceBinary  = %13%\qcom_sensors.sys
 
-[qcom_sensors_Daemon_Inst]
+[QcomSensors_Service_Inst]
 DisplayName    = %SensorServiceDesc%
 ServiceType    = 16
 StartType      = 2
 ErrorControl   = 1
-ServiceBinary  = %13%\qcom_sensors_service.exe
+ServiceBinary  = %13%\qcom_sensors.exe
 
 [qcom_sensors.NT.Wdf]
 KmdfService=qcom_sensors, qcom_sensors_wdfsect
@@ -66,7 +66,7 @@ KmdfLibraryVersion=$KMDFVERSION$
 
 [KMDriverCopy]
 qcom_sensors.sys
-qcom_sensors_service.exe
+qcom_sensors.exe
 
 [Strings]
 ProviderString     = "AnyLaySys"

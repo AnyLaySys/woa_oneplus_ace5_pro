@@ -20,7 +20,8 @@ Windows 驱动配合本设备的 UEFI/ACPI 使用。Linux 适配由 `linux_onepl
 | `src/qcom-keys` | Qualcomm 物理按键及 PMIH010x 振动控制 |
 | `src/qcom-sensors/hall.inc` | AKM AK09970 霍尔磁场采样和三段拨键判定，复用按键及传感器包 |
 | `src/nxp-nfc` | NXP SN220T NFC 读卡驱动，硬件通信待验证 |
-| `src/qcom-ir` | 高通 SPI 红外发射及 Samsung M5 电源按钮，配套 boot 后实测 |
+| `src/qcom-ir` | Qualcomm SPI／GPI DMA 红外发射驱动，已实机验证 |
+| `src/qcom-ir/app` | 独立 Samsung M5 电源遥控 App，已实机验证 |
 | `src/qcom-cam` | Qualcomm SM8750 / Sony IMX906 主摄控制器及 AVStream 视频接口，实机采集待验证 |
 | `src/qcom-gpu` | Adreno 830 Windows 硬件执行驱动 |
 | `src/mesa/umd` | D3D DDI → Vulkan / Turnip 用户态后端 |
@@ -66,6 +67,8 @@ build.cmd qcom-charge
 build.cmd qcom-cpupwr
 build.cmd qcom-keys
 build.cmd nxp-nfc
+build.cmd qcom-ir
+build.cmd ir-remote
 build.cmd qcom-cam
 build.cmd qcom-gpu
 build.cmd --help
@@ -166,6 +169,12 @@ pnputil /add-driver ".\out\drv\qcom-gpu\qcom_gpu.inf" /install
 
 GPU 原生桌面路径为 DWM / D3D DDI → Vulkan 后端 → Turnip → WDDM → Qualcomm Adreno 830。DWM 硬件绘制、翻转和窗口拖动正常。设备名称为 `Qualcomm Adreno 830`，构建入口为 `build.cmd qcom-gpu`。下载、版本与工具链配置、编译和签名逻辑统一保存在 [build.cmd](build.cmd)，运行时生成的脚本和配置位于 `out/mesa`，最终驱动包位于 `out/drv/qcom-gpu`。`src/mesa` 仅保存驱动源码和 Mesa 源码补丁。
 
+D3D 前端按图像和缓冲的读写依赖同步，复用 framebuffer、描述符及实际绑定状态；共享纹理直接导入 GPU 图像，相同存储和区域的空拷贝直接跳过。
+
+DWM 的正常呈现只接受硬件翻转，扫描输出使用 DPU 直接扫描或 GPU 复制扫描。已删除内核 Present/Blt 的 CPU 像素复制、CPU 扫描输出、CPU 帧缓冲映射及系统应急写屏回调；硬件扫描路径初始化失败时返回错误。CPU 资源上传、分页和命令数据复制仍用于内存管理。
+
+Turnip 的 Win32 Vulkan 呈现通过共享 WDDM 纹理接入原生 D3D11 / DXGI 翻转交换链，再交给 DWM 合成。原生后缓冲的资源标识在交换链创建时通过一次 1×1 像素 GPU 读取获取，逐帧直接使用缓存的资源标识。Vulkan 渲染图像池与 DXGI 双后缓冲分开管理，支持游戏请求三张或更多 Vulkan 图像；原生交换链始终使用两份已导入的共享线性 allocation。渲染结果在 GPU 上复制到呈现缓冲，渲染与缓冲复用通过 WDDM fence 排序；此路径不再逐行复制像素到 CPU 位图或使用 GDI 上屏。OpenGL 的 WGL 呈现仍使用原有路径。
+
 GPU 按负载选择原厂档位，每 20 ms 采样，正常最低 342 MHz；工作积压时加速提频，持续活动时短暂保持已提升的频率。温控读取有效 GPU TSENS 通道的最高温度：87°C 限至 734 MHz，99°C 限至 160 MHz，降到 81°C 退出紧急档，降到 78°C 解除温度限频。温度不可读时使用最低档，温控与额外频率上限优先于负载和固定频率请求。调频与提交队列分开同步。显示提交注册 MPO1/2/3 主平面回调，仅报告一个 RGB 主平面。
 
 GPU 固定显存池为 64 MB。共享显存容量按 Windows 可见内存预算计算，并受剩余 GPU 地址空间约束，当前最大为 4 GB；物理页和页记录按需映射、分配与释放。
@@ -188,7 +197,7 @@ UFCS 认证文件 `credential.bin` 随音频包进入 DriverStore，与 `charge.
 
 `qcom-sensors` 通过 Windows 标准 HID 传感器接口提供环境光、简单方向、三轴陀螺仪和三轴加速度计，复用 `qcom-audio` 的 ADSP 通道。陀螺仪单位为度/秒，加速度单位为 g（包含重力）；两者最小及默认报告间隔为 20 ms。自动旋转与三轴加速度共用一条加速度订阅：仅旋转时请求 9 Hz，三轴应用订阅时请求 50 Hz，三轴需求结束后恢复旋转频率。Windows Gyrometer 和 Accelerometer 接口已实机验证。ADSP 的融合旋转向量通过同一个 HID 姿态设备提供 Compass（磁北航向）、Inclinometer（倾角）和 OrientationSensor（四元数与旋转矩阵）三个标准接口，最小及默认报告间隔为 100 ms；三者共用一条订阅。
 
-重力、线性加速度、相对姿态和地磁姿态也通过独立 HID 集合提供。磁力计、计步、活动状态和接近检测由同包的 UMDF SensorsCx 驱动提供，复用只读的 `QcomSensorData` 入口；入口只接受传感器查询。磁场单位为 µT；计步提供真实累计总步数，步态类型为 Unknown，累计时长不提供有效测量。活动状态接入 ADSP `activity_recognition`，支持 Unknown、Stationary、Walking、Running、InVehicle、Biking，置信度为 Low；固件未提供 Idle/Fidgeting。消息中的层级状态已按本机固件的发布器与消费端核对，步行事件已实测；RMD/AMD 保留为完整分类不可用时的静止/未知回退。跑步、骑行和乘车的实际识别准确性仍待实测。标准 API 已读到三轴磁场和活动状态；手持手机前后甩动后，ADSP 与 Windows 计步接口均读到累计计数 11，确认计步变化能够上报。实际步行准确性仍待验证。新增接口仅在应用订阅时轮询，订阅结束后 ADSP 需求在 5 秒内过期。HID 与原生接口统一使用 `QcomSensorData` 的单一读取 ABI，不包含原始事件采集或厂商服务探测接口。`qcom_sensors_service` 负责 ADSP 固件配置与注册初始化，是正常启动所需的服务。
+重力、线性加速度、相对姿态和地磁姿态也通过独立 HID 集合提供。磁力计、计步、活动状态和接近检测由同包的 UMDF SensorsCx 驱动提供，复用只读的 `QcomSensorData` 入口；入口只接受传感器查询。磁场单位为 µT；计步提供真实累计总步数，步态类型为 Unknown，累计时长不提供有效测量。活动状态接入 ADSP `activity_recognition`，支持 Unknown、Stationary、Walking、Running、InVehicle、Biking，置信度为 Low；固件未提供 Idle/Fidgeting。消息中的层级状态已按本机固件的发布器与消费端核对，步行事件已实测；RMD/AMD 保留为完整分类不可用时的静止/未知回退。跑步、骑行和乘车的实际识别准确性仍待实测。标准 API 已读到三轴磁场和活动状态；手持手机前后甩动后，ADSP 与 Windows 计步接口均读到累计计数 11，确认计步变化能够上报。实际步行准确性仍待验证。新增接口仅在应用订阅时轮询，订阅结束后 ADSP 需求在 5 秒内过期。HID 与原生接口统一使用 `QcomSensorData` 的单一读取 ABI，不包含原始事件采集或厂商服务探测接口。`QcomSensors`（`qcom_sensors.exe`） 负责 ADSP 固件配置与注册初始化，是正常启动所需的服务。
 
 原生驱动的承载控制器标记为不在设备管理器普通列表显示，原有四个标准接口继续供应用使用。接近检测通过 `ProximityDetection` 布尔字段提供，实机 Windows 事件已验证 0→1→0；不提供未经测量的毫米距离。SensorExplorer 部分页面可能不更新；交叉测试可使用 SensorInfo；接近距离未提供时不以 0 毫米代替。
 
@@ -196,7 +205,7 @@ UFCS 认证文件 `credential.bin` 随音频包进入 DriverStore，与 `charge.
 
 修改 ADSP 通道后，依次运行 `build.cmd qcom-audio` 和 `build.cmd qcom-sensors`。传感器包同时生成、签名 HID 驱动和原生 SensorsCx 驱动，两份 INF 都需安装。原生接口使用 `ROOT\QCOMSENSORNATIVE`，独立霍尔项使用 `ROOT\AKMHALL`；两者复用同一份原生 INF，首次安装时需创建对应根设备实例。更新底层通道后重启设备。
 
-AKM AK09970 霍尔传感器由 `qcom-keys` 通过专用 GPIO80/81 I²C 读取，ACPI 为按键设备声明对应的两个 GPIO 页；UEFI 保持原厂 `ldob1` 1.8 V 供电。`qcom-sensors` 额外提供名为 `AKM AK09970 Hall Sensor` 的 Windows CustomSensor：CustomValue0／1／2 为真实有符号 X／Y／Z 原始计数，CustomValue3 为三段位置（0 未确认、1 上、2 中、3 下）。不把未经校准的计数标作 µT。位置按原厂 X／Y 判定并经过两次采样确认；上档静音并关闭触控／按键振动，中档恢复声音但关闭振动，下档恢复声音和振动。静音由现有 `qcom_sensors_service` 调用 Core Audio 设置，不新增服务。实机已验证 AK09970 芯片识别与连续变化的真实三轴原始计数；三档声音／振动行为仍需逐档实测。各传感器源码平铺拆分，共有框架与文件对应关系见 [传感器源码说明](src/qcom-sensors/README.md)。
+AKM AK09970 霍尔传感器由 `qcom-keys` 通过专用 GPIO80/81 I²C 读取，ACPI 为按键设备声明对应的两个 GPIO 页；UEFI 保持原厂 `ldob1` 1.8 V 供电。`qcom-sensors` 额外提供名为 `AKM AK09970 Hall Sensor` 的 Windows CustomSensor：CustomValue0／1／2 为真实有符号 X／Y／Z 原始计数，CustomValue3 为三段位置（0 未确认、1 上、2 中、3 下）。不把未经校准的计数标作 µT。位置按原厂 X／Y 判定并经过两次采样确认；上档静音并关闭触控／按键振动，中档恢复声音但关闭振动，下档恢复声音和振动。静音由现有 `QcomSensors`（`qcom_sensors.exe`） 调用 Core Audio 设置，不新增服务。实机已验证 AK09970 芯片识别与连续变化的真实三轴原始计数；三档声音／振动行为仍需逐档实测。各传感器源码平铺拆分，共有框架与文件对应关系见 [传感器源码说明](src/qcom-sensors/README.md)。
 
 ## 触屏反馈
 

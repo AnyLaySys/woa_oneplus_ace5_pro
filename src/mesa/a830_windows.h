@@ -68,7 +68,8 @@ static windows_context *a830_context_new(HANDLE handle, const A830_HOST *host) {
    if(!ctx)return NULL;
    InitializeSRWLock(&ctx->submit_lock);
    if(host) {
-      if(host->Version!=2 || host->Size!=sizeof(A830_HOST))goto fail;
+      if(host->Version!=A830_HOST_VERSION || host->Size!=sizeof(A830_HOST) || !host->Synchronize ||
+         !host->OpenImage || !host->QueryImage || !host->CloseImage)goto fail;
       ctx->host=*host;ctx->completion=CreateEventW(NULL,TRUE,FALSE,NULL);
       HANDLE context=NULL;void *page=NULL;
       if(!ctx->completion || !a830_ioctl(handle,GPU_IOCTL_CLIENT_LEASE,NULL,0,&ctx->lease,sizeof(ctx->lease)) ||

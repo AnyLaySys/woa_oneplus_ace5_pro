@@ -135,7 +135,7 @@ void storage_destroy(Device *d,Storage &s) {
 }
 void buffer_recycle(Device *d,Storage &s) {
  if(s.buffer && s.map && s.size<=16777216 && d->buffer_cache_bytes+s.size<=67108864 && d->buffer_cache.size()<384) {
-   s.used=0;d->buffer_cache_bytes+=s.size;d->buffer_cache.push_back(s);s={};
+   s.used=0;s.stages=0;s.access=0;d->buffer_cache_bytes+=s.size;d->buffer_cache.push_back(s);s={};
  } else storage_destroy(d,s);
 }
 void storage_recycle(Device *d,Storage &s) {
@@ -155,7 +155,7 @@ static bool retire(Device *d,Batch &b) {
  if(!b.submitted)return true;
  if(!check(d,d->vk.WaitForFences(d->device,1,&b.fence,VK_TRUE,10000000000ull)))return false;
  d->completed=std::max(d->completed,b.submitted);b.submitted=0;
- for(auto &f:b.framebuffers)d->vk.DestroyFramebuffer(d->device,f.handle,nullptr);b.framebuffers.clear();
+ for(auto f:b.retired_framebuffers)d->vk.DestroyFramebuffer(d->device,f,nullptr);b.retired_framebuffers.clear();
  for(auto &v:b.retired_views){if(v.image)d->vk.DestroyImageView(d->device,v.image,nullptr);if(v.buffer)d->vk.DestroyBufferView(d->device,v.buffer,nullptr);}b.retired_views.clear();
  for(auto sampler:b.retired_samplers)d->vk.DestroySampler(d->device,sampler,nullptr);b.retired_samplers.clear();
  for(auto query:b.retired_queries)d->vk.DestroyQueryPool(d->device,query,nullptr);b.retired_queries.clear();
@@ -168,7 +168,7 @@ bool begin(Device *d) {
  if(FAILED(d->failure))return false;
  if(d->recording)return true;
  if(!retire(d,*d))return false;
- d->bound_pipeline=VK_NULL_HANDLE;d->bound_sets={};
+ d->bound_pipeline=VK_NULL_HANDLE;d->bound_sets={};d->bound={};
  VkCommandBufferBeginInfo ci{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};ci.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
  d->recording=check(d,d->vk.BeginCommandBuffer(d->cmd,&ci));return d->recording;
 }
@@ -177,17 +177,42 @@ void end_pass(Device *d) {
 
  d->vk.CmdEndRenderPass(d->cmd);d->render_pass=false;d->pass_views.clear();
 }
-void barrier(Device *d) {
-
+void access(Device *d,Storage &s,VkPipelineStageFlags stages,VkAccessFlags mask,bool attachment) {
  if(!begin(d))return;
- end_pass(d);
- VkMemoryBarrier memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER};memory.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_HOST_WRITE_BIT;memory.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_HOST_READ_BIT;
- d->vk.CmdPipelineBarrier(d->cmd,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|VK_PIPELINE_STAGE_HOST_BIT,0,1,&memory,0,nullptr,0,nullptr);
+ if(stages&VK_PIPELINE_STAGE_TRANSFER_BIT)end_pass(d);
+ const VkAccessFlags writes=VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
+ AccessState *shared=s.external?&d->shared_access[s.address]:nullptr;
+ VkPipelineStageFlags source=shared?shared->stages:s.stages;VkAccessFlags previous=shared?shared->mask:s.access;
+ bool external=shared && shared->used!=d->next_submit;
+ if(external){source|=VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT|VK_PIPELINE_STAGE_HOST_BIT;previous|=writes|VK_ACCESS_HOST_WRITE_BIT;}
+ bool transition=s.image && !s.initialized;
+ bool hazard=external || ((previous && ((previous|mask)&writes)) && !(attachment && d->render_pass && previous==mask && source==stages));
+ if(transition || hazard) {
+   end_pass(d);
+   if(s.image) {
+     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.srcAccessMask=previous;b.dstAccessMask=mask;
+     b.oldLayout=transition?(s.external?VK_IMAGE_LAYOUT_PREINITIALIZED:VK_IMAGE_LAYOUT_UNDEFINED):VK_IMAGE_LAYOUT_GENERAL;b.newLayout=VK_IMAGE_LAYOUT_GENERAL;
+     b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=s.image;b.subresourceRange={s.aspects,0,VK_REMAINING_MIP_LEVELS,0,VK_REMAINING_ARRAY_LAYERS};
+     d->vk.CmdPipelineBarrier(d->cmd,source?source:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,stages,0,0,nullptr,0,nullptr,1,&b);s.initialized=true;
+   } else {
+     VkBufferMemoryBarrier b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};b.srcAccessMask=previous;b.dstAccessMask=mask;
+     b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.buffer=s.buffer;b.size=VK_WHOLE_SIZE;
+     d->vk.CmdPipelineBarrier(d->cmd,source,stages,0,0,nullptr,1,&b,0,nullptr);
+   }
+   source=0;previous=0;
+ }
+ s.stages=source|stages;s.access=previous|mask;s.used=d->next_submit;
+ if(shared)*shared={s.stages,s.access,s.used};
+ if((s.map || s.external) && (mask&writes)){d->export_stages|=stages;d->export_access|=mask&writes;}
 }
 bool flush(Device *d,bool wait) {
  if(FAILED(d->failure))return false;
  if(d->recording) {
-   barrier(d);
+   end_pass(d);
+   if(d->export_stages) {
+     VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};b.srcAccessMask=d->export_access;b.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+     d->vk.CmdPipelineBarrier(d->cmd,d->export_stages,VK_PIPELINE_STAGE_HOST_BIT,0,1,&b,0,nullptr,0,nullptr);d->export_stages=0;d->export_access=0;
+   }
    if(!check(d,d->vk.EndCommandBuffer(d->cmd)))return false;
    d->recording=false;
    if(!check(d,d->vk.ResetFences(d->device,1,&d->fence)))return false;
@@ -216,7 +241,7 @@ bool image_create(Device *d,Resource *r,uint64_t address,unsigned size) {
  VkMemoryOpaqueCaptureAddressAllocateInfo replay{VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO};replay.opaqueCaptureAddress=address;
  VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};dedicated.image=r->storage.image;dedicated.pNext=address?&replay:nullptr;
  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.pNext=address?&dedicated:nullptr;ai.allocationSize=address?size:req.size;ai.memoryTypeIndex=type;
- r->storage.size=ai.allocationSize;r->storage.memory_type=type;r->storage.external=address!=0;
+ r->storage.size=ai.allocationSize;r->storage.memory_type=type;r->storage.external=address!=0;r->storage.address=address;r->storage.aspects=aspects(r->format);
  if(!address) {
    auto best=d->image_cache.end();
    for(auto it=d->image_cache.begin();it!=d->image_cache.end();++it) {
@@ -232,16 +257,15 @@ bool image_create(Device *d,Resource *r,uint64_t address,unsigned size) {
    d->vk.GetImageSubresourceLayout(d->device,r->storage.image,&sub,&layout);
    if(layout.rowPitch!=r->pitch || layout.offset){error(d,E_INVALIDARG);return false;}
  }
- if(!begin(d))return false;
- end_pass(d);
- VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.oldLayout=ci.initialLayout;b.newLayout=VK_IMAGE_LAYOUT_GENERAL;
- b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=r->storage.image;b.subresourceRange={aspects(r->format),0,r->levels,0,r->layers};
- b.srcAccessMask=address?VK_ACCESS_HOST_WRITE_BIT:0;b.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
- d->vk.CmdPipelineBarrier(d->cmd,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&b);
- r->storage.initialized=true;r->storage.used=d->next_submit;return true;
+ return true;
 }
 void view_destroy(Device *d,View *v) {
  if(v->image || v->buffer) {
+   for(auto it=d->framebuffers.begin();v->image && it!=d->framebuffers.end();) {
+     if(std::find(it->views.begin(),it->views.end(),v->image)==it->views.end()){++it;continue;}
+     if(begin(d))d->retired_framebuffers.push_back(it->handle);else d->vk.DestroyFramebuffer(d->device,it->handle,nullptr);
+     it=d->framebuffers.erase(it);
+   }
    if((d->recording || d->submitted || d->pending.submitted) && begin(d))d->retired_views.push_back({v->image,v->buffer});
    else {if(v->image)d->vk.DestroyImageView(d->device,v->image,nullptr);if(v->buffer)d->vk.DestroyBufferView(d->device,v->buffer,nullptr);}
  }
@@ -290,6 +314,17 @@ static HRESULT WINAPI host_render(void *user,const void *commands,UINT size) {
 static void WINAPI host_destroy(void *user) {
  Device *d=(Device *)user;if(d->context){D3DDDICB_DESTROYCONTEXT c={d->context};d->callbacks.pfnDestroyContextCb(d->runtime,&c);d->context=nullptr;}
 }
+static HRESULT WINAPI host_synchronize(void *user,unsigned object,uint64_t value,BOOL signal) {
+ Device *d=(Device *)user;EnterCriticalSection(&d->lock);HRESULT hr=E_NOINTERFACE;
+ if(signal && d->callbacks.pfnSignalSynchronizationObject2Cb) {
+   D3DDDICB_SIGNALSYNCHRONIZATIONOBJECT2 p{};p.hContext=d->context;p.ObjectCount=1;p.ObjectHandleArray[0]=object;p.FenceValue=value;
+   hr=d->callbacks.pfnSignalSynchronizationObject2Cb(d->runtime,&p);
+ } else if(!signal && d->callbacks.pfnWaitForSynchronizationObject2Cb) {
+   D3DDDICB_WAITFORSYNCHRONIZATIONOBJECT2 p{};p.hContext=d->context;p.ObjectCount=1;p.ObjectHandleArray[0]=object;p.FenceValue=value;
+   hr=d->callbacks.pfnWaitForSynchronizationObject2Cb(d->runtime,&p);
+ }
+ LeaveCriticalSection(&d->lock);return hr;
+}
 bool initialize(Device *d) {
 
  HMODULE self=nullptr;WCHAR path[MAX_PATH];
@@ -316,7 +351,7 @@ bool initialize(Device *d) {
  UINT family=0;while(family<family_count && !(families[family].queueFlags&VK_QUEUE_GRAPHICS_BIT))family++;if(family==family_count)return false;
  float priority=1;VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};qci.queueFamilyIndex=family;qci.queueCount=1;qci.pQueuePriorities=&priority;
  VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};dci.queueCreateInfoCount=1;dci.pQueueCreateInfos=&qci;dci.pEnabledFeatures=&features;
- A830_HOST host={2,sizeof(A830_HOST),d,host_create,host_render,host_destroy};set(&host);VkResult result=d->vk.CreateDevice(d->physical,&dci,nullptr,&d->device);set(nullptr);
+ A830_HOST host={A830_HOST_VERSION,sizeof(A830_HOST),d,host_create,host_render,host_destroy,host_synchronize,open_present_image,query_present_image,close_present_image};set(&host);VkResult result=d->vk.CreateDevice(d->physical,&dci,nullptr,&d->device);set(nullptr);
  if(!check(d,result))return false;
 #define LOAD_DEVICE(name) {auto p=d->vk.GetDeviceProcAddr(d->device,"vk" #name);if(p)d->vk.name=(PFN_vk##name)p;}
  VK_FUNCTIONS(LOAD_DEVICE)
@@ -361,7 +396,7 @@ void destroy(Device *d) {
    flush(d,true);d->vk.DeviceWaitIdle(d->device);
    for(auto &p:d->pipelines){d->vk.DestroyPipeline(d->device,p.second.handle,nullptr);d->vk.DestroyRenderPass(d->device,p.second.pass,nullptr);}
    for(Batch *b:{static_cast<Batch *>(d),&d->pending}) {
-     for(auto &f:b->framebuffers)d->vk.DestroyFramebuffer(d->device,f.handle,nullptr);
+     for(auto f:b->retired_framebuffers)d->vk.DestroyFramebuffer(d->device,f,nullptr);
      for(auto &s:b->temporary)storage_destroy(d,s);
      for(auto &s:b->renamed)storage_destroy(d,s);
      for(auto &v:b->retired_views){if(v.image)d->vk.DestroyImageView(d->device,v.image,nullptr);if(v.buffer)d->vk.DestroyBufferView(d->device,v.buffer,nullptr);}
@@ -371,6 +406,7 @@ void destroy(Device *d) {
      if(b->fence)d->vk.DestroyFence(d->device,b->fence,nullptr);
      if(b->commands)d->vk.DestroyCommandPool(d->device,b->commands,nullptr);
    }
+   for(auto &f:d->framebuffers)d->vk.DestroyFramebuffer(d->device,f.handle,nullptr);d->framebuffers.clear();
    for(auto &s:d->buffer_cache)storage_destroy(d,s);
    for(auto &s:d->image_cache)storage_destroy(d,s);
    view_destroy(d,&d->dummy_view);storage_destroy(d,d->dummy_buffer);storage_destroy(d,d->dummy_image.storage);

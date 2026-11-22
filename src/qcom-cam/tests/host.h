@@ -36,7 +36,7 @@ typedef int32_t NTSTATUS;
 enum { CamCci,CamCpas,CamCrm,CamCc,CamGcc,CamSmmu };
 #include "uapi.h"
 typedef struct {
-    PUCHAR Base[6]; QCAM_INFO Info; BOOLEAN Faulted,Powered,DmaActive,RxActive,ScmAvailable,ScmPending,CdmPending,CrmPending,ReceiverVerified,ScmWaitqKnown,ScmFastWaitq;
+    PUCHAR Base[6]; QCAM_INFO Info; BOOLEAN Faulted,Powered,DmaActive,RxActive,ScmAvailable,ScmPending,CdmPending,CrmPending,ReceiverVerified,ScmWaitqKnown,ScmFastWaitq,StaticQosReady;
     QCAM_DIAG Diag; QCAM_TRACE Trace;
     BOOLEAN FrameRouteOwned,TbuPending;
     BOOLEAN ScmResumeValid;
@@ -57,6 +57,7 @@ NTSTATUS CamCciRead(CAM *c,UCHAR slave,USHORT address,PUCHAR buffer,ULONG bytes)
 NTSTATUS CamCciWrite(CAM *c,UCHAR slave,USHORT address,const UCHAR *buffer,ULONG bytes);
 NTSTATUS CamScmProbe(CAM *c);
 NTSTATUS CamScmQos(CAM *c);
+NTSTATUS CamEnsureStaticQos(CAM *c);
 NTSTATUS CamScmQosDiagnostic(CAM *c);
 NTSTATUS CamScmWaitqProbe(CAM *c);
 NTSTATUS CamScmWaitqContext(CAM *c);

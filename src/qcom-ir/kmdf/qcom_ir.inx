@@ -3,7 +3,7 @@ Signature="$WINDOWS NT$"
 Class=System
 ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
 Provider=%Provider%
-DriverVer=11/21/2026,26.11.21.5
+DriverVer=11/22/2026,26.11.22.28
 CatalogFile=qcom_ir.cat
 PnpLockdown=1
 [DestinationDirs]
@@ -12,7 +12,6 @@ DriverCopy=13
 1=%Description%,,,
 [SourceDisksFiles]
 qcom_ir.sys=1
-qcom_ir_power.exe=1
 [Manufacturer]
 %Manufacturer%=Devices,NT$ARCH$.10.0...22000
 [Devices.NT$ARCH$.10.0...22000]
@@ -21,7 +20,6 @@ qcom_ir_power.exe=1
 CopyFiles=DriverCopy
 [DriverCopy]
 qcom_ir.sys
-qcom_ir_power.exe
 [Install.NT.Services]
 AddService=qcom_ir,0x00000002,Service
 [Service]

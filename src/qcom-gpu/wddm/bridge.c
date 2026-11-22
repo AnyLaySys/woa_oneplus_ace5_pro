@@ -121,18 +121,11 @@ static VOID SharedRelease(A830_ALLOCATION *allocation) {
     if(InterlockedCompareExchange(&allocation->ScanoutReferences,0,0))return;
     if(Bridge.Adapter && A830DpuReferences(Bridge.Adapter,allocation->Buffer.Physical))return;
     if(allocation->Buffer.Mdl) {
-        A830_ADAPTER *adapter=Bridge.Adapter;
-        BOOLEAN scanout=(allocation->Resource.Flags&A830_RESOURCE_PRIMARY) && adapter;
-        if(scanout) {
-            ExWaitForRundownProtectionRelease(&adapter->ScanoutAccess);
-            if(adapter->ScanoutCpu==allocation->Buffer.Cpu){adapter->ScanoutCpu=NULL;adapter->ScanoutPitch=0;InterlockedExchange(&adapter->FlipPending,0);}
-        }
         RemoveEntryList(&allocation->Entry);
         if(Bridge.Hardware && Bridge.Hardware->Online) {
             GpuUnmap(Bridge.Hardware,0,&allocation->Buffer);
         }
         if(!A830ScanoutFree(Bridge.Adapter,&allocation->Buffer))GpuFree(&allocation->Buffer);
-        if(scanout)ExReInitializeRundownProtection(&adapter->ScanoutAccess);
     }
     ExFreePoolWithTag(allocation,GPU_TAG);
 }
@@ -199,7 +192,7 @@ static VOID LoadPowerPolicy(GPU *gpu) {
     ZwClose(key);
 }
 static VOID Governor(PVOID context) {
-    A830_BRIDGE *g=context;LARGE_INTEGER interval;interval.QuadPart=-200000;
+    A830_BRIDGE *g=context;LARGE_INTEGER interval;interval.QuadPart=-DVFS_SAMPLE_100NS;
     while(KeWaitForSingleObject(&g->GovernorStop,Executive,KernelMode,FALSE,&interval)==STATUS_TIMEOUT) {
         if(ExAcquireRundownProtection(&g->ClockAccess)) {
             if(g->Hardware)GpuGovern(g->Hardware);

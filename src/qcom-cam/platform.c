@@ -196,7 +196,7 @@ NTSTATUS CamPowerOn(CAM *c) {
     CamDelay(1000);status=CamReset(c,TRUE);CamDelay(8000);
     if(!NT_SUCCESS(status))return status;
     if(c->ProbeLimit==9)return STATUS_SUCCESS;
-    c->Powered=TRUE;c->Info.Stage=2;
+    c->StaticQosReady=FALSE;c->Powered=TRUE;c->Info.Stage=2;
     status=CamCciInit(c);
     if(NT_SUCCESS(status)&&c->ProbeLimit==10)return STATUS_SUCCESS;
     if(NT_SUCCESS(status)){c->Info.Stage=3;status=CamSensorInit(c);}
@@ -214,7 +214,7 @@ NTSTATUS CamPowerOff(CAM *c) {
         if(!NT_SUCCESS(reset))return reset;
         CamDelay(1000);
     }
-    c->Configured=FALSE;c->Powered=FALSE;
+    c->Configured=FALSE;c->Powered=FALSE;c->StaticQosReady=FALSE;
     while(c->SavedCount) {
         CAM_SAVE *s=&c->Saved[c->SavedCount-1];
         if(s->Base==c->Base[CamMnoc]) {
