@@ -17,6 +17,21 @@ static NTSTATUS Allocate(GPU_BO *bo,ULONG size,MEMORY_CACHING_TYPE cache) {
 }
 NTSTATUS GpuAllocate(GPU_BO *bo,ULONG size){return Allocate(bo,size,MmWriteCombined);}
 NTSTATUS GpuAllocateCached(GPU_BO *bo,ULONG size){return Allocate(bo,size,MmCached);}
+NTSTATUS GpuAllocateContiguous(GPU_BO *bo,ULONG size,MEMORY_CACHING_TYPE cache,ULONGLONG maximum,ULONG boundary) {
+    if(!size || size>GPU_BUFFER_LIMIT || maximum<size-1)return STATUS_INVALID_BUFFER_SIZE;
+    PHYSICAL_ADDRESS low={0},high,skip;high.QuadPart=maximum;skip.QuadPart=boundary;
+    size=(size+4095)&~4095u;
+    PUCHAR cpu=MmAllocateContiguousMemorySpecifyCache(size,low,high,skip,cache);
+    if(!cpu)return STATUS_INSUFFICIENT_RESOURCES;
+    PMDL mdl=IoAllocateMdl(cpu,size,FALSE,FALSE,NULL);
+    if(!mdl){MmFreeContiguousMemory(cpu);return STATUS_INSUFFICIENT_RESOURCES;}
+    MmBuildMdlForNonPagedPool(mdl);
+    bo->Cpu=cpu;bo->Mdl=mdl;bo->Size=size;bo->Physical=MmGetPhysicalAddress(cpu).QuadPart;
+    bo->Contiguous=TRUE;bo->Cached=cache==MmCached;
+    RtlZeroMemory(cpu,size);KeMemoryBarrier();
+    if(bo->Cached)KeFlushIoBuffers(mdl,TRUE,TRUE);
+    return STATUS_SUCCESS;
+}
 VOID GpuFree(GPU_BO *bo) {
     if(!bo->Mdl)return;
     if(bo->Contiguous)MmFreeContiguousMemory(bo->Cpu);

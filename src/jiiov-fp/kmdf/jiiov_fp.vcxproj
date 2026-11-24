@@ -21,7 +21,7 @@
   <PropertyGroup>
     <TargetName>jiiov_fp</TargetName>
     <FpVersionDate Condition="'$(FpVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</FpVersionDate>
-    <FpRevision Condition="'$(FpRevision)' == ''">3</FpRevision>
+    <FpRevision Condition="'$(FpRevision)' == ''">32</FpRevision>
     <FpDriverDate>$([System.DateTime]::Parse('$(FpVersionDate)').ToString('MM/dd/yyyy'))</FpDriverDate>
     <FpDriverVersion>$([System.DateTime]::Parse('$(FpVersionDate)').ToString('yy.M.d')).$(FpRevision)</FpDriverVersion>
     <FpDriverVersionComma>$([System.String]::Copy('$(FpDriverVersion)').Replace('.', ','))</FpDriverVersionComma>
@@ -37,7 +37,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\driver.c" /><ClCompile Include="..\platform.c" /><ClCompile Include="..\power.c" /><ClCompile Include="..\spi.c" />
-    <ClCompile Include="..\registers.c" /><MARMASM Include="..\scm.asm" />
+    <ClCompile Include="..\registers.c" /><ClCompile Include="..\qtee.c" /><ClCompile Include="..\audit.c" /><ClCompile Include="..\storage.c" /><MARMASM Include="..\scm.asm" />
     <ClInclude Include="..\fingerprint.h" /><ClInclude Include="..\uapi.h" />
     <ResourceCompile Include="jiiov_fp.rc" /><Inf Include="jiiov_fp.inx" /><FilesToPackage Include="$(TargetPath)" />
     <FilesToPackage Include="$(OutDir)jiiov_fp_check.exe" />

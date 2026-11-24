@@ -47,6 +47,7 @@ static NTSTATUS Spmi(CAM *c,PUCHAR base,UCHAR reg,UCHAR *value,BOOLEAN write) {
 }
 
 NTSTATUS CamReset(CAM *c,BOOLEAN high) {
+    if(c->Sensor==1||c->Sensor==3){PUCHAR b=c->Base[CamTlmm]+(c->Sensor==1?178:7)*0x1000;CamWrite(b,4,high?2:0);return STATUS_SUCCESS;}
     if(!c->ResetWrite)return STATUS_DEVICE_NOT_READY;
     UCHAR value=high?0x80:0;
     return Spmi(c,c->ResetWrite,0x44,&value,TRUE);
@@ -64,11 +65,17 @@ NTSTATUS CamPmic(CAM *c,ULONG ppid,UCHAR reg,UCHAR *value,BOOLEAN write) {
 }
 
 static NTSTATUS ResetPrepare(CAM *c) {
+    c->ResetRead=c->ResetWrite=NULL;
+    if(c->Sensor==1||c->Sensor==3) {
+        ULONG off=(c->Sensor==1?178:7)*0x1000;NTSTATUS status=CamSave(c,c->Base[CamTlmm],off+4,0);
+        if(NT_SUCCESS(status))status=CamSave(c,c->Base[CamTlmm],off,(CamRead(c->Base[CamTlmm],off)&~0x3ffu)|0x1200);
+        if(NT_SUCCESS(status))c->ResetOwned=TRUE;return status;
+    }
     PUCHAR b=c->Base[CamSpmi];ULONG count=CamRead(b,4)&0x7ff,version=CamRead(b,0);
     if(version<0x70000000||version>=0x80000000||!count||count>1024)return STATUS_REVISION_MISMATCH;
     for(ULONG i=0;i<count;i++) {
         ULONG entry=CamRead(b,0x2000+4*i);
-        if(((entry>>8)&0xfff)!=0x88c||(CamRead(c->Base[CamOwners],4*i)&7))continue;
+        if(((entry>>8)&0xfff)!=(c->Sensor==2?0x68cu:0x88cu)||(CamRead(c->Base[CamOwners],4*i)&7))continue;
         c->ResetRead=c->Base[CamObserve]+i*0x20;c->ResetWrite=c->Base[CamChannels]+i*0x1000;
     }
     if(!c->ResetWrite)return STATUS_ACCESS_DENIED;
@@ -162,6 +169,39 @@ static NTSTATUS Domain(CAM *c,ULONG offset) {
     c->Diag.Observed=CamRead(b,offset+4);return status;
 }
 
+static const ULONG MclkPllRegisters[]={0,4,0x10,0x14,0x18,0x1c,0x20,0x24,0x28,0x2c,0x30};
+
+static NTSTATUS Mclk24(CAM *c) {
+    PUCHAR b=c->Base[CamMclk];ULONG mode=CamRead(b,0),opmode=CamRead(b,4);
+    if((mode&1)&&(opmode&1)&&CamRead(b,0x10)!=50)return STATUS_DEVICE_BUSY;
+    for(ULONG i=0;i<RTL_NUMBER_OF(MclkPllRegisters);i++)c->MclkPllSaved[i]=CamRead(b,MclkPllRegisters[i]);
+    c->MclkPllOwned=TRUE;
+    if(!((mode&1)&&(opmode&1))) {
+        const CAM_REG regs[]={{0,mode&~7u,0},{4,0,0},{0x10,50,0},{0x14,0,0},{0x18,0,0},
+            {0x1c,0x12000000,0},{0x20,0x00890263,0},{0x24,0x1af04237,0},{0x28,0,0},{0x2c,0,0},{0x30,0,0}};
+        for(ULONG i=0;i<RTL_NUMBER_OF(regs);i++)CamWrite(b,regs[i].Address,regs[i].Value);
+        CamWrite(b,0,(mode&~7u)|6);CamWrite(b,4,1);
+        NTSTATUS status=CamWait(b,0,0x80000000,0x80000000,10000);if(!NT_SUCCESS(status))return status;
+    }
+    CamWrite(b,0x14,CamRead(b,0x14)|7);CamWrite(b,0,CamRead(b,0)|1);
+    ULONG rcg=0x4054;NTSTATUS status=CamSave(c,b,rcg+8,(CamRead(b,rcg+8)&~255u)|1);
+    if(NT_SUCCESS(status))status=CamSave(c,b,rcg+12,(CamRead(b,rcg+12)&~255u)|0xfc);
+    if(NT_SUCCESS(status))status=CamSave(c,b,rcg+16,(CamRead(b,rcg+16)&~255u)|0xfb);
+    if(NT_SUCCESS(status))status=Rcg(c,b,rcg,0x2313);
+    for(ULONG i=0;i<RTL_NUMBER_OF(MclkPllRegisters);i++)c->Trace.Mclk[i]=CamRead(b,MclkPllRegisters[i]);c->Trace.Mclk[11]=CamRead(b,rcg+4);
+    return status;
+}
+
+static VOID MclkRestore(CAM *c) {
+    if(!c->MclkPllOwned)return;PUCHAR b=c->Base[CamMclk];
+    if(!((c->MclkPllSaved[0]&1)&&(c->MclkPllSaved[1]&1))) {
+        CamWrite(b,0,CamRead(b,0)&~1u);CamWrite(b,4,0);
+        for(ULONG i=RTL_NUMBER_OF(MclkPllRegisters);i>2;i--)CamWrite(b,MclkPllRegisters[i-1],c->MclkPllSaved[i-1]);
+        CamWrite(b,4,c->MclkPllSaved[1]);
+    } else CamWrite(b,0x14,c->MclkPllSaved[3]);
+    CamWrite(b,0,c->MclkPllSaved[0]);c->MclkPllOwned=FALSE;
+}
+
 NTSTATUS CamPowerOn(CAM *c) {
     if(c->ScmPending||c->CdmPending||c->TbuPending||c->FrameRouteOwned)return STATUS_DEVICE_BUSY;
     if(c->Powered)return STATUS_SUCCESS;
@@ -183,7 +223,7 @@ NTSTATUS CamPowerOn(CAM *c) {
     if(NT_SUCCESS(status)&&c->ProbeLimit==4)return STATUS_SUCCESS;
     if(NT_SUCCESS(status))status=Pll(c,0,0x3e,0x8000,0x8400);
     if(NT_SUCCESS(status)&&c->ProbeLimit==5)return STATUS_SUCCESS;
-    const ULONG rcgs[]={0x1126c,0x100a4,0x100dc,0x10100,0x11364};
+    const ULONG rcgs[]={c->Sensor==2?0x11288:0x1126c,c->Sensor==1?0x10024:c->Sensor==2?0x10064:c->Sensor==3?0x10084:0x100a4,0x100dc,0x10100,0x11364};
     const ULONG cfgs[]={0x10021f,0x100105,0x100203,0x10020e,0x100001};
     for(ULONG i=0;i<RTL_NUMBER_OF(rcgs)&&NT_SUCCESS(status);i++)status=Rcg(c,cc,rcgs[i],cfgs[i]);
     if(NT_SUCCESS(status)&&c->ProbeLimit==6)return STATUS_SUCCESS;
@@ -194,12 +234,13 @@ NTSTATUS CamPowerOn(CAM *c) {
         c->Trace.DebugXo[0]=CamRead(cc,0x11348);c->Trace.DebugXo[1]=c->Trace.DebugXo[0]|1;
         status=Branch(c,cc,0x11348);c->Trace.DebugXo[2]=CamRead(cc,0x11348);
     }
-    const ULONG clocks[]={0x113ac,0x1139c,0x11360,0x11320,0x11324,0x11284,0x100bc,0x100c0,0x10020,0x11148,0x1114c};
+    const ULONG clocks[]={0x113ac,0x1139c,0x11360,0x11320,0x11324,c->Sensor==2?0x112a0:0x11284,c->Sensor==1?0x1003c:c->Sensor==2?0x1007c:c->Sensor==3?0x1009c:0x100bc,c->Sensor==1?0x10040:c->Sensor==2?0x10080:c->Sensor==3?0x100a0:0x100c0,0x10020,0x11148,0x1114c};
     for(ULONG i=0;i<RTL_NUMBER_OF(clocks)&&NT_SUCCESS(status);i++)status=Branch(c,cc,clocks[i]);
     if(NT_SUCCESS(status)&&c->ProbeLimit==8)return STATUS_SUCCESS;
-    if(NT_SUCCESS(status))status=Rcg(c,mclk,0x401c,1);
-    if(NT_SUCCESS(status))status=Branch(c,mclk,0x4034);
-    const ULONG pins[]={90,115,116};
+    if(NT_SUCCESS(status)&&c->Sensor==2)status=Mclk24(c);
+    if(NT_SUCCESS(status)&&c->Sensor!=2)status=Rcg(c,mclk,0x4000+(c->Sensor==1?0:c->Sensor==2?3:c->Sensor==3?4:1)*0x1c,1);
+    if(NT_SUCCESS(status))status=Branch(c,mclk,0x4018+(c->Sensor==1?0:c->Sensor==2?3:c->Sensor==3?4:1)*0x1c);
+    const ULONG pins[]={c->Sensor==1?89:c->Sensor==2?92:c->Sensor==3?93:90,c->Sensor==1?113:c->Sensor==2?117:115,c->Sensor==1?114:c->Sensor==2?118:116};
     for(ULONG i=0;i<RTL_NUMBER_OF(pins)&&NT_SUCCESS(status);i++) {
         ULONG off=pins[i]*0x1000;status=CamSave(c,tlmm,off,(CamRead(tlmm,off)&~0x3ffu)|4u|(i?0:0x200u));
     }
@@ -283,14 +324,14 @@ NTSTATUS CamPowerOff(CAM *c) {
         }
         c->SavedCount--;
     }
-    NTSTATUS rails=CamRailsOff(c);
+    MclkRestore(c);NTSTATUS rails=CamRailsOff(c);
     if(!NT_SUCCESS(rails))return rails;
-    if(c->ResetOwned) {
+    if(c->ResetOwned&&c->Sensor!=1&&c->Sensor!=3) {
         for(UCHAR i=0;i<7;i++) {
             UCHAR value=c->ResetSaved[i];NTSTATUS restore=Spmi(c,c->ResetWrite,(UCHAR)(0x40+i),&value,TRUE);
             if(!NT_SUCCESS(restore))return restore;
         }
         c->ResetOwned=FALSE;
     }
-    return status;
+    c->ResetOwned=FALSE;return status;
 }

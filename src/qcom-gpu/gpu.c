@@ -113,7 +113,7 @@ NTSTATUS GpuSubmitRootBatch(GPU *g,const GPU_IB *entries,ULONG count,ULONGLONG r
 }
 static NTSTATUS Microcode(GPU *g,GPU_BO *bo,PCWSTR name,ULONGLONG address) {
     PUCHAR data=NULL;ULONG size=0;
-    NTSTATUS status=GpuFirmware(name,&data,&size);
+    NTSTATUS status=GpuFirmware(NULL,name,0x40000,&data,&size);
     if(!NT_SUCCESS(status))return status;
     if(size<8 || (size&3))status=STATUS_INVALID_IMAGE_FORMAT;
     else {

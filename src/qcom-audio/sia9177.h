@@ -85,6 +85,7 @@ typedef struct _SIA_DEVICE {
     BOOLEAN RetainedDma;
     SIA_PCM Stream[2];
     volatile LONG Volume[2],Gain[2],Muted[2];
+    volatile LONG MicVolume;
 } SIA_DEVICE, *PSIA_DEVICE;
 
 typedef struct _SIA_MIC SIA_MIC, *PSIA_MIC;
@@ -142,6 +143,7 @@ BOOLEAN SiaGprPop (_In_ PSIA_DEVICE Dev, _Out_ SIA_GPR_PACKET *Packet);
 VOID SiaAudioRun (_In_ PSIA_DEVICE Dev);
 NTSTATUS SiaAmpsProbe (PSIA_DEVICE Dev);
 NTSTATUS SiaMicStart (PSIA_DEVICE Dev, PSIA_MIC *Mic, VOID (*Service)(PSIA_DEVICE, PVOID), PVOID Audio);
+NTSTATUS SiaMicGain (PSIA_DEVICE Dev, PSIA_MIC Mic);
 VOID SiaMicPoll (PSIA_MIC Mic);
 VOID SiaMicStop (PSIA_DEVICE Dev, PSIA_MIC Mic);
 

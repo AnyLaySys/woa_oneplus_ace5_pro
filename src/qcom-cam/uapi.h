@@ -1,4 +1,9 @@
 #pragma once
+#define QCAM_VIDEO_FORMAT CTL_CODE(FILE_DEVICE_UNKNOWN,0x93f,METHOD_BUFFERED,FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define QCAM_VIDEO_MAX_WIDTH 4096u
+#define QCAM_VIDEO_MAX_HEIGHT 3072u
+#define QCAM_VIDEO_MAX_BYTES (QCAM_VIDEO_MAX_WIDTH*QCAM_VIDEO_MAX_HEIGHT*3/2)
+typedef struct { ULONG Size,Abi,Width,Height; } QCAM_VIDEO_FORMAT_OPTIONS;
 #define QCAM_FOCUS_ROI CTL_CODE(FILE_DEVICE_UNKNOWN,0x93c,METHOD_BUFFERED,FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 #define QCAM_ROI_FOCUS 1u
 typedef struct { ULONG Size,Abi,Flags,Left,Top,Right,Bottom; } QCAM_ROI_OPTIONS;
@@ -202,6 +207,11 @@ typedef struct {
     ULONG PdafCsid[2][8],PdafWriter[2][4];
     ULONGLONG FrameTimings[6];ULONG FrameTimingCount;
     LONG FocusPhase,FocusDefocus;ULONG FocusConfidence,FocusWindow;
+    ULONG Dphy[12];
+    ULONG FramePollCount,PairWaitCount;
+    ULONGLONG PairEofGap,PairEofGapMax;
+    ULONG Mclk[12];
+    ULONG StrobeCount;ULONGLONG StrobeStarted;
 } QCAM_TRACE;
 
 typedef struct {
@@ -209,3 +219,6 @@ typedef struct {
     ULONG Smr[128],S2cr[128],Cbar[128],Sctlr[128];
     ULONG FaultStatus,FaultSyndrome[3];
 } QCAM_DMA_ROUTE_INFO;
+
+#define QCAM_CAMERA CTL_CODE(FILE_DEVICE_UNKNOWN,0x93e,METHOD_BUFFERED,FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+typedef struct { ULONG Size,Abi,Index,Probe; } QCAM_CAMERA_OPTIONS;

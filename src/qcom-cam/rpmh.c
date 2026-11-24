@@ -3,7 +3,7 @@
 #include "rpmh-message.h"
 
 typedef struct { ULONG Address,Original[3],Count; BOOLEAN Changed; } VOTE;
-typedef struct { ULONG Major,Count; BOOLEAN Fault; VOTE Votes[18]; } POWER;
+typedef struct { ULONG Major,Count; BOOLEAN Fault; VOTE Votes[20]; } POWER;
 
 static USHORT Db16(PUCHAR b,ULONG off) { return (USHORT)(CamRead(b,off&~3u)>>(8*(off&3))); }
 
@@ -145,6 +145,11 @@ NTSTATUS CamRailsOn(CAM *c) {
         c->Diag.Step=110+i;
         NTSTATUS status=Vote(c,names[i],voltages[i],i<4);
         if(!NT_SUCCESS(status))return status;
+    }
+    if(c->Sensor) {
+        NTSTATUS extra=Vote(c,"ldom4",2800,FALSE);if(!NT_SUCCESS(extra))return extra;
+        if(c->Sensor==1){extra=Vote(c,"ldoi1",1200,FALSE);if(!NT_SUCCESS(extra))return extra;}
+        if(c->Sensor==3){extra=Vote(c,"ldom1",1050,FALSE);if(!NT_SUCCESS(extra))return extra;}
     }
     c->Diag.Step=120;NTSTATUS status=Bcm(c,"MM0",FALSE);
     if(!NT_SUCCESS(status))return status;

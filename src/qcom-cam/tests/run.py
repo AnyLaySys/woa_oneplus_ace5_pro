@@ -6,7 +6,7 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='qcom-cam-test-') as directory:
     work = Path(directory)
-    for source, name in [(root / 'cci.c', 'cci.c'), (root / 'focus.c', 'focus.c'), (root / 'pdaf.h', 'pdaf.h'), (root / 'tests/focus.c', 'focus-test.c'), (root / 'tests/pdaf.c', 'pdaf-test.c'), (root / 'scm.c', 'scm.c'), (root / 'dma-table.h', 'dma-table.h'),
+    for source, name in [(root / 'flash.c', 'flash.c'), (root / 'tests/flash.c', 'flash-test.c'), (root / 'cci.c', 'cci.c'), (root / 'focus.c', 'focus.c'), (root / 'pdaf.h', 'pdaf.h'), (root / 'tests/focus.c', 'focus-test.c'), (root / 'tests/pdaf.c', 'pdaf-test.c'), (root / 'scm.c', 'scm.c'), (root / 'dma-table.h', 'dma-table.h'),
                          (root / 'dma-address.h', 'dma-address.h'),
                          (root / 'frame-map-table.h', 'frame-map-table.h'),
                          (root / 'dma-idle.h', 'dma-idle.h'),
@@ -44,3 +44,13 @@ with tempfile.TemporaryDirectory(prefix='qcom-cam-test-') as directory:
     subprocess.run(['cc', '-std=c17', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
                     '-g', str(work / 'pdaf-test.c'), '-o', str(work / 'pdaf-test')], check=True)
     subprocess.run([str(work / 'pdaf-test')], check=True)
+
+    subprocess.run(['cc', '-std=c17', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined', '-g', str(work / 'flash.c'), str(work / 'flash-test.c'), '-o', str(work / 'flash-test')], check=True)
+    subprocess.run([str(work / 'flash-test')], check=True)
+
+if shutil.which('aarch64-linux-gnu-g++') and shutil.which('qemu-aarch64'):
+    with tempfile.TemporaryDirectory(prefix='qcom-cam-arm64-') as directory:
+        binary = Path(directory) / 'raw-mapped'
+        subprocess.run(['aarch64-linux-gnu-g++', '-O2', '-static', '-Wall', '-Wextra', '-Werror',
+                        str(root / 'tests/raw-mapped.cpp'), str(root / 'video/raw-row.cpp'), '-o', str(binary)], check=True)
+        subprocess.run(['qemu-aarch64', str(binary)], check=True)

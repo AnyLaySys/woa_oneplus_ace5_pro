@@ -5,7 +5,7 @@
 
 static ULONG Read(PUCHAR base,ULONG offset) {return READ_REGISTER_ULONG((PULONG)(base+offset));}
 static VOID Write(PUCHAR base,ULONG offset,ULONG value) {WRITE_REGISTER_ULONG((PULONG)(base+offset),value);}
-static NTSTATUS Command(PUCHAR base,UCHAR command,USHORT brightness) {
+static NTSTATUS Command(PUCHAR base,const ULONG *words,ULONG bytes) {
     static const ULONG offsets[]={0x11c,4,0x3c,0x84,0x100,0x104,0x110,0x15c,0x390,0x4c};
     ULONG saved[RTL_NUMBER_OF(offsets)];
     for(ULONG i=0;i<RTL_NUMBER_OF(offsets);i++)saved[i]=Read(base,offsets[i]);
@@ -17,10 +17,10 @@ static NTSTATUS Command(PUCHAR base,UCHAR command,USHORT brightness) {
     Write(base,0x100,0);Write(base,0x104,0);
     Write(base,0x110,(saved[6]&0xaaaaaaa8u)|1);
     Write(base,0x15c,0x30006);
-    Write(base,0x17c,command==0x51?0xC0390003u:0x80050000u|command);
-    Write(base,0x17c,command==0x51?0xFF000051u|((ULONG)(brightness>>8)<<8)|((ULONG)(brightness&0xFF)<<16):0);
+    for(ULONG i=0;i<bytes/4;i++)Write(base,0x17c,words[i]);
+    if((bytes/4)&1)Write(base,0x17c,0);
     Write(base,0x3c,(saved[2]&0x00ffffffu)|0x10000000u);
-    Write(base,0x390,saved[8]&~2u);Write(base,0x4c,command==0x51?8:4);
+    Write(base,0x390,saved[8]&~2u);Write(base,0x4c,bytes);
     Write(base,0x90,1);
     NTSTATUS status=STATUS_IO_TIMEOUT;
     LARGE_INTEGER pause;pause.QuadPart=-10000;
@@ -33,11 +33,24 @@ static NTSTATUS Command(PUCHAR base,UCHAR command,USHORT brightness) {
     for(ULONG i=RTL_NUMBER_OF(offsets);i--;)if(offsets[i]!=0x110)Write(base,offsets[i],saved[i]);
     return status;
 }
-static NTSTATUS Send(UCHAR command,USHORT brightness) {
+static NTSTATUS Transfer(const ULONG *words,ULONG bytes) {
     PHYSICAL_ADDRESS address;address.QuadPart=0x0ae94000;
     PUCHAR base=MmMapIoSpaceEx(address,0x400,PAGE_READWRITE|PAGE_NOCACHE);
     if(!base)return STATUS_INSUFFICIENT_RESOURCES;
-    NTSTATUS status=Command(base,command,brightness);MmUnmapIoSpace(base,0x400);return status;
+    NTSTATUS status=Command(base,words,bytes);MmUnmapIoSpace(base,0x400);return status;
+}
+static NTSTATUS Send(UCHAR command,USHORT brightness) {
+    ULONG words[]={command==0x51?0xc0390003u:0x80050000u|command,
+        0xff000051u|((ULONG)(brightness>>8)<<8)|((ULONG)(brightness&255)<<16)};
+    return Transfer(words,command==0x51?8:4);
+}
+NTSTATUS A830PanelRefresh(ULONG hz) {
+    if(hz!=60 && hz!=90 && hz!=120)return STATUS_INVALID_PARAMETER;
+    ULONG words[]={0x40390004,0x00a55aff,0x00150060|(hz==90?2u<<8:0),
+        0x40390004,0x02a55aff,0x40390009,0x008000b0,0x00000010,0,
+        0x40390004,0x2da55aff,0x40390003,(hz==90?0x85u:0x83u)|(hz==60?1u<<8:0),
+        0x001500f2|(hz==60?1u<<8:0),0xc0390004,0x00a55aff};
+    return Transfer(words,sizeof(words));
 }
 static VOID Reference(PVOID context) {UNREFERENCED_PARAMETER(context);}
 static NTSTATUS Levels(PVOID context,ULONG bytes,PUCHAR count,PUCHAR levels) {

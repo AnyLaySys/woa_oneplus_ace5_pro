@@ -47,6 +47,7 @@ VOID GpuWrite(PUCHAR base,ULONG offset,ULONG value);
 NTSTATUS GpuPoll(PUCHAR base,ULONG offset,ULONG mask,ULONG value,ULONG timeout);
 NTSTATUS GpuAllocate(GPU_BO *bo,ULONG size);
 NTSTATUS GpuAllocateCached(GPU_BO *bo,ULONG size);
+NTSTATUS GpuAllocateContiguous(GPU_BO *bo,ULONG size,MEMORY_CACHING_TYPE cache,ULONGLONG maximum,ULONG boundary);
 VOID GpuFree(GPU_BO *bo);
 NTSTATUS GpuMap(GPU *gpu,ULONG vm,GPU_BO *bo,ULONGLONG address);
 VOID GpuUnmap(GPU *gpu,ULONG vm,GPU_BO *bo);

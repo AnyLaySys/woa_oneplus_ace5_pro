@@ -18,11 +18,13 @@ NTSTATUS CamFocusInit(CAM *c) {
     if(NT_SUCCESS(status)) {
         c->LensReady=TRUE;c->FocusPosition=((ULONG)data[0]<<2)|(data[1]>>6);
         while(c->FocusPosition<QCAM_FOCUS_MIN&&NT_SUCCESS(status)){status=Position(c,min(c->FocusPosition+32,QCAM_FOCUS_MIN));CamDelay(7000);}
-        c->FocusCalibration.Valid=FALSE;
-        UCHAR calibration[1024];NTSTATUS calibrated=STATUS_SUCCESS;
-        for(ULONG offset=0;offset<sizeof(calibration)&&NT_SUCCESS(calibrated);offset+=32)
-            calibrated=CamCciRead(c,0x50,(USHORT)(0x530+offset),calibration+offset,32);
-        if(NT_SUCCESS(calibrated))CamPdafCalibration(&c->FocusCalibration,calibration,sizeof(calibration));
+        if(!c->MainFocusCalibration.Valid) {
+            UCHAR calibration[1024];NTSTATUS calibrated=STATUS_SUCCESS;
+            for(ULONG offset=0;offset<sizeof(calibration)&&NT_SUCCESS(calibrated);offset+=32)
+                calibrated=CamCciRead(c,0x50,(USHORT)(0x530+offset),calibration+offset,32);
+            if(NT_SUCCESS(calibrated))CamPdafCalibration(&c->MainFocusCalibration,calibration,sizeof(calibration));
+        }
+        c->FocusCalibration=c->MainFocusCalibration;
         c->FocusFlags=c->FocusCalibration.Valid?QCAM_FOCUS_AUTO|QCAM_FOCUS_CONTINUOUS:QCAM_FOCUS_MANUAL;
         c->FocusTarget=min(c->FocusPosition,QCAM_FOCUS_MAX);c->FocusWait=2;c->FocusStable=c->FocusMisses=c->FocusSamples=c->FocusSequence=0;c->FocusComplete=FALSE;c->FocusWindowValid=FALSE;RtlZeroMemory(&c->FocusResult,sizeof(c->FocusResult));
     }

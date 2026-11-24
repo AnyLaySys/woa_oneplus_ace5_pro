@@ -1,17 +1,19 @@
 #include "adapter.h"
 #include "dpu.h"
 
-ULONG A830RefreshRate(const A830_ADAPTER *a) {UNREFERENCED_PARAMETER(a);return 60u;}
-D3DKMDT_VIDEO_SIGNAL_INFO A830Signal(const A830_ADAPTER *a) {
+const ULONG A830RefreshRates[3]={120,90,60};
+ULONG A830RefreshRate(const A830_ADAPTER *a) {return (ULONG)ReadAcquire(&a->RefreshRate);}
+D3DKMDT_VIDEO_SIGNAL_INFO A830SignalAtRate(const A830_ADAPTER *a,ULONG hz) {
     D3DKMDT_VIDEO_SIGNAL_INFO s={0};s.VideoStandard=D3DKMDT_VSS_OTHER;
     s.ActiveSize.cx=a->DisplayInfo.Width;s.ActiveSize.cy=a->DisplayInfo.Height;
     s.TotalSize.cx=s.ActiveSize.cx+80;s.TotalSize.cy=s.ActiveSize.cy+20;
-    s.PixelRate=(UINT64)s.TotalSize.cx*s.TotalSize.cy*A830RefreshRate(a)/10000*10000;
+    s.PixelRate=(UINT64)s.TotalSize.cx*s.TotalSize.cy*hz/10000*10000;
     s.VSyncFreq.Numerator=(UINT)s.PixelRate;s.VSyncFreq.Denominator=s.TotalSize.cx*s.TotalSize.cy;
     s.HSyncFreq.Numerator=(UINT)s.PixelRate;s.HSyncFreq.Denominator=s.TotalSize.cx;s.ScanLineOrdering=D3DDDI_VSSLO_PROGRESSIVE;
 
     return s;
 }
+D3DKMDT_VIDEO_SIGNAL_INFO A830Signal(const A830_ADAPTER *a) {return A830SignalAtRate(a,A830RefreshRate(a));}
 
 BOOLEAN A830RotationSupported(D3DKMDT_VIDPN_PRESENT_PATH_ROTATION rotation) {
     if(rotation==D3DKMDT_VPPR_IDENTITY)return TRUE;
@@ -25,12 +27,16 @@ VOID A830Edid(const A830_ADAPTER *a,UCHAR e[128]) {
         c.BluePoint.cx,c.BluePoint.cy,c.WhitePoint.cx,c.WhitePoint.cy};
     for(ULONG i=0;i<8;i++){e[25+i/4]|=(UCHAR)((points[i]&3u)<<(6-(i%4)*2));e[27+i]=(UCHAR)(points[i]>>2);}
     for(ULONG i=38;i<54;i++)e[i]=1;
-    D3DKMDT_VIDEO_SIGNAL_INFO signal=A830Signal(a);
-    ULONG w=signal.ActiveSize.cx,h=signal.ActiveSize.cy,clock=(ULONG)(signal.PixelRate/10000);
-    UCHAR *d=e+54;d[0]=(UCHAR)clock;d[1]=(UCHAR)(clock>>8);
-    d[2]=(UCHAR)w;d[3]=80;d[4]=(UCHAR)((w>>8)<<4);d[5]=(UCHAR)h;d[6]=20;d[7]=(UCHAR)((h>>8)<<4);
-    d[8]=8;d[9]=16;d[10]=0x22;d[12]=71;d[13]=157;d[17]=0x18;
-    e[75]=0xfc;RtlCopyMemory(e+77,"BOE AA590\n   ",13);e[93]=e[111]=0x10;
+    for(ULONG i=0;i<3;i++) {
+        UCHAR *d=e+54+i*18;
+        if(i && !A830DpuCanRefresh((PVOID)a)){d[3]=0x10;continue;}
+        D3DKMDT_VIDEO_SIGNAL_INFO signal=A830SignalAtRate(a,A830RefreshRates[i]);
+        ULONG w=signal.ActiveSize.cx,h=signal.ActiveSize.cy,clock=(ULONG)(signal.PixelRate/10000);
+        d[0]=(UCHAR)clock;d[1]=(UCHAR)(clock>>8);
+        d[2]=(UCHAR)w;d[3]=80;d[4]=(UCHAR)((w>>8)<<4);d[5]=(UCHAR)h;d[6]=20;d[7]=(UCHAR)((h>>8)<<4);
+        d[8]=8;d[9]=16;d[10]=0x22;d[12]=71;d[13]=157;d[17]=0x18;
+    }
+    e[111]=0xfc;RtlCopyMemory(e+113,"BOE AA590\n   ",13);
     ULONG sum=0;for(ULONG i=0;i<127;i++)sum+=e[i];e[127]=(UCHAR)(0u-sum);
 }
 BOOLEAN A830PathSupport(D3DKMDT_VIDPN_PRESENT_PATH *path,const DXGKARG_ENUMVIDPNCOFUNCMODALITY *args) {
@@ -108,6 +114,7 @@ NTSTATUS APIENTRY A830Query(HANDLE adapter,const DXGKARG_QUERYADAPTERINFO *q) {
         DXGK_COLORIMETRY *color=q->pOutputData;
         if(integrated) {
             DXGK_QUERYINTEGRATEDDISPLAYOUT2 *c=q->pOutputData;color=&c->Colorimetry;
+            c->NativeTiming=A830SignalAtRate(a,120);
             c->DisplayTechnology=DXGK_DT_OLED;c->IntendedUsage=DXGK_DU_GENERIC;
             c->DescriptorType=DXGK_DDT_EDID;
             c->LinkCapabilities.WideColorSpace=c->LinkCapabilities.HighColorSpace=c->LinkCapabilities.DynamicColorSpace=A830DpuEnabled(a);

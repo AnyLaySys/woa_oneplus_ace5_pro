@@ -20,6 +20,7 @@ Windows 驱动配合本设备的 UEFI/ACPI 使用。Linux 适配由 `linux_onepl
 | `src/qcom-keys` | Qualcomm 物理按键及 PMIH010x 振动控制 |
 | `src/qcom-sensors/hall.inc` | AKM AK09970 霍尔磁场采样和三段拨键判定，复用按键及传感器包 |
 | `src/nxp-nfc` | NXP SN220T NFC 读卡驱动，硬件通信待验证 |
+| `src/jiiov-fp` | Jiiov JV0301 TA 初始化及白圈采图已通过，Windows Hello 尚未完成 |
 | `src/qcom-ir` | Qualcomm SPI／GPI DMA 红外发射驱动，已实机验证 |
 | `src/qcom-ir/app` | 独立 Samsung M5 电源遥控 App，已实机验证 |
 | `src/qcom-cam` | Qualcomm SM8750 / Sony IMX906 主摄控制器及 AVStream 视频接口，实机采集待验证 |
@@ -67,6 +68,7 @@ build.cmd qcom-charge
 build.cmd qcom-cpupwr
 build.cmd qcom-keys
 build.cmd nxp-nfc
+build.cmd jiiov-fp
 build.cmd qcom-ir
 build.cmd ir-remote
 build.cmd qcom-cam
@@ -95,6 +97,7 @@ PowerShell 中对应使用 `.\build.cmd`，例如：
 | `qcom-cpupwr` | `out/drv/qcom-cpupwr` | qcom_cpupwr.inf / qcom_cpupwr.sys / qcom_cpupwr.cat |
 | `qcom-keys` | `out/drv/qcom-keys` | qcom_keys.inf / qcom_keys.sys / qcom_keys.cat |
 | `nxp-nfc` | `out/drv/nxp-nfc` | nxp_nfc.inf / nxp_nfc.dll / nxp_nfc.cat |
+| `jiiov-fp` | `out/drv/jiiov-fp` | jiiov_fp.inf / jiiov_fp.sys / jiiov_fp.cat / jiiov_fp_check.exe |
 | `qcom-cam` | `out/drv/qcom-cam` | qcom_cam.inf/sys/cat、qcom_cam_video.inf/sys/cat、采集及枚举工具 |
 | `qcom-gpu` | `out/drv/qcom-gpu` | qcom_gpu.inf/sys/cat、ARM64/x64 UMD、OpenGL、Turnip、运行库及 GPU 固件 |
 
@@ -165,6 +168,44 @@ pnputil /add-driver ".\out\drv\qcom-gpu\qcom_gpu.inf" /install
 
 5. 重启设备。
 
+## 指纹
+
+Ace 5 Pro 的 Jiiov JV0301 TA 初始化命令 `0x7d0` 已在实机返回 `0`，白圈照明下的按压采图也已返回 `CaptureResult=0`。当前驱动 `26.11.24.28` 已通过 `sui@192.168.3.157` 部署为 `oem824.inf`，设备 `ROOT\DEVGEN\JIIOV_FP` 状态 OK；已核对实际运行的服务文件为 28 版，SHA256 为 `8cc40ece1a5889e9ac1bc6c48d0e9fb65fe362cb723f08480e01d4fa4a6d9197`。27 版驱动包及初始化、白圈采图成果保留。Windows Hello 录入、模板保存和匹配仍未完成。
+
+本机项目号为 `24811`，使用 GPIO78 复位、L14B 3.008 V 供电。原厂 SPI 为 QUP1 SE2（`0xA88000`、GPIO40–43、25 MHz），使用 GPI DMA。驱动先从原厂区域加载 `uff_spi`，配置传感器供电和时钟，再以原厂 op2 卸载 SPI TA，随后加载本机 `uff_jv`。命令共享对象为 64 KiB，覆盖 `0xf000 + 命令长度`；命令头 `+0x1c` 提供日志区长度。TA 文本和 SCM 日志分别保存在 `C:\Windows\Temp\jiiov-fp-ta.log`、`jiiov-fp-tee.log`，日志 I/O 状态独立于 TA 返回值。
+
+原 `0x13ba` 的根因是 OTP 缓存持久化失败。TA 的传感器寄存器初始化成功后，`gpFileIO_Write_File` 返回 `0xf0100003`（TEE 存储不可用）；原厂 `tee_write` 还要求保存同名 `.normal` 副本。驱动现通过 UID87（`CRegisterListenerCBO`）、op0、counts `0x201` 注册两种文件服务：GPFILE listener `0x7000` 使用 128 KiB 共享区，普通 FILE listener **10** 使用 32 KiB 共享区。`0x4000` 是 Secure UI，不是普通文件服务。文件使用实际 Windows I/O，映射到 `C:\Windows\System32\jiiov-fp\persist`，目录由驱动创建。路径和长度均检查，未知操作返回错误；TA 提供的加密文件字节保持原样。
+
+实机验证覆盖了缓存不存在和缓存已存在两条初始化路径。先备份 Windows 侧测试缓存，TA 从传感器读取 OTP 并生成 381 字节加密文件及 329 字节 `.normal` 副本，`ta-init` 返回成功；重载 TA 后，缓存 stat、读取、解密及算法初始化均成功，`InitResult=00000000`、`TeeStatus=00000000`、`Cleanup=00000000`、`Pinned=0`、`LiveObjects=0`。新读取的 329 字节 OTP 与从原厂 persist 只读提取的 `jv_opt_data.bin.normal` 逐字节一致。没有修改原厂 TA 或 Android 分区。
+
+在 `C:\DESIGN\WoA` 执行 `build.cmd jiiov-fp` 可生成签名的 ARM64 KMDF 驱动及诊断工具。将驱动包和 `src\jiiov-fp\tools\deploy.ps1` 复制到目标机后，管理员 PowerShell 可运行 `deploy.ps1 -PackagePath <驱动包目录>`。此脚本会核对 PnP 版本、服务实际指向的 DriverStore 文件和 SHA256；Windows 更新 INF 后偶尔保留旧服务路径，脚本会禁用指纹设备、更新服务指向并重新启用，同时保留旧路径用于恢复。
+
+目标机初始化验证命令：
+
+```powershell
+C:\Drivers\jiiov-fp-26.11.24.27\jiiov_fp_check.exe ta-init C:\Drivers\jiiov-fp-26.11.24.27\uff_spi.elf C:\Drivers\jiiov-fp-26.11.24.27\uff_jv.elf
+```
+
+`ta-init` 只执行完整 TA 初始化并释放资源；`capture <uff_spi.elf> <uff_jv.elf>` 继续发送 `0x7d4`，保留真实采图结果。`InitResult=ffffffff` 表示本次未执行 INIT。`jv-config <uff_jv.elf>` 通过原厂 `0x835` GET_TA_CONFIG 验证项目 `24811`、传感器 `G_OPTICAL_JV0301`、图标尺寸 `195`、位置 `260`、类型 `optical` 和亮度策略 `hbm`；请求长度为 `0x240`，配置 ID 在 `+0x30`、所需长度在 `+0x238`、结果在 `+0x38`，`hbm` 按内部请求读取 4 字节。
+
+初始化末尾，原厂 TA 执行 `JV0301SetPowerMode(2)` 并关闭 SPI。采图流程现先通过 `0x7d7` ENROLL_DOWN 唤醒至模式 8，再发送 `0x7d4`。无照明时已能读取 42,507 字节图像包，但曝光检查返回内部错误 114、业务错误 `0x13ed`。24 版实机按压白圈后，同一采图路径返回 `0`，中心均值 `2867`、`image_exp=0`、采图耗时约 `307ms`，清理成功且无保留对象。测试屏幕为 1264×2780，白圈直径 195，中心约 (632,2520)。`tools/capture-lit.ps1` 在交互桌面提供按压触发的测试，默认要求竖屏并恢复亮度；旋转坐标提供实验选项；只通过正常桌面图像及可用的 Windows 调光接口照明，尚未实现面板 HBM 联动。
+
+`sample-feature <uff_spi.elf> <uff_jv.elf>` 执行原厂验证算法启动 `0x7dc`、验证唤醒 `0x7dd`（160 字节）、采图、特征命令 `0x7d3` 和取消 `0x7e3`（48 字节）。26 版竖屏按压 5 次采图均返回 `0`，原厂算法日志 `retExtract=0`、`mgResult.status=0`、内部 `100 → ANC 300`。此前探针在特征附加返回字段 `+0x58` 放置 `ffffffff`，但原厂成功分支不会改写该字段，导致驱动误判失败。27 版遵循原厂零初始化，并分别报告必需命令返回 `FeatureCommandResult`、可选事件 `FeatureResult/FeatureValue`；未调用的诊断字段仍为 `ffffffff`，共享头 `+8` 继续使用完成哨兵，缺失响应不能判成功。命令成功仅证明算法调用完成，不能作为有效模板或指纹匹配成功的证据。
+
+27 版增加绑定客户端句柄的 `JFP_SESSION_BEGIN/SAMPLE/END/STATUS`，初始化后的 TA 和算法会话可跨采样请求复用，其他句柄的采样、结束和初始化请求返回忙；客户端关闭句柄时取消并清理，设备释放时也执行清理。`session-init <uff_spi.elf> <uff_jv.elf>` 实机验证初始化、句柄隔离和关闭自动清理均通过；`session-feature` 在同一会话内连续执行两轮验证唤醒、采图、特征命令，再取消并释放，实机 `Samples=2`、`CancelResult=0`、`Cleanup=0`、`Pinned=0`、`LiveObjects=0`。本轮无测试照明的质量日志 `img_eval_qty=0`，即使命令返回 `0` 也不能视为有效指纹。`tools/capture-lit.ps1 -ExtractFeature -ReuseSession` 的竖屏按压实测已完成 3 轮、6 张图，采图和特征命令全部返回 `0`；最新两张中心均值 `3123/3141`、`image_exp=0`、`img_eval_qty=46`，但 `mask_ratio=0`、`feature_size=4`，尚未证明生成可用于匹配的有效特征。UAPI 版本为 6。
+
+这些接口目前不录入模板、不产生认证结果，也尚未接入 WBF 的异步取消采图、engine/storage adapter 和授权录入。`spi-service` 有界探针已确认 UID16 底层 SPI 服务拒绝 Windows 客户端（对象错误 `0x0b`，发生在打开传感器之前）；原厂 SDK 图像导出函数没有接入该 TA 外层命令表。原厂 `0x7d6` 录入入口会校验预录入 challenge、HMAC 和超时，Windows Hello 录入需解决合法授权与模板映射，不能把诊断命令成功直接作为身份验证。
+
+TA 仍报告未加载 `jv_normalized_calibration.bin`；此前只读检查的原厂 `/data` 和 `/fingerprint` 中没有找到该文件，校准状态和匹配能力仍需实机验证。不能单凭 `mask_ratio=0`、`feature_size=4` 判定特征无效：本地 Ace 5 原厂 Android 参考日志也输出相同字段，随后实际匹配分数 `0.706650`、`is_accepted=1`，Android 收到认证成功回调。该对照来自 Ace 5，尚不能证明本机 Ace 5 Pro 的采样可匹配，但纠正了此前把这两个字段作为失败判据的推断。
+
+2026-11-24 切回本机 Android 后，ADB 确认原厂 HAL 二进制与此前提取的文件 SHA256 一致；指纹服务存在、没有已录入模板、没有永久或临时锁定。用户在原厂设置中实际尝试录入，界面立即显示“再试一次”；HAL 日志明确为 `invalid cali data`、录入返回 `12013`（`0x2eed`），HMAC 密钥已就绪。核对原厂代码可见，该错误由 `getFactoryCaliState()` 检查 `vendor.fingerprint.cali` 触发；root 下实读该属性为 `0`，`/mnt/vendor/persist/fingerprint/fingerprint_cali.bin` 缺失。失败发生在原厂校准状态检查，尚未进入此次录入的 TA 采图；这不证明传感器损坏，也不能把 root 当作已证实的唯一原因。没有找到可恢复的本机校准文件，按用户要求暂时搁置指纹适配，待恢复并验证原厂校准后继续。已退出录入测试并恢复普通 HAL 日志级别，没有生成模板或认证结果。
+
+用户随后恢复 WoA 验证，28 版新增 `enroll-preflight` 有界诊断（UAPI 7）。Windows 持久化目录仍缺失归一化校准文件，实机 INIT 和 `0x7d5` PRE_ENROLL 均返回 `0`，命令 `+0x78` 生成非零 challenge。未提供授权的 `0x7d6` 请求准确返回 `0x69`（`invalid challenge for token:0`），取消、POST_ENROLL 和资源清理全部为 `0`，没有采样或保存模板。原厂代码确认 INIT 在校准加载失败后记录状态并继续；因此不能把恢复 Android 校准当成继续 WoA 适配的已证实前提。该负向测试尚未通过授权校验，不能证明后续录入和匹配不需要校准。详细证据见 `/home/fuck/fingerprint-ace5pro-20261124/calibration-validation/README.md`。
+
+原厂 Binder 动态日志请求附带的 TA 命令 `5000` 返回 `104`，对应此 TA 未实现该命令，不能当作初始化或采图失败的证据。28 版 WBDI 缓冲区、请求和采图不可用行为回归通过，`WinBioEnumBiometricUnits` 返回 Units=0；持续会话初始化、句柄隔离和关闭清理也通过。驱动不会在启动时自动执行这些诊断。
+
+主机验证入口 `python3 src/jiiov-fp/tests/run.py` 使用 ASan/UBSan，覆盖 JV0301 协议、QTEE 服务与回调边界、完整初始化与独立 INIT 路径、资源释放，以及 GP/普通文件 ABI、加密字节保留、路径和长度边界、EOF 和文件句柄清理。
+
 ## GPU 与 CPU
 
 GPU 原生桌面路径为 DWM / D3D DDI → Vulkan 后端 → Turnip → WDDM → Qualcomm Adreno 830。DWM 硬件绘制、翻转和窗口拖动正常。设备名称为 `Qualcomm Adreno 830`，构建入口为 `build.cmd qcom-gpu`。下载、版本与工具链配置、编译和签名逻辑统一保存在 [build.cmd](build.cmd)，运行时生成的脚本和配置位于 `out/mesa`，最终驱动包位于 `out/drv/qcom-gpu`。`src/mesa` 仅保存驱动源码和 Mesa 源码补丁。
@@ -201,7 +242,7 @@ UFCS 认证文件 `credential.bin` 随音频包进入 DriverStore，与 `charge.
 
 原生驱动的承载控制器标记为不在设备管理器普通列表显示，原有四个标准接口继续供应用使用。接近检测通过 `ProximityDetection` 布尔字段提供，实机 Windows 事件已验证 0→1→0；不提供未经测量的毫米距离。SensorExplorer 部分页面可能不更新；交叉测试可使用 SensorInfo；接近距离未提供时不以 0 毫米代替。
 
-实机没有注册 pressure 传感器，[OnePlus Ace 5 Pro 官方规格](https://www.oneplus.com/cn/ace-5-pro/specs)也未列出气压计；通用参考板的气压配置不能证明手机具备该硬件。目前不提供气压和气压高度。色温、环境色尚未接入标准接口，罗盘真北航向的磁偏角仍待校正。
+实机没有注册 pressure 传感器，[OnePlus Ace 5 Pro 官方规格](https://www.oneplus.com/cn/ace-5-pro/specs)也未列出气压计；通用参考板的气压配置不能证明手机具备该硬件。目前不提供气压和气压高度。色温复用 `wise_rgb` 的原厂结果，通过现有环境光 HID 接口上报 Kelvin，报告分辨率为 0.01 K；实机 Windows 标准 API 已验证连续色温及照度读数。环境色尚未接入标准接口，罗盘真北航向的磁偏角仍待校正。
 
 修改 ADSP 通道后，依次运行 `build.cmd qcom-audio` 和 `build.cmd qcom-sensors`。传感器包同时生成、签名 HID 驱动和原生 SensorsCx 驱动，两份 INF 都需安装。原生接口使用 `ROOT\QCOMSENSORNATIVE`，独立霍尔项使用 `ROOT\AKMHALL`；两者复用同一份原生 INF，首次安装时需创建对应根设备实例。更新底层通道后重启设备。
 

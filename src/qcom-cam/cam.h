@@ -5,12 +5,14 @@
 #include "pdaf.h"
 #include "video/raw-row.h"
 
-enum { CamGcc,CamCc,CamMclk,CamCci,CamPhy,CamCsid,CamTfe,CamCpas,CamNoc,CamSmmu,CamTlmm,CamSpmi,CamOwners,CamObserve,CamChannels,CamRsc,CamDb,CamCrm,CamCdm,CamHfTbu,CamSfTbu,CamMnoc,CamRpmh,CamRegionCount };
+enum { CamGcc,CamCc,CamMclk,CamCci,CamPhy,CamCsid,CamTfe,CamCpas,CamNoc,CamSmmu,CamTlmm,CamSpmi,CamOwners,CamObserve,CamChannels,CamRsc,CamDb,CamCrm,CamCdm,CamHfTbu,CamSfTbu,CamMnoc,CamRpmh,CamCci1,CamPhy1,CamPhy3,CamPhy4,CamRegionCount };
 typedef struct { ULONG Address,Value,Delay; } CAM_REG;
 typedef struct { USHORT Address; UCHAR Value; } SENSOR_REG;
 typedef struct { PUCHAR Base; ULONG Offset,Original,Config; BOOLEAN Rcg; } CAM_SAVE;
+typedef struct { PVOID Owner; ULONG Index,First,End; HANDLE Thread; KEVENT Ready,Done; USHORT Workspace[QCAM_VIDEO_MAX_WIDTH*6]; } CAM_VIDEO_WORKER;
 typedef struct {
     WDFDEVICE Device;
+    ULONG Sensor;
     PUCHAR Base[CamRegionCount];
     WDFWAITLOCK Lock;
     QCAM_INFO Info;
@@ -38,17 +40,20 @@ typedef struct {
     BOOLEAN LensReady;
     ULONG FocusPosition,FocusTarget,FocusFlags,FocusWait;
     LONG FocusStatus;
-    CAM_PDAF_CAL FocusCalibration;
+    CAM_PDAF_CAL FocusCalibration,MainFocusCalibration;
+    UCHAR MainQsc[3072];BOOLEAN MainQscValid;
     CAM_PDAF_RESULT FocusResult;
     LONG FocusWorkspace[2520];
-    USHORT VideoWorkspace[6144];
-    USHORT VideoWorkerWorkspace[6144];
+    USHORT VideoWorkspace[QCAM_VIDEO_MAX_WIDTH*6];
+    CAM_VIDEO_WORKER VideoWorkers[3];
     UCHAR VideoColors[3][1024];
     ULONG VideoGains[3];
-    ULONG VideoZoom,VideoRows[768];
-    CAM_RAW_BLOCK VideoBlocks[128];
-    HANDLE VideoThread;
-    KEVENT VideoReady,VideoDone;
+    ULONG VideoZoom,VideoWidth,VideoHeight,VideoBytes,VideoRows[QCAM_VIDEO_MAX_HEIGHT];
+    CAM_RAW_BLOCK VideoBlocks[QCAM_VIDEO_MAX_WIDTH/8];
+    CAM_RAW_BLOCK VideoDense[QCAM_VIDEO_MAX_WIDTH/16];
+    ULONG VideoColumns[QCAM_VIDEO_MAX_WIDTH];
+    BOOLEAN VideoCached;
+    ULONG VideoLinearGains[3];
     BOOLEAN VideoStopping;
     const UCHAR *VideoSource;
     PUCHAR VideoOutput;
@@ -77,6 +82,7 @@ typedef struct {
     ULONG FrameRoute[4];
     PUCHAR ResetRead,ResetWrite;
     UCHAR ResetSaved[7];
+    ULONG MclkPllSaved[11];BOOLEAN MclkPllOwned;
     BOOLEAN ResetOwned,Powered,Configured,DmaActive,RxActive,Faulted,BusOn,PhyOn,ScmAvailable;
     volatile LONG Online;
     WDFREQUEST Request;
@@ -120,6 +126,10 @@ VOID CamFlashFrame(CAM *c);
 NTSTATUS CamCciInit(CAM *c);
 NTSTATUS CamCciRead(CAM *c,UCHAR slave,USHORT address,PUCHAR buffer,ULONG bytes);
 NTSTATUS CamCciWrite(CAM *c,UCHAR slave,USHORT address,const UCHAR *buffer,ULONG bytes);
+VOID CamOtherSensorSnapshot(CAM *c);
+NTSTATUS CamOtherSensorInit(CAM *c);
+NTSTATUS CamOtherSensorStream(CAM *c,BOOLEAN on);
+NTSTATUS CamOtherSensorExposure(CAM *c,ULONG lines,ULONG gain);
 NTSTATUS CamSensorInit(CAM *c);
 NTSTATUS CamSensorStream(CAM *c,BOOLEAN on);
 NTSTATUS CamSensorExposure(CAM *c,ULONG lines,ULONG gain);
@@ -173,3 +183,7 @@ NTSTATUS CamPdafFrame(CAM *c);
 NTSTATUS CamPdafPrepare(CAM *c);
 NTSTATUS CamPdafCopy(CAM *c);
 VOID CamDmaInvalidate(PVOID base,ULONG span,ULONG step,ULONG count,ULONG offset);
+
+static __forceinline PUCHAR CamCciBase(CAM *c) {return c->Base[c->Sensor==2?CamCci1:CamCci];}
+static __forceinline PUCHAR CamPhyBase(CAM *c) {return c->Base[c->Sensor==1?CamPhy1:c->Sensor==2?CamPhy3:c->Sensor==3?CamPhy4:CamPhy];}
+static __forceinline ULONG CamCciMaster(CAM *c) {return c->Sensor?0:1;}

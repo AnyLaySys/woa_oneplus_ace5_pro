@@ -21,6 +21,9 @@ qcom_cam_video.sys=1
 
 [Sony.NT$ARCH$.10.0...22000]
 %DeviceDesc%=qcom_cam_video,QCOM\IMX906
+%WideDesc%=qcom_cam_wide,QCOM\IMX355
+%MacroDesc%=qcom_cam_macro,QCOM\OV02B10
+%FrontDesc%=qcom_cam_front,QCOM\IMX471
 
 [qcom_cam_video.NT]
 Include=ks.inf,KSCAPTUR.inf
@@ -42,6 +45,78 @@ HKR,,FriendlyName,,%DeviceDesc%
 [qcom_cam_video.NT.Services]
 AddService=qcom_cam_video,0x2,Service
 
+[qcom_cam_wide.NT]
+Include=ks.inf,KSCAPTUR.inf
+Needs=KS.Registration,KSCAPTUR.Registration.NT
+AddReg=Camera_wide
+CopyFiles=DriverCopy
+
+[qcom_cam_wide.NT.Interfaces]
+AddInterface=%KSCATEGORY_CAPTURE%,%FilterReference%,Interface_wide
+AddInterface=%KSCATEGORY_VIDEO%,%FilterReference%,Interface_wide
+AddInterface=%KSCATEGORY_VIDEO_CAMERA%,%FilterReference%,Interface_wide
+
+[Interface_wide]
+AddReg=InterfaceReg_wide
+
+[InterfaceReg_wide]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%WideDesc%
+
+[qcom_cam_wide.NT.Services]
+AddService=qcom_cam_video,0x2,Service
+
+[Camera_wide]
+HKR,,CameraIndex,0x00010001,1
+
+[qcom_cam_macro.NT]
+Include=ks.inf,KSCAPTUR.inf
+Needs=KS.Registration,KSCAPTUR.Registration.NT
+AddReg=Camera_macro
+CopyFiles=DriverCopy
+
+[qcom_cam_macro.NT.Interfaces]
+AddInterface=%KSCATEGORY_CAPTURE%,%FilterReference%,Interface_macro
+AddInterface=%KSCATEGORY_VIDEO%,%FilterReference%,Interface_macro
+AddInterface=%KSCATEGORY_VIDEO_CAMERA%,%FilterReference%,Interface_macro
+
+[Interface_macro]
+AddReg=InterfaceReg_macro
+
+[InterfaceReg_macro]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%MacroDesc%
+
+[qcom_cam_macro.NT.Services]
+AddService=qcom_cam_video,0x2,Service
+
+[Camera_macro]
+HKR,,CameraIndex,0x00010001,2
+
+[qcom_cam_front.NT]
+Include=ks.inf,KSCAPTUR.inf
+Needs=KS.Registration,KSCAPTUR.Registration.NT
+AddReg=Camera_front
+CopyFiles=DriverCopy
+
+[qcom_cam_front.NT.Interfaces]
+AddInterface=%KSCATEGORY_CAPTURE%,%FilterReference%,Interface_front
+AddInterface=%KSCATEGORY_VIDEO%,%FilterReference%,Interface_front
+AddInterface=%KSCATEGORY_VIDEO_CAMERA%,%FilterReference%,Interface_front
+
+[Interface_front]
+AddReg=InterfaceReg_front
+
+[InterfaceReg_front]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%FrontDesc%
+
+[qcom_cam_front.NT.Services]
+AddService=qcom_cam_video,0x2,Service
+
+[Camera_front]
+HKR,,CameraIndex,0x00010001,3
+
 [Service]
 DisplayName=%ServiceDesc%
 ServiceType=1
@@ -55,7 +130,10 @@ qcom_cam_video.sys
 [Strings]
 ProviderString="AnyLaySys"
 ManufacturerString="Sony"
-DeviceDesc="Sony IMX906 Camera"
+DeviceDesc="Sony IMX906 Main Camera"
+WideDesc="Sony IMX355 Ultrawide Camera"
+MacroDesc="OmniVision OV02B10 Macro Camera"
+FrontDesc="Sony IMX471 Front Camera"
 ServiceDesc="Sony IMX906 Camera Driver"
 DiskDesc="AnyLaySys Camera Video Driver"
 KSCATEGORY_CAPTURE="{65E8773D-8F56-11D0-A3B9-00A0C9223196}"

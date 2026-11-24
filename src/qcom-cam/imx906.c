@@ -15,6 +15,7 @@ static NTSTATUS Table(CAM *c,const SENSOR_REG *regs,ULONG count) {
 }
 
 NTSTATUS CamSensorInit(CAM *c) {
+    if(c->Sensor)return CamOtherSensorInit(c);
     UCHAR id[2];
     NTSTATUS status=CamCciRead(c,0x1a,0x0016,id,2);
     if(!NT_SUCCESS(status))return status;
@@ -24,17 +25,17 @@ NTSTATUS CamSensorInit(CAM *c) {
     status=Set(c,0x0100,0);
     if(NT_SUCCESS(status))status=Table(c,Imx906Init,RTL_NUMBER_OF(Imx906Init));
     if(!NT_SUCCESS(status))return status;
-    UCHAR *qsc=ExAllocatePool2(POOL_FLAG_NON_PAGED,3072,'sCcQ');
-    if(!qsc)return STATUS_INSUFFICIENT_RESOURCES;
-    BOOLEAN nonzero=FALSE,nonff=FALSE;
-    for(ULONG offset=0;offset<3072&&NT_SUCCESS(status);offset+=32) {
-        status=CamCciRead(c,0x50,(USHORT)(0x2210+offset),qsc+offset,32);
-        if(NT_SUCCESS(status))for(ULONG i=offset;i<offset+32;i++){nonzero|=qsc[i]!=0;nonff|=qsc[i]!=255;}
+    if(!c->MainQscValid) {
+        BOOLEAN nonzero=FALSE,nonff=FALSE;
+        for(ULONG offset=0;offset<sizeof(c->MainQsc)&&NT_SUCCESS(status);offset+=32) {
+            status=CamCciRead(c,0x50,(USHORT)(0x2210+offset),c->MainQsc+offset,32);
+            if(NT_SUCCESS(status))for(ULONG i=offset;i<offset+32;i++){nonzero|=c->MainQsc[i]!=0;nonff|=c->MainQsc[i]!=255;}
+        }
+        if(NT_SUCCESS(status)&&(!nonzero||!nonff))status=STATUS_DATA_ERROR;
+        c->MainQscValid=NT_SUCCESS(status);
     }
-    if(NT_SUCCESS(status)&&(!nonzero||!nonff))status=STATUS_DATA_ERROR;
-    if(NT_SUCCESS(status))for(ULONG offset=0;offset<3072&&NT_SUCCESS(status);offset+=8)
-        status=CamCciWrite(c,0x1a,(USHORT)(0x1000+offset),qsc+offset,8);
-    ExFreePoolWithTag(qsc,'sCcQ');
+    if(NT_SUCCESS(status))for(ULONG offset=0;offset<sizeof(c->MainQsc)&&NT_SUCCESS(status);offset+=8)
+        status=CamCciWrite(c,0x1a,(USHORT)(0x1000+offset),c->MainQsc+offset,8);
     if(!NT_SUCCESS(status))return status;
     c->Info.Flags|=QCAM_CALIBRATED;c->Info.Stage=5;
     status=Table(c,Imx906Mode,RTL_NUMBER_OF(Imx906Mode));
@@ -52,6 +53,7 @@ NTSTATUS CamSensorInit(CAM *c) {
 }
 
 NTSTATUS CamSensorStream(CAM *c,BOOLEAN on) {
+    if(c->Sensor)return CamOtherSensorStream(c,on);
     if(!c->Configured)return on?STATUS_INVALID_DEVICE_STATE:STATUS_SUCCESS;
     NTSTATUS status=Set(c,0x0100,on?1:0);
     if(NT_SUCCESS(status)) {
@@ -62,6 +64,7 @@ NTSTATUS CamSensorStream(CAM *c,BOOLEAN on) {
 }
 
 NTSTATUS CamSensorExposure(CAM *c,ULONG lines,ULONG gain) {
+    if(c->Sensor)return CamOtherSensorExposure(c,lines,gain);
     if(!c->Configured||(c->DmaActive&&!c->StreamFile))return STATUS_INVALID_DEVICE_STATE;
     if(!lines||lines>c->Info.FrameLength-48||gain>0x3fff)return STATUS_INVALID_PARAMETER;
     NTSTATUS status=Set(c,0x0104,1);

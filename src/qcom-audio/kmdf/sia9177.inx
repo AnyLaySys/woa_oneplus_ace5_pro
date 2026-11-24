@@ -252,8 +252,9 @@ HKR,,CLSID,,%Proxy.CLSID%
 HKR,,FriendlyName,,%DeviceName%
 HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_MICROPHONE%
 HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,4
+HKR,EP\0,%PKEY_AudioEndpoint_Default_VolumeInDb%,0x00010001,0x00018000
 HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x00010001,1
-HKR,EP\0,%PKEY_AudioEndpoint_Disable_SysFx%,0x00010001,1
+HKR,EP\0,%PKEY_AudioEndpoint_Disable_SysFx%,0x00010001,0
 HKR,EP\0,%PKEY_AudioEngine_OEMFormat%,0x00000001,fe,ff,02,00,80,bb,00,00,00,ee,02,00,04,00,10,00,16,00,10,00,03,00,00,00,01,00,00,00,00,00,10,00,80,00,00,aa,00,38,9b,71
 
 [Sia.Wave]

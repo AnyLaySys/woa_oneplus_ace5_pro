@@ -18,51 +18,75 @@ static EVT_WDF_OBJECT_CONTEXT_CLEANUP Cleanup;
 static EVT_WDF_FILE_CLEANUP FileCleanup;
 
 static const ULONG Bases[]={0x00100000,0x0ade0000,0x01760000,0x0ac7b000,0x0adb3000,0x0ad27000,0x0ac86000,0x0ac04000,0x0ad90000,
-    0x15000000,0x0f100000,0x0c400000,0x0c42d000,0x0c440000,0x0c500000,0x16520000,0x81c60000,0x0adcb000,0x0ac7f000,0x017d2000,0x017d1000,0x01780000,0x0bbf0000};
+    0x15000000,0x0f100000,0x0c400000,0x0c42d000,0x0c440000,0x0c500000,0x16520000,0x81c60000,0x0adcb000,0x0ac7f000,0x017d2000,0x017d1000,0x01780000,0x0bbf0000,0x0ac7c000,0x0adab000,0x0adaf000,0x0adb1000};
 static const ULONG Sizes[]={0x100000,0x20000,0x6000,0x1000,0x2000,0x3000,0x10000,0x1000,0x9000,
-    0x100000,0x100000,0x3000,0x4000,0x80000,0x400000,0x10000,0x20000,0x5000,0x1000,0x1000,0x1000,0x5b800,0x1f00};
+    0x100000,0x100000,0x3000,0x4000,0x80000,0x400000,0x10000,0x20000,0x5000,0x1000,0x1000,0x1000,0x5b800,0x1f00,0x1000,0x2000,0x2000,0x2000};
 C_ASSERT(RTL_NUMBER_OF(Bases)==CamRegionCount);
 
 static VOID VideoWorker(PVOID context) {
-    CAM *c=context;
+    CAM_VIDEO_WORKER *w=context;CAM *c=w->Owner;
+    GROUP_AFFINITY affinity={0},previous={0};affinity.Mask=(KAFFINITY)1<<(w->Index==0?7:w->Index==1?5:4);
+    KeSetSystemGroupAffinityThread(&affinity,&previous);KeSetPriorityThread(KeGetCurrentThread(),15);
     for(;;) {
-        KeWaitForSingleObject(&c->VideoReady,Executive,KernelMode,FALSE,NULL);
-        if(c->VideoStopping)break;
-        GROUP_AFFINITY affinity={0},previous={0};affinity.Mask=0x80;
-        KeSetSystemGroupAffinityThread(&affinity,&previous);
-        KPRIORITY priority=KeSetPriorityThread(KeGetCurrentThread(),15);
-        CamNv12RowsSampled(c->VideoSource,QCAM_FRAME_BYTES*2+256,c->VideoOutput,c->VideoColors,c->VideoWorkerWorkspace,QCAM_VIDEO_HEIGHT/2,QCAM_VIDEO_HEIGHT,c->VideoZoom>QCAM_ZOOM_MIN?c->VideoBlocks:NULL,c->VideoRows);
-        KeSetPriorityThread(KeGetCurrentThread(),priority);KeRevertToUserGroupAffinityThread(&previous);
-        KeSetEvent(&c->VideoDone,IO_NO_INCREMENT,FALSE);
+        KeWaitForSingleObject(&w->Ready,Executive,KernelMode,FALSE,NULL);if(c->VideoStopping)break;
+        if(c->VideoCached)CamNv12RowsCachedGains(c->VideoSource,QCAM_FRAME_BYTES*2+256,c->VideoOutput,c->VideoColors,c->VideoLinearGains,w->Workspace,w->First,w->End,c->VideoDense,c->VideoColumns,c->VideoRows,c->Sensor==3,c->VideoWidth,c->VideoHeight,c->Info.Width/2);
+        else CamNv12RowsGeometryGains(c->VideoSource,QCAM_FRAME_BYTES*2+256,c->VideoOutput,c->VideoColors,c->VideoLinearGains,w->Workspace,w->First,w->End,c->VideoBlocks,c->VideoRows,c->Sensor==3,c->VideoWidth,c->VideoHeight);
+        KeSetEvent(&w->Done,IO_NO_INCREMENT,FALSE);
     }
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
 static VOID VideoStop(CAM *c) {
-    if(!c->VideoThread)return;
-    c->VideoStopping=TRUE;KeSetEvent(&c->VideoReady,IO_NO_INCREMENT,FALSE);
-    ZwWaitForSingleObject(c->VideoThread,FALSE,NULL);ZwClose(c->VideoThread);c->VideoThread=NULL;
+    c->VideoStopping=TRUE;
+    for(ULONG i=0;i<RTL_NUMBER_OF(c->VideoWorkers);i++)if(c->VideoWorkers[i].Thread)KeSetEvent(&c->VideoWorkers[i].Ready,IO_NO_INCREMENT,FALSE);
+    for(ULONG i=0;i<RTL_NUMBER_OF(c->VideoWorkers);i++)if(c->VideoWorkers[i].Thread) {
+        ZwWaitForSingleObject(c->VideoWorkers[i].Thread,FALSE,NULL);ZwClose(c->VideoWorkers[i].Thread);c->VideoWorkers[i].Thread=NULL;
+    }
+}
+
+static VOID VideoMap(CAM *c) {
+    if(!c->VideoWidth){c->VideoWidth=QCAM_VIDEO_WIDTH;c->VideoHeight=QCAM_VIDEO_HEIGHT;c->VideoBytes=QCAM_VIDEO_BYTES;}
+    CamRawMapGeometry(c->VideoZoom?c->VideoZoom:QCAM_ZOOM_MIN,c->Info.Width,c->Info.Height,c->VideoWidth,c->VideoHeight,c->VideoBlocks,c->VideoRows);
+    CamRawColumns(c->VideoBlocks,c->VideoWidth,c->VideoColumns);
+    ULONG rows[2];CamRawMapGeometry(QCAM_ZOOM_MIN,c->Info.Width,2,c->Info.Width/2,1,c->VideoDense,rows);
+    c->VideoCached=c->VideoWidth>=c->Info.Width/2&&c->VideoWidth*c->VideoHeight>=c->Info.Width*c->Info.Height/4;
+}
+
+static NTSTATUS VideoFormat(CAM *c,const QCAM_VIDEO_FORMAT_OPTIONS *o) {
+    if(o->Size!=sizeof(*o)||o->Abi!=QCAM_ABI||o->Width<160||o->Height<120||o->Width>QCAM_VIDEO_MAX_WIDTH||o->Height>QCAM_VIDEO_MAX_HEIGHT||(o->Width&7)||(o->Height&1))return STATUS_INVALID_PARAMETER;
+    if(c->VideoWidth!=o->Width||c->VideoHeight!=o->Height) {
+        c->VideoWidth=o->Width;c->VideoHeight=o->Height;c->VideoBytes=o->Width*o->Height*3/2;VideoMap(c);
+    }
+    return STATUS_SUCCESS;
 }
 
 static VOID VideoConvert(CAM *c,const UCHAR *raw,PUCHAR output) {
-    if(!c->VideoThread&&KeQueryActiveProcessorCountEx(0)>=8) {
-        KeInitializeEvent(&c->VideoReady,SynchronizationEvent,FALSE);KeInitializeEvent(&c->VideoDone,SynchronizationEvent,FALSE);c->VideoStopping=FALSE;
-        OBJECT_ATTRIBUTES attributes;InitializeObjectAttributes(&attributes,NULL,OBJ_KERNEL_HANDLE,NULL,NULL);
-        NTSTATUS status=PsCreateSystemThread(&c->VideoThread,SYNCHRONIZE,&attributes,NULL,NULL,VideoWorker,c);
-        if(!NT_SUCCESS(status))c->VideoThread=NULL;
+    ULONG desired=c->VideoWidth*c->VideoHeight>QCAM_VIDEO_WIDTH*QCAM_VIDEO_HEIGHT?3:1,count=0;
+    if(KeQueryActiveProcessorCountEx(0)>=8)for(ULONG i=0;i<desired;i++) {
+        CAM_VIDEO_WORKER *w=c->VideoWorkers+i;
+        if(!w->Thread) {
+            w->Owner=c;w->Index=i;KeInitializeEvent(&w->Ready,SynchronizationEvent,FALSE);KeInitializeEvent(&w->Done,SynchronizationEvent,FALSE);c->VideoStopping=FALSE;
+            OBJECT_ATTRIBUTES attributes;InitializeObjectAttributes(&attributes,NULL,OBJ_KERNEL_HANDLE,NULL,NULL);
+            NTSTATUS status=PsCreateSystemThread(&w->Thread,SYNCHRONIZE,&attributes,NULL,NULL,VideoWorker,w);if(!NT_SUCCESS(status)){w->Thread=NULL;break;}
+        }
+        count++;
     }
     if(!c->VideoGains[0])c->VideoGains[0]=c->VideoGains[1]=c->VideoGains[2]=256;
-    ULONG gains[3];RtlCopyMemory(gains,c->VideoGains,sizeof(gains));CamWhiteBalance(raw,QCAM_FRAME_BYTES*2+256,gains);
+    ULONG gains[3];RtlCopyMemory(gains,c->VideoGains,sizeof(gains));CamWhiteBalanceBayer(raw,QCAM_FRAME_BYTES*2+256,c->Info.Width,c->Info.Height,c->Sensor==3,gains);
+    for(ULONG i=0;i<3;i++)c->VideoGains[i]=(c->VideoGains[i]*3+gains[i]+2)/4;
     for(ULONG i=0;i<3;i++) {
-        c->VideoGains[i]=(c->VideoGains[i]*3+gains[i]+2)/4;
-        for(ULONG value=0;value<1024;value++)c->VideoColors[i][value]=(UCHAR)CamColor(value<=64?value:64+((value-64)*c->VideoGains[i]+128)/256);
+        ULONG gain=c->VideoGains[c->Sensor==3&&i!=1?2-i:i];c->VideoLinearGains[i]=gain;
+        for(ULONG value=0;value<1024;value++)c->VideoColors[i][value]=(UCHAR)CamColor(value<=64?value:64+((value-64)*gain+128)/256);
     }
-    if(c->VideoThread) {
-        c->VideoSource=raw;c->VideoOutput=output;KeSetEvent(&c->VideoReady,IO_NO_INCREMENT,FALSE);
-        CamNv12RowsSampled(raw,QCAM_FRAME_BYTES*2+256,output,c->VideoColors,c->VideoWorkspace,0,QCAM_VIDEO_HEIGHT/2,c->VideoZoom>QCAM_ZOOM_MIN?c->VideoBlocks:NULL,c->VideoRows);
-        KeWaitForSingleObject(&c->VideoDone,Executive,KernelMode,FALSE,NULL);
-        c->VideoSource=NULL;c->VideoOutput=NULL;
-    } else CamNv12RowsSampled(raw,QCAM_FRAME_BYTES*2+256,output,c->VideoColors,c->VideoWorkspace,0,QCAM_VIDEO_HEIGHT,c->VideoZoom>QCAM_ZOOM_MIN?c->VideoBlocks:NULL,c->VideoRows);
+    c->VideoSource=raw;c->VideoOutput=output;
+    for(ULONG i=0;i<count;i++) {
+        CAM_VIDEO_WORKER *w=c->VideoWorkers+i;w->First=(c->VideoHeight*(i+1)/(count+1))&~1u;w->End=(c->VideoHeight*(i+2)/(count+1))&~1u;
+        KeSetEvent(&w->Ready,IO_NO_INCREMENT,FALSE);
+    }
+    if(c->VideoCached)CamNv12RowsCachedGains(raw,QCAM_FRAME_BYTES*2+256,output,c->VideoColors,c->VideoLinearGains,c->VideoWorkspace,0,(c->VideoHeight/(count+1))&~1u,c->VideoDense,c->VideoColumns,c->VideoRows,c->Sensor==3,c->VideoWidth,c->VideoHeight,c->Info.Width/2);
+    else CamNv12RowsGeometryGains(raw,QCAM_FRAME_BYTES*2+256,output,c->VideoColors,c->VideoLinearGains,c->VideoWorkspace,0,(c->VideoHeight/(count+1))&~1u,c->VideoBlocks,c->VideoRows,c->Sensor==3,c->VideoWidth,c->VideoHeight);
+    for(ULONG i=0;i<count;i++)KeWaitForSingleObject(&c->VideoWorkers[i].Done,Executive,KernelMode,FALSE,NULL);
+    c->VideoSource=NULL;c->VideoOutput=NULL;
 }
 
 static BOOLEAN Dedicated(ULONG region) {return region>=CamCc&&region<=CamNoc;}
@@ -165,7 +189,9 @@ static NTSTATUS WaitFrame(CAM *c,WDFREQUEST request,ULONG timeout) {
         if(!c->Online||WdfRequestIsCanceled(request)){status=STATUS_CANCELLED;break;}
         if(CamCapturePoll(c,&status))break;
         if(KeQueryInterruptTime()>=deadline){status=STATUS_IO_TIMEOUT;break;}
-        ExSetTimer(timer,-5000,0,NULL);KeWaitForSingleObject(&event,Executive,KernelMode,FALSE,NULL);
+        ULONGLONG qpc,now=KeQueryInterruptTimePrecise(&qpc),period=c->Sensor==1||c->Sensor==2?333333:166667;
+        if(c->StreamFile&&((c->Sensor==1||c->Sensor==2)||c->FrameTime.Sequence&&now-c->FrameTime.Captured>=period-10000))KeStallExecutionProcessor(8);
+        else {ExSetTimer(timer,-5000,0,NULL);KeWaitForSingleObject(&event,Executive,KernelMode,FALSE,NULL);}
     }
     ExDeleteTimer(timer,TRUE,TRUE,NULL);return status;
 }
@@ -177,7 +203,8 @@ static VOID Merge(PUCHAR raw,ULONG count,ULONG companion) {
 static VOID Exposure(CAM *c,const UCHAR *raw,ULONG companion) {
     if(!c->StreamFile||c->Info.FrameLength<=48||(c->Info.Frames&3))return;
     ULONGLONG current=(ULONGLONG)c->Info.Exposure*16384/(16384-c->Info.Gain);
-    ULONGLONG target=CamExposureTarget(raw,companion,c->VideoGains,c->VideoZoom?c->VideoZoom:QCAM_ZOOM_MIN,current);
+    ULONG gains[3]={c->VideoGains[c->Sensor==3?2:0],c->VideoGains[1],c->VideoGains[c->Sensor==3?0:2]};
+    ULONGLONG target=CamExposureTargetGeometry(raw,companion,c->Info.Width,c->Info.Height,gains,c->VideoZoom?c->VideoZoom:QCAM_ZOOM_MIN,current);
     ULONG lines=(ULONG)min(target,(ULONGLONG)c->Info.FrameLength-48);
     ULONG gain=target>lines?(ULONG)(16384-16384ULL*lines/target):0;gain=min(gain,0x3f00u);
     if(lines!=c->Info.Exposure||gain!=c->Info.Gain)CamSensorExposure(c,lines,gain);
@@ -189,6 +216,32 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
     WdfWaitLockAcquire(c->Lock,NULL);
     if(!c->Online){status=STATUS_DEVICE_NOT_READY;goto done;}
     if(c->StreamFile&&c->StreamFile!=WdfRequestGetFileObject(request)&&code!=QCAM_QUERY&&code!=QCAM_DIAGNOSTICS&&code!=QCAM_TRACE_QUERY){status=STATUS_DEVICE_BUSY;goto done;}
+    if(code==QCAM_CAMERA) {
+        QCAM_CAMERA_OPTIONS *o;
+        status=WdfRequestRetrieveInputBuffer(request,sizeof(*o),(PVOID *)&o,NULL);if(!NT_SUCCESS(status))goto done;
+        if(input!=sizeof(*o)||output||o->Size!=sizeof(*o)||o->Abi!=QCAM_ABI||o->Index>3||o->Probe>1||c->StreamFile){status=STATUS_INVALID_PARAMETER;goto done;}
+        status=CamCaptureStop(c);if(NT_SUCCESS(status))status=CamPowerOff(c);if(!NT_SUCCESS(status))goto done;
+        c->Sensor=o->Index;c->Info.SensorId=0;c->Info.Flags=0;c->Info.Status=STATUS_SUCCESS;c->Info.Exposure=1000;c->Info.Gain=0x1334;c->FocusCalibration.Valid=FALSE;c->VideoZoom=QCAM_ZOOM_MIN;
+        RtlZeroMemory(c->VideoGains,sizeof(c->VideoGains));
+        c->Info.Width=c->Sensor==1?3264:c->Sensor==2?1600:c->Sensor==3?2304:QCAM_WIDTH;
+        c->Info.Height=c->Sensor==1?2448:c->Sensor==2?1200:c->Sensor==3?1728:QCAM_HEIGHT;
+        VideoMap(c);
+        if(o->Probe) {
+            c->ProbeLimit=0;status=CamPowerOn(c);QCAM_DIAG saved=c->Diag;NTSTATUS off=CamPowerOff(c);c->Diag=saved;if(NT_SUCCESS(status))status=off;
+        }
+        goto done;
+    }
+    if(code==QCAM_VIDEO_FORMAT) {
+        QCAM_VIDEO_FORMAT_OPTIONS *o;
+        if(input) {
+            status=WdfRequestRetrieveInputBuffer(request,sizeof(*o),(PVOID *)&o,NULL);
+            if(NT_SUCCESS(status))status=input!=sizeof(*o)||output?STATUS_INVALID_PARAMETER:VideoFormat(c,o);
+        } else {
+            status=WdfRequestRetrieveOutputBuffer(request,sizeof(*o),(PVOID *)&o,NULL);
+            if(NT_SUCCESS(status)){o->Size=sizeof(*o);o->Abi=QCAM_ABI;o->Width=c->VideoWidth?c->VideoWidth:QCAM_VIDEO_WIDTH;o->Height=c->VideoHeight?c->VideoHeight:QCAM_VIDEO_HEIGHT;bytes=sizeof(*o);}
+        }
+        goto done;
+    }
     if(code==QCAM_FOCUS_ROI) {
         QCAM_ROI_OPTIONS *o;
         if(input) {
@@ -220,7 +273,7 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
             status=WdfRequestRetrieveInputBuffer(request,sizeof(*o),(PVOID *)&o,NULL);if(!NT_SUCCESS(status))goto done;
             if(input!=sizeof(*o)||output||o->Size!=sizeof(*o)||o->Abi!=QCAM_ABI||o->Reserved||o->Ratio<QCAM_ZOOM_MIN||o->Ratio>QCAM_ZOOM_MAX){status=STATUS_INVALID_PARAMETER;goto done;}
             if(c->VideoZoom!=o->Ratio) {
-                c->VideoZoom=o->Ratio;CamRawZoom(c->VideoZoom,c->VideoBlocks,c->VideoRows);
+                c->VideoZoom=o->Ratio;VideoMap(c);
                 c->FocusWindowValid=FALSE;c->FocusComplete=FALSE;c->FocusStable=c->FocusSamples=c->FocusMisses=0;
             }
             status=STATUS_SUCCESS;
@@ -263,7 +316,7 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         if(c->StreamFile){status=STATUS_SUCCESS;goto done;}
         c->ProbeLimit=c->PipelineLimit=c->FrameSlot=c->FrameStamp=0;
         RtlZeroMemory(&c->FrameTime,sizeof(c->FrameTime));
-        RtlZeroMemory(c->Trace.FrameTimings,sizeof(c->Trace.FrameTimings));c->Trace.FrameTimingCount=0;
+        RtlZeroMemory(c->Trace.FrameTimings,sizeof(c->Trace.FrameTimings));c->Trace.FrameTimingCount=0;c->Trace.FramePollCount=c->Trace.PairWaitCount=0;c->Trace.PairEofGap=c->Trace.PairEofGapMax=0;
         if(code==QCAM_STREAM_START_PDAF)c->PipelineLimit=13;
         status=CamCaptureStart(c,o);
         if(NT_SUCCESS(status))c->StreamFile=WdfRequestGetFileObject(request);
@@ -282,9 +335,13 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         goto done;
     }
     if(code==QCAM_STREAM_FRAME||code==QCAM_STREAM_NV12) {
-        PVOID buffer;if(input||!c->StreamFile){status=STATUS_INVALID_DEVICE_STATE;goto done;}
+        PVOID buffer;if(!c->StreamFile||input&&(code!=QCAM_STREAM_NV12||input!=sizeof(QCAM_VIDEO_FORMAT_OPTIONS))){status=STATUS_INVALID_DEVICE_STATE;goto done;}
+        if(code==QCAM_STREAM_NV12) {
+            if(input) {QCAM_VIDEO_FORMAT_OPTIONS *o;status=WdfRequestRetrieveInputBuffer(request,sizeof(*o),(PVOID *)&o,NULL);if(!NT_SUCCESS(status))goto done;status=VideoFormat(c,o);if(!NT_SUCCESS(status))goto done;}
+            else if(!c->VideoWidth)VideoMap(c);
+        }
         if(code==QCAM_STREAM_NV12&&c->PipelineLimit==13){status=STATUS_INVALID_DEVICE_REQUEST;goto done;}
-        status=WdfRequestRetrieveOutputBuffer(request,code==QCAM_STREAM_NV12?QCAM_VIDEO_BYTES:QCAM_FRAME_BYTES,&buffer,NULL);if(!NT_SUCCESS(status))goto done;
+        status=WdfRequestRetrieveOutputBuffer(request,code==QCAM_STREAM_NV12?c->VideoBytes:QCAM_FRAME_BYTES,&buffer,NULL);if(!NT_SUCCESS(status))goto done;
         if(code==QCAM_STREAM_NV12&&KeQueryActiveProcessorCountEx(0)>=8) {
             GROUP_AFFINITY affinity={0};affinity.Mask=0x40;KeSetSystemGroupAffinityThread(&affinity,&previousAffinity);bound=TRUE;
             previousPriority=KeSetPriorityThread(KeGetCurrentThread(),15);
@@ -309,25 +366,21 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
             status=CamPdafFrame(c);if(!NT_SUCCESS(status)){c->Info.Status=status;goto done;}
             timings[3]=KeQueryPerformanceCounter(NULL).QuadPart;
             if(code==QCAM_STREAM_NV12) {
-                if(c->VideoZoom>QCAM_ZOOM_MIN) {
-                    ULONG previous=MAXULONG;
-                    for(ULONG y=0;y<QCAM_VIDEO_HEIGHT;y++)if(c->VideoRows[y]!=previous) {
-                        previous=c->VideoRows[y];PUCHAR row=source+previous;
-                        CamDmaInvalidate(row,QCAM_STRIDE*2,QCAM_STRIDE*2,1,0);
-                        CamDmaInvalidate(row+QCAM_FRAME_BYTES*2+256,QCAM_STRIDE*2,QCAM_STRIDE*2,1,256);
-                    }
-                    CamDmaInvalidate(source,QCAM_STRIDE*2,QCAM_STRIDE*64,QCAM_HEIGHT/64,0);
-                    CamDmaInvalidate(source+QCAM_FRAME_BYTES*2+256,QCAM_STRIDE*2,QCAM_STRIDE*64,QCAM_HEIGHT/64,256);
-                } else {
-                    CamDmaInvalidate(source,QCAM_STRIDE*2,QCAM_STRIDE*4,QCAM_VIDEO_HEIGHT,0);
-                    CamDmaInvalidate(source+QCAM_FRAME_BYTES*2+256,QCAM_STRIDE*2,QCAM_STRIDE*4,QCAM_VIDEO_HEIGHT,256);
+                ULONG previous=MAXULONG;
+                for(ULONG y=0;y<c->VideoHeight;y++)if(c->VideoRows[y]!=previous) {
+                    previous=c->VideoRows[y];PUCHAR row=source+previous;
+                    CamDmaInvalidate(row,QCAM_STRIDE*2,QCAM_STRIDE*2,1,0);
+                    CamDmaInvalidate(row+QCAM_FRAME_BYTES*2+256,QCAM_STRIDE*2,QCAM_STRIDE*2,1,256);
                 }
+                ULONG samples=(c->Info.Height+63)/64;
+                CamDmaInvalidate(source,QCAM_STRIDE*2,QCAM_STRIDE*64,samples,0);
+                CamDmaInvalidate(source+QCAM_FRAME_BYTES*2+256,QCAM_STRIDE*2,QCAM_STRIDE*64,samples,256);
             } else {
                 KeFlushIoBuffers(c->FrameMdl[c->FrameSlot^1],TRUE,TRUE);KeFlushIoBuffers(c->FrameMdl[(c->FrameSlot^1)+2],TRUE,TRUE);
             }
             KeMemoryBarrier();
             timings[4]=KeQueryPerformanceCounter(NULL).QuadPart;
-            if(code==QCAM_STREAM_NV12){VideoConvert(c,source,buffer);bytes=QCAM_VIDEO_BYTES;Exposure(c,source,QCAM_FRAME_BYTES*2+256);}
+            if(code==QCAM_STREAM_NV12){VideoConvert(c,source,buffer);bytes=c->VideoBytes;Exposure(c,source,QCAM_FRAME_BYTES*2+256);}
             else {Merge(source,c->PipelineLimit==13?QCAM_PDAF_BYTES:QCAM_FRAME_BYTES,QCAM_FRAME_BYTES*2+256);RtlCopyMemory(buffer,source,QCAM_FRAME_BYTES);bytes=QCAM_FRAME_BYTES;}
             timings[5]=KeQueryPerformanceCounter(NULL).QuadPart;
             CamFocusFrame(c);CamFlashFrame(c);timings[6]=KeQueryPerformanceCounter(NULL).QuadPart;
@@ -717,20 +770,22 @@ static NTSTATUS AddDevice(WDFDRIVER driver,PWDFDEVICE_INIT init) {
     status=WdfDeviceCreateSymbolicLink(device,&name);if(!NT_SUCCESS(status))return status;
     static const GUID bus={0x83e80906,0x5a57,0x4e38,{0xa9,0x00,0x87,0x50,0x09,0x06,0x00,0x02}};
     PNP_BUS_INFORMATION information={bus,PNPBus,0};WdfDeviceSetBusInformationForChildren(device,&information);
-    PWDFDEVICE_INIT childInit=WdfPdoInitAllocate(device);
-    if(!childInit)return STATUS_INSUFFICIENT_RESOURCES;
-    UNICODE_STRING id=RTL_CONSTANT_STRING(L"QCOM\\IMX906"),instance=RTL_CONSTANT_STRING(L"0");
-    status=WdfPdoInitAssignDeviceID(childInit,&id);
-    if(NT_SUCCESS(status))status=WdfPdoInitAddHardwareID(childInit,&id);
-    if(NT_SUCCESS(status))status=WdfPdoInitAssignInstanceID(childInit,&instance);
-    UNICODE_STRING description=RTL_CONSTANT_STRING(L"Sony IMX906 Camera");
-    UNICODE_STRING location=RTL_CONSTANT_STRING(L"OnePlus Ace 5 Pro");
-    if(NT_SUCCESS(status))status=WdfPdoInitAddDeviceText(childInit,&description,&location,0x409);
-    if(!NT_SUCCESS(status)){WdfDeviceInitFree(childInit);return status;}
-    WdfPdoInitSetDefaultLocale(childInit,0x409);
-    WDFDEVICE child;status=WdfDeviceCreate(&childInit,WDF_NO_OBJECT_ATTRIBUTES,&child);
-    if(!NT_SUCCESS(status)){if(childInit)WdfDeviceInitFree(childInit);return status;}
-    status=WdfFdoAddStaticChild(device,child);if(!NT_SUCCESS(status)){WdfObjectDelete(child);return status;}
+    static const PCWSTR ids[]={L"QCOM\\IMX906",L"QCOM\\IMX355",L"QCOM\\OV02B10",L"QCOM\\IMX471"};
+    static const PCWSTR descriptions[]={L"Sony IMX906 Main Camera",L"Sony IMX355 Ultrawide Camera",L"OmniVision OV02B10 Macro Camera",L"Sony IMX471 Front Camera"};
+    for(ULONG index=0;index<RTL_NUMBER_OF(ids);index++) {
+        PWDFDEVICE_INIT childInit=WdfPdoInitAllocate(device);if(!childInit)return STATUS_INSUFFICIENT_RESOURCES;
+        UNICODE_STRING id,instance=RTL_CONSTANT_STRING(L"0"),description,location=RTL_CONSTANT_STRING(L"OnePlus Ace 5 Pro");
+        RtlInitUnicodeString(&id,ids[index]);RtlInitUnicodeString(&description,descriptions[index]);
+        status=WdfPdoInitAssignDeviceID(childInit,&id);
+        if(NT_SUCCESS(status))status=WdfPdoInitAddHardwareID(childInit,&id);
+        if(NT_SUCCESS(status))status=WdfPdoInitAssignInstanceID(childInit,&instance);
+        if(NT_SUCCESS(status))status=WdfPdoInitAddDeviceText(childInit,&description,&location,0x409);
+        if(!NT_SUCCESS(status)){WdfDeviceInitFree(childInit);return status;}
+        WdfPdoInitSetDefaultLocale(childInit,0x409);
+        WDFDEVICE child;status=WdfDeviceCreate(&childInit,WDF_NO_OBJECT_ATTRIBUTES,&child);
+        if(!NT_SUCCESS(status)){if(childInit)WdfDeviceInitFree(childInit);return status;}
+        status=WdfFdoAddStaticChild(device,child);if(!NT_SUCCESS(status)){WdfObjectDelete(child);return status;}
+    }
     WDF_IO_QUEUE_CONFIG q;WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&q,WdfIoQueueDispatchSequential);q.EvtIoDeviceControl=Control;
     return WdfIoQueueCreate(device,&q,WDF_NO_OBJECT_ATTRIBUTES,NULL);
 }

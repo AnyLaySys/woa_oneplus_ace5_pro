@@ -85,6 +85,7 @@ SiaHardwareStart (PSIA_DEVICE Dev,PDEVICE_OBJECT Device,PCM_PARTIAL_RESOURCE_DES
     RtlZeroMemory (Dev, sizeof (*Dev));
     Dev->Pdo=IoGetDeviceAttachmentBaseRef(Device);
     Dev->Gain[0]=Dev->Gain[1]=SIA_GAIN_ONE;
+    Dev->MicVolume=SIA_MIC_VOLUME_DEFAULT;
     KeInitializeEvent (&Dev->WorkEvent, SynchronizationEvent, FALSE);
     for (ULONG Index = 0; Index < 2; Index++) {
         KeInitializeEvent (&Dev->Stream[Index].IdleEvent, NotificationEvent, TRUE);

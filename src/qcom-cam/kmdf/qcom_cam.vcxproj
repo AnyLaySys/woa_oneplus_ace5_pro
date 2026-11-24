@@ -21,7 +21,7 @@
   <PropertyGroup>
     <TargetName>qcom_cam</TargetName>
     <CamVersionDate Condition="'$(CamVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</CamVersionDate>
-    <CamRevision Condition="'$(CamRevision)' == ''">219</CamRevision>
+    <CamRevision Condition="'$(CamRevision)' == ''">246</CamRevision>
     <CamDriverDate>$([System.DateTime]::Parse('$(CamVersionDate)').ToString('MM/dd/yyyy'))</CamDriverDate>
     <CamDriverVersion>$([System.DateTime]::Parse('$(CamVersionDate)').ToString('yy.M.d')).$(CamRevision)</CamDriverVersion>
     <CamDriverVersionComma>$([System.String]::Copy('$(CamDriverVersion)').Replace('.', ','))</CamDriverVersionComma>
@@ -38,7 +38,7 @@
   <ItemGroup>
     <ClCompile Include="..\driver.c" /><ClCompile Include="..\video\raw-row.cpp" />
     <ClCompile Include="..\cci.c" />
-    <ClCompile Include="..\imx906.c" />
+    <ClCompile Include="..\imx906.c" /><ClCompile Include="..\sensors.c" />
     <ClCompile Include="..\focus.c" />
     <ClCompile Include="..\flash.c" />
     <ClCompile Include="..\platform.c" />

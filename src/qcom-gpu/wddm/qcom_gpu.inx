@@ -16,6 +16,9 @@ qcom_gpu.sys=1
 a830_umd.dll=1
 a830_umd_arm64.dll=1
 a830_umd_x64.dll=1
+a830_encoder.dll=1
+a830_encoder_arm64.dll=1
+a830_encoder_x64.dll=1
 a830_gl.dll=1
 a830_gl_x64.dll=1
 vulkan_freedreno.dll=1
@@ -43,6 +46,9 @@ qcom_gpu.sys
 a830_umd.dll
 a830_umd_arm64.dll
 a830_umd_x64.dll
+a830_encoder.dll
+a830_encoder_arm64.dll
+a830_encoder_x64.dll
 a830_gl.dll
 a830_gl_x64.dll
 vulkan_freedreno.dll
@@ -72,9 +78,6 @@ StartType=3
 ErrorControl=0
 LoadOrderGroup=Video
 ServiceBinary=%13%\qcom_gpu.sys
-AddReg=Driver.Settings
-[Driver.Settings]
-HKR,Parameters,RefreshRate,0x00010001,120
 [Strings]
 Provider="AnyLaySys"
 Manufacturer="Qualcomm"

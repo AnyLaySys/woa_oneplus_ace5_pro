@@ -72,7 +72,7 @@ if defined GPU_PACKAGE call :build_gpu_renderer
 if errorlevel 1 exit /b 1
 if defined GPU_PACKAGE (
   if not exist "%BIN%" mkdir "%BIN%"
-  for %%F in (a830_umd.dll a830_umd_arm64.dll a830_umd_x64.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll freedreno_icd.json freedreno_icd_x64.json msvcp140.dll vcruntime140.dll) do (
+  for %%F in (a830_umd.dll a830_umd_arm64.dll a830_umd_x64.dll a830_encoder.dll a830_encoder_arm64.dll a830_encoder_x64.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll freedreno_icd.json freedreno_icd_x64.json msvcp140.dll vcruntime140.dll) do (
     if not exist "%GPU_RENDER_PACKAGE%\%%F" (
       echo ERROR GPU renderer output is missing: %GPU_RENDER_PACKAGE%\%%F
       exit /b 1
@@ -95,7 +95,7 @@ if /i not "%NAME%"=="ir-remote" (
   if errorlevel 1 exit /b 1
 )
 if defined GPU_PACKAGE (
-  for %%F in (a830_umd.dll a830_umd_arm64.dll a830_umd_x64.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll) do (
+  for %%F in (a830_umd.dll a830_umd_arm64.dll a830_umd_x64.dll a830_encoder.dll a830_encoder_arm64.dll a830_encoder_x64.dll a830_gl.dll a830_gl_x64.dll vulkan_freedreno.dll vulkan_freedreno_x64.dll) do (
     copy /y "%BIN%\%%F" "%DST%\%%F" >nul
     if errorlevel 1 exit /b 1
     "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%%F"
@@ -522,7 +522,22 @@ def build_umd(arch, compiler, link):
     copy(umd_build / ('a830_umd_' + arch + '.dll'), package / ('a830_umd_' + arch + '.dll'))
 
 
+def build_encoder(arch, compiler, link):
+    directory = output / ('encoder-' + arch)
+    directory.mkdir(parents=True, exist_ok=True)
+    obj = directory / 'encoder.obj'
+    run(*compiler, '/nologo', '/O2', '/MT' if arch == 'x64' else '/MD', '/EHsc', '/std:c++17', '/W4', '/WX',
+        '/DNDEBUG', '/DUNICODE', '/D_UNICODE', '/c', local / 'encoder.cpp', '/Fo' + str(obj))
+    definition = directory / 'encoder.def'
+    write(definition, 'EXPORTS\nDllGetClassObject\nDllCanUnloadNow\nDllRegisterServer\nDllUnregisterServer\n')
+    dll = package / ('a830_encoder_' + arch + '.dll')
+    run('lld-link', '/DLL', '/MACHINE:' + ('X64' if arch == 'x64' else 'ARM64'), '/OUT:' + str(dll),
+        '/DEF:' + str(definition), *link, obj, 'kernel32.lib', 'gdi32.lib', 'advapi32.lib', 'ole32.lib',
+        'oleaut32.lib', 'mfuuid.lib', 'mfplat.lib', 'mf.lib', 'uuid.lib', 'dxgi.lib')
+
+
 build_umd('arm64', compiler, link)
+build_encoder('arm64', compiler, link)
 copy(shader_source / 'COPYING', package / 'COPYING.vkd3d')
 cross_x64 = output / 'cross-x64.ini'
 write(cross_x64, cross.read_text().replace('aarch64', 'x86_64').replace("'arm64'", "'x86_64'").replace('/arm64', '/x64'))
@@ -531,9 +546,14 @@ build_x64 = output / 'x64'
 build_mesa(build_x64, cross_x64, options_x64, 'src/freedreno/vulkan/vulkan_freedreno.dll', 'src/gallium/targets/wgl/a830_gl_x64.dll', 'src/gallium/targets/libgl-gdi/opengl32.dll')
 build_umd('x64', [arg.replace('aarch64', 'x86_64') for arg in compiler],
              [arg.replace('/arm64', '/x64') for arg in link])
+build_encoder('x64', [arg.replace('aarch64', 'x86_64') for arg in compiler],
+             [arg.replace('/arm64', '/x64') for arg in link])
 build_forwarder(output / 'umd-forwarder', package / 'a830_umd.dll', {
     arch: 'EXPORTS\n' + ''.join(name + '=a830_umd_' + arch + '.' + name + '\n'
         for name in ['OpenAdapter10', 'OpenAdapter10_2']) for arch in ['arm64', 'x64']})
+build_forwarder(output / 'encoder-forwarder', package / 'a830_encoder.dll', {
+    arch: 'EXPORTS\n' + ''.join(name + '=a830_encoder_' + arch + '.' + name + '\n'
+        for name in ['DllGetClassObject', 'DllCanUnloadNow', 'DllRegisterServer', 'DllUnregisterServer']) for arch in ['arm64', 'x64']})
 copy(build_x64 / 'src/gallium/targets/wgl/a830_gl_x64.dll', package / 'a830_gl_x64.dll')
 copy(build_x64 / 'src/freedreno/vulkan/vulkan_freedreno.dll', package / 'vulkan_freedreno_x64.dll')
 write(package / 'freedreno_icd_x64.json', (package / 'freedreno_icd.json').read_text().replace('vulkan_freedreno.dll', 'vulkan_freedreno_x64.dll'))

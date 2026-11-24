@@ -565,6 +565,14 @@ static VOID ColorTests(void) {
     for(ULONG p=QCAM_VIDEO_WIDTH*QCAM_VIDEO_HEIGHT;p<QCAM_VIDEO_BYTES;p++)assert(image[p]>=127&&image[p]<=129);
     ULONG gains[3]={512,256,384};ColorFrame(raw,64,64,64);CamWhiteBalance(raw,0,gains);
     assert(gains[0]==512&&gains[1]==256&&gains[2]==384);
+    UCHAR palette[3][1024];USHORT workspace[6144];
+    for(ULONG c=0;c<3;c++)for(ULONG v=0;v<1024;v++)palette[c][v]=(UCHAR)CamColor(v);
+    ColorFrame(raw,64,64,1023);CamNv12RowsBayer(raw,0,image,palette,workspace,0,768,NULL,NULL,TRUE);
+    for(ULONG p=0;p<QCAM_VIDEO_WIDTH*QCAM_VIDEO_HEIGHT;p++)assert(image[p]==82);
+    for(ULONG p=QCAM_VIDEO_WIDTH*QCAM_VIDEO_HEIGHT;p<QCAM_VIDEO_BYTES;p+=2)assert(image[p]==90&&image[p+1]==240);
+    ColorFrame(raw,100,200,300);ULONG bggr[3]={256,256,256},rggb[3]={256,256,256};
+    CamWhiteBalanceBayer(raw,0,QCAM_WIDTH,QCAM_HEIGHT,TRUE,bggr);CamWhiteBalance(raw,0,rggb);
+    assert(bggr[0]==rggb[2]&&bggr[2]==rggb[0]&&bggr[1]==256);
     for(ULONG value=64;value<1023;value++)assert(CamColor(value)<=CamColor(value+1));
     assert(!CamNv12(raw,QCAM_FRAME_BYTES-1,image,QCAM_VIDEO_BYTES));
     assert(!CamNv12(raw,QCAM_FRAME_BYTES,image,QCAM_VIDEO_BYTES-1));
@@ -823,4 +831,15 @@ static VOID FrameClockTests(void) {
     assert(CamFrameTicks(19200000ULL*1000000000+320000,QCAM_SENSOR_CLOCK)==10000000000000000ULL+166666);
 }
 
-int main(void) {FrameClockTests();TbuTests();MeasureTests();CdmTests();FrameRouteTests();WaitTests();CrmTests();GdscTests();RcgTests();CciTests();DmaTests();FrameMapTableTests();ColorTests();ExposureTests();PowerTests();ScmTests();DmaIdleTests();puts("DMA idle gating, RDI frame boundaries, TBU translation, clock measurement, frame and CDM routing, completion, wait preemption, CRM acknowledgment, GDSC sequencing, CCI, C-PHY, DMA, NV12, exposure highlights and crop metering, RPMh and powered secure QoS passed");return 0;}
+static VOID CameraGeometryTests(void) {
+    assert(CamRdiFrameCompleteHeight(1200,1200,0,0x10000));
+    assert(!CamRdiFrameCompleteHeight(1199,1200,0,0x10000));
+    CAM_RAW_BLOCK blocks[128];ULONG rows[768];
+    for(ULONG zoom=QCAM_ZOOM_MIN;zoom<=QCAM_ZOOM_MAX;zoom+=QCAM_ZOOM_MIN) {
+        CamRawZoomGeometry(zoom,1600,1200,blocks,rows);
+        for(ULONG y=0;y<768;y++)assert(rows[y]/QCAM_STRIDE+1<1200);
+        for(ULONG x=0;x<128;x++)for(ULONG j=0;j<8;j++)assert(blocks[x].Offset+blocks[x].Low[j]<2000);
+    }
+}
+
+int main(void) {CameraGeometryTests();FrameClockTests();TbuTests();MeasureTests();CdmTests();FrameRouteTests();WaitTests();CrmTests();GdscTests();RcgTests();CciTests();DmaTests();FrameMapTableTests();ColorTests();ExposureTests();PowerTests();ScmTests();DmaIdleTests();puts("DMA idle gating, RDI frame boundaries, TBU translation, clock measurement, frame and CDM routing, completion, wait preemption, CRM acknowledgment, GDSC sequencing, CCI, C-PHY, DMA, NV12, exposure highlights and crop metering, RPMh and powered secure QoS passed");return 0;}

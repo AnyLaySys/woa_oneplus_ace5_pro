@@ -35,6 +35,7 @@ ULONG JfpRegisterRead(JFP_DEVICE *device, ULONG offset) {
 }
 
 VOID JfpRegisterWrite(JFP_DEVICE *device, ULONG offset, ULONG value) {
+    if (device->Faulted) return;
     NTSTATUS status = RegisterIo(device, offset, &value, TRUE);
     if (!NT_SUCCESS(status)) {
         device->Info.Status = status;

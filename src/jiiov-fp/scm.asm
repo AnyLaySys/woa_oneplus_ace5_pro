@@ -3,6 +3,9 @@
     PROLOG_SAVE_REG_PAIR x19, x20, #-48!
     PROLOG_SAVE_REG_PAIR fp, lr, #16
     str x18, [sp, #32]
+    mrs x9, DAIF
+    str x9, [sp, #40]
+    msr DAIFSet, #2
     mov x19, x0
     mov x20, #64
     ldp x0, x1, [x19]
@@ -11,6 +14,7 @@
     ldp x6, x7, [x19, #48]
 JfpScmResume
     smc #0
+    ldr x18, [sp, #32]
     cmp w0, #1
     b.ne JfpScmDone
     subs x20, x20, #1
@@ -27,6 +31,8 @@ JfpScmDone
     stp x4, x5, [x19, #32]
     stp x6, x7, [x19, #48]
     ldr x18, [sp, #32]
+    ldr x9, [sp, #40]
+    msr DAIF, x9
     EPILOG_RESTORE_REG_PAIR fp, lr, #16
     EPILOG_RESTORE_REG_PAIR x19, x20, #48!
     EPILOG_RETURN

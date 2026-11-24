@@ -22,7 +22,9 @@ int wmain(int argc,wchar_t **argv) {
     HANDLE device=CreateFileW(L"\\\\.\\qcom-cam",GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
     if(device==INVALID_HANDLE_VALUE){fprintf(stderr,"Open failed: %lu\n",GetLastError());return 1;}
     BOOL ok=FALSE;DWORD bytes=0,error=ERROR_INVALID_PARAMETER;
-    if(!wcscmp(argv[1],L"info")&&argc==2)ok=Info(device);
+    if((!wcscmp(argv[1],L"camera")||!wcscmp(argv[1],L"camera-probe"))&&argc==3) {QCAM_CAMERA_OPTIONS o={sizeof(o),QCAM_ABI,wcstoul(argv[2],NULL,0),!wcscmp(argv[1],L"camera-probe")};ok=DeviceIoControl(device,QCAM_CAMERA,&o,sizeof(o),NULL,0,&bytes,NULL);error=GetLastError();Info(device);}
+    else if(!wcscmp(argv[1],L"flash")&&argc>=3&&argc<=4){QCAM_FLASH_OPTIONS o={sizeof(o),QCAM_ABI,wcstoul(argv[2],NULL,0),argc==4?wcstoul(argv[3],NULL,0):30,100,0,0};ok=DeviceIoControl(device,QCAM_FLASH,&o,sizeof(o),NULL,0,&bytes,NULL);error=GetLastError();}
+    else if(!wcscmp(argv[1],L"info")&&argc==2)ok=Info(device);
     else if(!wcscmp(argv[1],L"context-read")&&argc==4) {
         QCAM_CONTEXT_REGISTER reg={wcstoul(argv[2],NULL,0),wcstoul(argv[3],NULL,0)};ULONG value=0;
         printf("Reading SMMU context %lu register %lx\n",reg.Bank,reg.Offset);fflush(stdout);
@@ -162,6 +164,7 @@ int wmain(int argc,wchar_t **argv) {
             printf("smmu global=%08lx slots=%lu banks=%lu camera_slot=%lu translated=%lu cbar=%08lx sctlr=%08lx control=%08lx\n",
                 t.SmmuState[0],t.SmmuState[1],t.SmmuState[2],t.SmmuState[3],t.SmmuState[4],t.SmmuState[5],t.SmmuState[6],t.SmmuState[7]);
             printf("sensor stream=%lu counter=%lu\n",t.SensorStream,t.SensorCounter);
+            printf("dphy status:");for(ULONG i=0;i<12;i++)printf(" %08lx",t.Dphy[i]);puts("");
             printf("frame prefix:");for(ULONG i=0;i<8;i++)printf(" %08lx",t.FrameWords[i]);printf("\n");
             printf("stopped frame nonzero page samples=%lu/%lu\n",t.FrameNonzeroSamples,t.FrameSampleCount);
             for(ULONG i=0;i<sizeof(CamPhyTraceRegs)/sizeof(CamPhyTraceRegs[0]);i++)printf("phy[%lx]=%08lx\n",CamPhyTraceRegs[i],t.Phy[i]);

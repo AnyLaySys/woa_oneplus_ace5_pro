@@ -19,7 +19,7 @@
   <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.props" />
   <PropertyGroup>
     <TargetName>qcom_gpu</TargetName>
-    <A830Revision>123</A830Revision>
+    <A830Revision>135</A830Revision>
     <A830Version>26.11.22.$(A830Revision)</A830Version>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
     <OutDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-gpu\ARM64\Release\bin\</OutDir>
@@ -35,7 +35,7 @@
   <Import Project="..\core\core.vcxitems" />
   <ItemGroup><ClCompile Include="shared-memory.c" /><ClInclude Include="memory-layout.h" /></ItemGroup>
   <ItemGroup><FilesToPackage Include="$(OutDir)vulkan_freedreno.dll" /><FilesToPackage Include="$(OutDir)vulkan_freedreno_x64.dll" /><FilesToPackage Include="$(OutDir)freedreno_icd.json" /><FilesToPackage Include="$(OutDir)freedreno_icd_x64.json" /><FilesToPackage Include="$(OutDir)msvcp140.dll" /><FilesToPackage Include="$(OutDir)vcruntime140.dll" /></ItemGroup>
-  <ItemGroup><FilesToPackage Include="$(OutDir)gen80000_zap.mbn" /><FilesToPackage Include="$(OutDir)vpu35_4v.mbn" /><ClInclude Include="..\..\qcom-dvfs.h" /></ItemGroup>
+  <ItemGroup><FilesToPackage Include="$(OutDir)gen80000_zap.mbn" /><FilesToPackage Include="$(OutDir)vpu35_4v.mbn" /><FilesToPackage Include="$(OutDir)a830_encoder.dll" /><FilesToPackage Include="$(OutDir)a830_encoder_arm64.dll" /><FilesToPackage Include="$(OutDir)a830_encoder_x64.dll" /><ClInclude Include="..\..\qcom-dvfs.h" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.targets" />
 </Project>

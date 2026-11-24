@@ -11,9 +11,9 @@ template<class T> static void Release(T *&p) {if(p){p->Release();p=nullptr;}}
 int wmain(int argc,wchar_t **argv) {
     const DWORD firstVideo=static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
     const DWORD allStreams=static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS);
-    if(argc>3){fwprintf(stderr,L"Usage: qcom_cam_check [FRAME.nv12 [FRAMES]]\n");return 2;}
+    if(argc>4){fwprintf(stderr,L"Usage: qcom_cam_check [FRAME.nv12 [FRAMES [SENSOR]]]\n");return 2;}
     ULONG frames=1;
-    if(argc==3) {
+    if(argc>=3) {
         wchar_t *end=nullptr;frames=wcstoul(argv[2],&end,10);
         if(*end||!frames||frames>300)return 2;
     }
@@ -31,7 +31,7 @@ int wmain(int argc,wchar_t **argv) {
         for(UINT32 i=0;i<count;i++) {
             wchar_t *name=nullptr;UINT32 length=0;
             if(SUCCEEDED(devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,&name,&length))) {
-                wprintf(L"%u: %ls\n",i,name);if(wcsstr(name,L"IMX906"))index=i;CoTaskMemFree(name);
+                wprintf(L"%u: %ls\n",i,name);if(wcsstr(name,argc==4?argv[3]:L"IMX906"))index=i;CoTaskMemFree(name);
             }
         }
         if(index==UINT32_MAX)hr=MF_E_NOT_FOUND;
@@ -51,7 +51,7 @@ int wmain(int argc,wchar_t **argv) {
         if(SUCCEEDED(hr))hr=type->SetGUID(MF_MT_MAJOR_TYPE,MFMediaType_Video);
         if(SUCCEEDED(hr))hr=type->SetGUID(MF_MT_SUBTYPE,MFVideoFormat_NV12);
         if(SUCCEEDED(hr))hr=MFSetAttributeSize(type,MF_MT_FRAME_SIZE,1024,768);
-        if(SUCCEEDED(hr))hr=MFSetAttributeRatio(type,MF_MT_FRAME_RATE,60,1);
+        if(SUCCEEDED(hr))hr=MFSetAttributeRatio(type,MF_MT_FRAME_RATE,argc==4&&(wcsstr(argv[3],L"IMX355")||wcsstr(argv[3],L"OV02B10"))?30:60,1);
         step=SUCCEEDED(hr)?L"set NV12 format":step;
         if(SUCCEEDED(hr))hr=reader->SetCurrentMediaType(firstVideo,nullptr,type);
         step=SUCCEEDED(hr)?L"read sample":step;

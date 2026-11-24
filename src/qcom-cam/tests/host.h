@@ -48,10 +48,11 @@ typedef struct {
     ULONGLONG ScmResumeArgs[8];
     ULONG ScmAuditSequence;
     ULONG FrameRoute[4];
+    ULONG Sensor;
     BOOLEAN LensReady;
     ULONG FocusPosition,FocusTarget,FocusFlags,FocusWait;
     LONG FocusStatus;
-    CAM_PDAF_CAL FocusCalibration;
+    CAM_PDAF_CAL FocusCalibration,MainFocusCalibration;
     CAM_PDAF_RESULT FocusResult;
     LONG FocusWorkspace[2520];
     ULONG FocusSequence,FocusStable,FocusMisses,FocusSamples;
@@ -59,9 +60,16 @@ typedef struct {
     ULONG FocusWindow;
     QCAM_ROI_OPTIONS FocusRoi;
     ULONG FocusRoiX,FocusRoiY;
+    BOOLEAN FlashAvailable,FlashOwned;
+    ULONG FlashMode,FlashPower,FlashTimeout;
+    ULONGLONG FlashDeadline;
+    UCHAR FlashSaved[10];
     ULONG VideoZoom;
     UCHAR *PdafLatest;QCAM_PDAF_FRAME PdafInfo;
 } CAM;
+ULONGLONG KeQueryInterruptTime(void);
+NTSTATUS CamPmic(CAM *c,ULONG ppid,UCHAR reg,UCHAR *value,BOOLEAN write);
+NTSTATUS CamFlashStop(CAM *c);
 ULONG CamRead(PUCHAR base,ULONG offset);
 VOID CamWrite(PUCHAR base,ULONG offset,ULONG value);
 ULONGLONG CamRead64(PUCHAR base,ULONG offset);
@@ -88,3 +96,6 @@ NTSTATUS CamCciReadByte(CAM *c,UCHAR slave,UCHAR address,PUCHAR buffer,ULONG byt
 NTSTATUS CamCciWriteByte(CAM *c,UCHAR slave,UCHAR address,const UCHAR *buffer,ULONG bytes);
 
 NTSTATUS CamPdafPrepare(CAM *c);
+
+static inline PUCHAR CamCciBase(CAM *c) {return c->Base[CamCci];}
+static inline ULONG CamCciMaster(CAM *c) {return c->Sensor?0:1;}

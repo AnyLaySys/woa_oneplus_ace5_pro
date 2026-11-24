@@ -6,6 +6,7 @@ struct _SIA_MIC {
     VOID (*Service)(PSIA_DEVICE, PVOID);
     PVOID Audio;
     ULONG Command;
+    LONG Volume;
     ULONGLONG SettleAt;
     BOOLEAN ResetReleased;
 };
@@ -135,6 +136,24 @@ static NTSTATUS MicWrite(PSIA_DEVICE Dev, PSIA_MIC Mic, ULONG Reg, ULONG Value)
 {
     return MicSdw(Dev,Mic,FALSE,Reg,&Value,FALSE);
 }
+NTSTATUS SiaMicGain(PSIA_DEVICE Dev, PSIA_MIC Mic)
+{
+    LONG Volume=InterlockedCompareExchange(&Dev->MicVolume,0,0);
+    if(Volume==Mic->Volume)return STATUS_SUCCESS;
+    const ULONG Reg[]={0x300e,0x300f,0x3011};
+    for(ULONG I=0;I<RTL_NUMBER_OF(Reg);I++){
+        ULONG Value=0;
+        NTSTATUS Status=MicSdw(Dev,Mic,TRUE,Reg[I],&Value,FALSE);
+        if(!NT_SUCCESS(Status))return Status;
+        Status=MicWrite(Dev,Mic,Reg[I],(Value&~0x1fu)|(ULONG)(Volume/SIA_MIC_VOLUME_STEP));
+        if(!NT_SUCCESS(Status))return Status;
+        Status=MicSdw(Dev,Mic,TRUE,Reg[I],&Value,FALSE);
+        if(!NT_SUCCESS(Status))return Status;
+        if((Value&0x1fu)!=(ULONG)(Volume/SIA_MIC_VOLUME_STEP))return STATUS_IO_DEVICE_ERROR;
+    }
+    Mic->Volume=Volume;
+    return STATUS_SUCCESS;
+}
 static NTSTATUS MicTable(PSIA_DEVICE Dev, PSIA_MIC Mic, const MIC_REG *Table, ULONG Count)
 {
     for(ULONG I=0;I<Count;I++){
@@ -150,7 +169,7 @@ NTSTATUS SiaMicStart(PSIA_DEVICE Dev, PSIA_MIC *Context, VOID (*Service)(PSIA_DE
     const ULONG Pins[]={0,1,2,14};
     PSIA_MIC Mic=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*Mic),'ciMS');
     if(!Mic)return STATUS_INSUFFICIENT_RESOURCES;
-    *Context=NULL;Mic->Service=Service;Mic->Audio=Audio;
+    *Context=NULL;Mic->Service=Service;Mic->Audio=Audio;Mic->Volume=-1;
     Mic->Bus=MicMap(0x07630000,0x6000);Mic->Va=MicMap(0x07660000,0x4000);
     Mic->Tx=MicMap(0x06ae0000,0x2000);Mic->Pins=MicMap(0x07760000,0x10000);
     NTSTATUS Status=STATUS_INSUFFICIENT_RESOURCES;
@@ -212,6 +231,7 @@ NTSTATUS SiaMicStart(PSIA_DEVICE Dev, PSIA_MIC *Context, VOID (*Service)(PSIA_DE
     }
     SiaWrite32(Mic->Tx,0x42c,0xa);
     Status=MicTable(Dev,Mic,MicStart,RTL_NUMBER_OF(MicStart));if(!NT_SUCCESS(Status))goto failed;
+    Status=SiaMicGain(Dev,Mic);if(!NT_SUCCESS(Status))goto failed;
     Mic->SettleAt=KeQueryInterruptTime()+2770000ULL;
     *Context=Mic;return STATUS_SUCCESS;
 failed:

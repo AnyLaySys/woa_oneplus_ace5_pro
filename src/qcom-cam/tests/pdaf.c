@@ -41,6 +41,16 @@ int main(void) {
         expected=CamPdafWindow(raw,&calibration,window,workspace);actual=CamPdafWindow(gathered,&calibration,window,workspace);
         assert(!memcmp(&expected,&actual,sizeof(actual)));
     }
+    QCAM_ROI_OPTIONS roi={sizeof(roi),QCAM_ABI,QCAM_ROI_FOCUS,0,0,65536,65536};ULONG x,y;
+    CamPdafRoiOrigin(&roi,QCAM_ZOOM_MIN,&x,&y);assert(x==896&&y==304);
+    roi.Right=roi.Bottom=1024;CamPdafRoiOrigin(&roi,QCAM_ZOOM_MIN,&x,&y);assert(!x&&!y);
+    roi.Left=roi.Top=64512;roi.Right=roi.Bottom=65536;CamPdafRoiOrigin(&roi,QCAM_ZOOM_MIN,&x,&y);assert(x==1792&&y==615);
+    CamPdafRoiOrigin(&roi,QCAM_ZOOM_MAX,&x,&y);assert(x<1792&&y<615);
+    for(ULONG first=0;first<=615;first+=41) {
+        memset(gathered,0,QCAM_PDAF_BYTES);CamPdafGatherRows(dual,gathered,first);
+        expected=CamPdafRegion(raw,&calibration,1792,first,9,workspace);actual=CamPdafRegion(gathered,&calibration,1792,first,9,workspace);
+        assert(!memcmp(&expected,&actual,sizeof(actual))&&actual.Confidence>900);
+    }
     free(dual);free(gathered);
     memset(raw,0,QCAM_PDAF_BYTES);assert(!CamPdafEstimate(raw,QCAM_PDAF_BYTES,&calibration,workspace).Confidence);
     assert(!CamPdafEstimate(raw,QCAM_PDAF_BYTES-1,&calibration,workspace).Confidence);

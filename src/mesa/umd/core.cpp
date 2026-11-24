@@ -272,7 +272,11 @@ static VkImageCreateInfo image_info(Resource *r,bool linear) {
  ci.format=r->vkformat;ci.extent={r->width,r->height,r->depth};ci.mipLevels=r->levels;ci.arrayLayers=r->layers;ci.samples=VK_SAMPLE_COUNT_1_BIT;
  ci.tiling=linear?VK_IMAGE_TILING_LINEAR:VK_IMAGE_TILING_OPTIMAL;
  ci.usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
- if(r->format==DXGI_FORMAT_NV12)ci.flags|=VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+ if(r->format==DXGI_FORMAT_NV12) {
+   ci.flags|=VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT|VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+   ci.extent.width=(ci.extent.width+127)&~127u;ci.extent.height=(ci.extent.height+63)&~63u;
+   if(r->bind&D3D10_DDI_BIND_RENDER_TARGET)ci.usage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+ }
  else if(r->bind&D3D10_DDI_BIND_RENDER_TARGET)ci.usage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
  if(r->bind&D3D10_DDI_BIND_DEPTH_STENCIL)ci.usage|=VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
  ci.initialLayout=linear?VK_IMAGE_LAYOUT_PREINITIALIZED:VK_IMAGE_LAYOUT_UNDEFINED;

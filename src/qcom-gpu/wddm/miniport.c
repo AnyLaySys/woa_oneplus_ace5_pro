@@ -77,7 +77,8 @@ static NTSTATUS StartWorker(A830_ADAPTER *a) {
 }
 NTSTATUS A830AdapterStop(PVOID context) {
     A830_ADAPTER *a=context;
-
+    InterlockedExchange(&a->Stopping,1);
+    NTSTATUS video=A830BridgeCloseVideo();if(!NT_SUCCESS(video))return video;
     StopWorker(a);
     NTSTATUS display=A830DpuStop(a);
     if(!NT_SUCCESS(display))return display;
@@ -224,8 +225,8 @@ static NTSTATUS APIENTRY Calibrate(HANDLE adapter,UINT32 node,UINT32 engine,DXGK
     return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY Present(HANDLE context,DXGKARG_PRESENT *p) {
-    UNREFERENCED_PARAMETER(context);
     if(!p->Flags.Flip)return STATUS_NOT_SUPPORTED;
+    UNREFERENCED_PARAMETER(context);
     p->pDmaBuffer=NULL;return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY ControlInterrupt(HANDLE adapter,DXGK_INTERRUPT_TYPE type,BOOLEAN enabled) {

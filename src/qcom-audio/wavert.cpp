@@ -136,7 +136,7 @@ static PCPIN_DESCRIPTOR TopologyPins[] = {
         KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_NONE, &KSNODETYPE_SPEAKER, nullptr, 0}}
 };
 static PCCONNECTION_DESCRIPTOR TopologyConnections[]={{PCFILTER_NODE,0,0,1},{0,0,1,1},{1,0,PCFILTER_NODE,1}};
-static PCCONNECTION_DESCRIPTOR MicConnections[]={{PCFILTER_NODE,0,PCFILTER_NODE,1}};
+static PCCONNECTION_DESCRIPTOR MicConnections[]={{PCFILTER_NODE,0,0,1},{0,0,PCFILTER_NODE,1}};
 static PCFILTER_DESCRIPTOR TopologyFilter = {
     0, &JackAutomation, sizeof(PCPIN_DESCRIPTOR), 2, TopologyPins, sizeof(PCNODE_DESCRIPTOR), 2, TopologyNodes,
     3, TopologyConnections, 0, nullptr
@@ -163,8 +163,8 @@ static PCPIN_DESCRIPTOR MicPins[] = {
         KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_NONE, &KSCATEGORY_AUDIO, nullptr, 0}}
 };
 static PCFILTER_DESCRIPTOR MicFilter = {
-    0, &MicJackAutomation, sizeof(PCPIN_DESCRIPTOR), 2, MicPins, 0, 0, nullptr,
-    1, MicConnections, 0, nullptr
+    0, &MicJackAutomation, sizeof(PCPIN_DESCRIPTOR), 2, MicPins, sizeof(PCNODE_DESCRIPTOR), 1, TopologyNodes,
+    2, MicConnections, 0, nullptr
 };
 
 class Stream final : public IMiniportWaveRTStreamNotification {
@@ -317,8 +317,8 @@ public:
 
 class Topology final : public IMiniportTopology {
     LONG References = 1;
-    BOOLEAN Capture;
 public:
+    BOOLEAN Capture;
     PSIA_DEVICE Dev;
     explicit Topology(PSIA_DEVICE Device,BOOLEAN Input) : Capture(Input),Dev(Device) {}
     STDMETHODIMP QueryInterface(REFIID Id, PVOID *Object) override {
@@ -339,37 +339,40 @@ public:
 
 static NTSTATUS VolumeProperty(PPCPROPERTY_REQUEST Request)
 {
+    auto Top=static_cast<Topology*>(Request->MajorTarget);
+    BOOLEAN Capture=Top->Capture;
     BOOLEAN Mute=Request->PropertyItem->Id==KSPROPERTY_AUDIO_MUTE;
-    ULONG Access=VolumeAccess,Full=sizeof(KSPROPERTY_DESCRIPTION)+sizeof(KSPROPERTY_MEMBERSHEADER)+2*sizeof(KSPROPERTY_STEPPING_LONG);
+    LONG Minimum=Capture?SIA_MIC_VOLUME_STEP:SIA_VOLUME_MIN,Maximum=Capture?SIA_MIC_VOLUME_MAX:0,Step=Capture?SIA_MIC_VOLUME_STEP:SIA_VOLUME_STEP;
+    ULONG Channels=Capture?1:2,Access=VolumeAccess,Full=sizeof(KSPROPERTY_DESCRIPTION)+sizeof(KSPROPERTY_MEMBERSHEADER)+Channels*sizeof(KSPROPERTY_STEPPING_LONG);
     if(Request->Verb&KSPROPERTY_TYPE_BASICSUPPORT) {
         if(Request->ValueSize<sizeof(ULONG))return STATUS_BUFFER_TOO_SMALL;
         if(Request->ValueSize<sizeof(KSPROPERTY_DESCRIPTION)){*(ULONG*)Request->Value=Access;Request->ValueSize=sizeof(ULONG);return STATUS_SUCCESS;}
         auto Desc=(PKSPROPERTY_DESCRIPTION)Request->Value;RtlZeroMemory(Desc,sizeof(*Desc));
         Desc->AccessFlags=Access;Desc->DescriptionSize=Full;Desc->PropTypeSet.Set=KSPROPTYPESETID_General;Desc->PropTypeSet.Id=Mute?VT_BOOL:VT_I4;Desc->MembersListCount=1;
         if(Request->ValueSize>=Full) {
-            auto Members=(PKSPROPERTY_MEMBERSHEADER)(Desc+1);*Members={KSPROPERTY_MEMBER_STEPPEDRANGES,sizeof(KSPROPERTY_STEPPING_LONG),2,KSPROPERTY_MEMBER_FLAG_BASICSUPPORT_MULTICHANNEL};
+            auto Members=(PKSPROPERTY_MEMBERSHEADER)(Desc+1);*Members={KSPROPERTY_MEMBER_STEPPEDRANGES,sizeof(KSPROPERTY_STEPPING_LONG),Channels,Capture?0u:KSPROPERTY_MEMBER_FLAG_BASICSUPPORT_MULTICHANNEL};
             auto Range=(PKSPROPERTY_STEPPING_LONG)(Members+1);
-            for(ULONG i=0;i<2;i++){Range[i].SteppingDelta=Mute?1:SIA_VOLUME_STEP;Range[i].Reserved=0;Range[i].Bounds.SignedMinimum=Mute?0:SIA_VOLUME_MIN;Range[i].Bounds.SignedMaximum=Mute?1:0;}
+            for(ULONG i=0;i<Channels;i++){Range[i].SteppingDelta=Mute?1:Step;Range[i].Reserved=0;Range[i].Bounds.SignedMinimum=Mute?0:Minimum;Range[i].Bounds.SignedMaximum=Mute?1:Maximum;}
             Request->ValueSize=Full;
         }else Request->ValueSize=sizeof(*Desc);
         return STATUS_SUCCESS;
     }
     if(Request->InstanceSize<sizeof(ULONG))return STATUS_INVALID_PARAMETER;
-    ULONG Channel=*(ULONG*)Request->Instance;if(Channel>1 && Channel!=ULONG(-1))return STATUS_INVALID_PARAMETER;
+    ULONG Channel=*(ULONG*)Request->Instance;if(Channel>=Channels && Channel!=ULONG(-1))return STATUS_INVALID_PARAMETER;
     if(!Request->ValueSize){Request->ValueSize=sizeof(LONG);return STATUS_BUFFER_OVERFLOW;}
     if(Request->ValueSize<sizeof(LONG))return STATUS_BUFFER_TOO_SMALL;
-    auto Dev=static_cast<Topology*>(Request->MajorTarget)->Dev;auto Value=(LONG*)Request->Value;auto Levels=Mute?Dev->Muted:Dev->Volume;
+    auto Dev=Top->Dev;auto Value=(LONG*)Request->Value;auto Levels=Capture?&Dev->MicVolume:(Mute?Dev->Muted:Dev->Volume);
     if(Request->Verb&KSPROPERTY_TYPE_GET)*Value=InterlockedCompareExchange(&Levels[Channel==ULONG(-1)?0:Channel],0,0);
     else if(Request->Verb&KSPROPERTY_TYPE_SET) {
         LONG Level=Mute?!!*Value:*Value;
-        if(!Mute && (Level<SIA_VOLUME_MIN || Level>0))return STATUS_INVALID_PARAMETER;
-        if(!Mute)Level=-((-Level+SIA_VOLUME_STEP/2)/SIA_VOLUME_STEP)*SIA_VOLUME_STEP;
-        LONG Gain=Mute?0:SiaGain(Level);
-        for(ULONG i=0;i<2;i++)if(Channel==i || Channel==ULONG(-1)) {
-            if(!Mute)InterlockedExchange(&Dev->Gain[i],Gain);
+        if(!Mute && (Level<Minimum || Level>Maximum))return STATUS_INVALID_PARAMETER;
+        if(!Mute)Level=Capture?((Level+Step/2)/Step)*Step:-((-Level+Step/2)/Step)*Step;
+        LONG Gain=Mute||Capture?0:SiaGain(Level);
+        for(ULONG i=0;i<Channels;i++)if(Channel==i || Channel==ULONG(-1)) {
+            if(!Mute && !Capture)InterlockedExchange(&Dev->Gain[i],Gain);
             InterlockedExchange(&Levels[i],Level);
         }
-        if(!Mute) {
+        if(!Mute && !Capture) {
             LONG Master=max(InterlockedCompareExchange(&Dev->Volume[0],0,0),InterlockedCompareExchange(&Dev->Volume[1],0,0));
             InterlockedExchange(&AudioLimits,QH_VOLUME_READY|(Master==0?QH_VOLUME_MAX:0)|(Master==SIA_VOLUME_MIN?QH_VOLUME_MIN:0));
         }

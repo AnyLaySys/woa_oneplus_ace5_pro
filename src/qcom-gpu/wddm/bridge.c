@@ -33,10 +33,13 @@ typedef struct {
     GPU *Hardware;
     IRIS *Video;
     A830_CLIENT *VideoClient;
+    A830_ALLOCATION *VideoInput;
+    GPU_VIDEO_CONFIG VideoConfig;
     LIST_ENTRY Clients;
     LIST_ENTRY Shared;
     ULONGLONG NextLease;
     KMUTEX Lock;
+    KMUTEX VideoLock;
     RTL_BITMAP Addresses;
     PULONG AddressBits;
     ULONG AddressHint;
@@ -83,8 +86,10 @@ NTSTATUS A830SharedCreate(A830_ALLOCATION *allocation) {
         ULONG size=max(allocation->Resource.Size,pitch*rows);
         A830_ADAPTER *a=Bridge.Adapter;
         BOOLEAN scanout=A830ScanoutFormat(allocation->Resource.Format) && allocation->Resource.Width==a->DisplayInfo.Width && height==a->DisplayInfo.Height;
-        status=scanout?A830ScanoutAllocate(a,&allocation->Buffer,size):STATUS_NOT_SUPPORTED;
-        if(!NT_SUCCESS(status))status=GpuAllocate(&allocation->Buffer,size);
+        status=allocation->Resource.Format==A830_FORMAT_NV12?
+            GpuAllocateContiguous(&allocation->Buffer,size,MmWriteCombined,0xdfffffff,0):
+            scanout?A830ScanoutAllocate(a,&allocation->Buffer,size):STATUS_NOT_SUPPORTED;
+        if(!NT_SUCCESS(status) && allocation->Resource.Format!=A830_FORMAT_NV12)status=GpuAllocate(&allocation->Buffer,size);
         if(!NT_SUCCESS(status))goto done;
         /* A pool slot may be larger than the requested primary. Reserve the
            complete mapped BO extent, never only the resource's visible bytes. */
@@ -133,6 +138,20 @@ static VOID SharedRelease(A830_ALLOCATION *allocation) {
         if(!A830ScanoutFree(Bridge.Adapter,&allocation->Buffer))GpuFree(&allocation->Buffer);
     }
     ExFreePoolWithTag(allocation,GPU_TAG);
+}
+static NTSTATUS CloseVideo(VOID) {
+    NTSTATUS status=IrisDelete(Bridge.Video);
+    if(NT_SUCCESS(status)) {
+        KeWaitForSingleObject(&Bridge.Lock,Executive,KernelMode,FALSE,NULL);
+        Bridge.Video=NULL;Bridge.VideoClient=NULL;
+        if(Bridge.VideoInput){SharedRelease(Bridge.VideoInput);Bridge.VideoInput=NULL;}
+        KeReleaseMutex(&Bridge.Lock,FALSE);
+    }
+    return status;
+}
+NTSTATUS A830BridgeCloseVideo(VOID) {
+    KeWaitForSingleObject(&Bridge.VideoLock,Executive,KernelMode,FALSE,NULL);
+    NTSTATUS status=CloseVideo();KeReleaseMutex(&Bridge.VideoLock,FALSE);return status;
 }
 /* Bridge.Lock is held. Pending slot IDs remain occupied until actual free;
    callers cannot make a new allocation reuse a deferred object's identity. */
@@ -347,8 +366,11 @@ static NTSTATUS StartHardware(A830_BRIDGE *g) {
     return status;
 }
 NTSTATUS A830BridgeReset(VOID) {
+    KeWaitForSingleObject(&Bridge.VideoLock,Executive,KernelMode,FALSE,NULL);
+    NTSTATUS status=CloseVideo();
+    if(!NT_SUCCESS(status)){KeReleaseMutex(&Bridge.VideoLock,FALSE);return status;}
     KeWaitForSingleObject(&Bridge.Lock,Executive,KernelMode,FALSE,NULL);
-    NTSTATUS status=STATUS_DEVICE_NOT_READY;
+    status=STATUS_DEVICE_NOT_READY;
     if(Bridge.Adapter && Bridge.Hardware) {
         PauseClock(&Bridge);
         GpuStop(Bridge.Hardware);status=StartHardware(&Bridge);
@@ -366,7 +388,7 @@ NTSTATUS A830BridgeReset(VOID) {
         }
         ResumeClock(&Bridge);
     }
-    KeReleaseMutex(&Bridge.Lock,FALSE);return status;
+    KeReleaseMutex(&Bridge.Lock,FALSE);KeReleaseMutex(&Bridge.VideoLock,FALSE);return status;
 }
 NTSTATUS A830BridgeMap(GPU_BO *bo,ULONGLONG address) {
     if(!bo || !KernelRange(address,bo->Size))
@@ -424,20 +446,6 @@ static NTSTATUS Io(A830_BRIDGE *g,A830_CLIENT *c,PIRP request,ULONG code,ULONG i
     PVOID in=NULL,out=NULL;ULONG_PTR bytes=0;NTSTATUS status=STATUS_INVALID_PARAMETER;
     in=out=request->AssociatedIrp.SystemBuffer;
     if((inLength || outLength) && !in)return STATUS_INVALID_PARAMETER;
-    if(code==GPU_IOCTL_VIDEO_OPEN || code==GPU_IOCTL_VIDEO_CLOSE) {
-        if(inLength || outLength)return STATUS_INVALID_PARAMETER;
-        if(code==GPU_IOCTL_VIDEO_OPEN) {
-            if(g->Video)return STATUS_DEVICE_BUSY;
-            g->VideoClient=c;
-            NTSTATUS opened=IrisCreate(g->Hardware,g->Device->DriverObject,&g->Video);
-            if(!g->Video)g->VideoClient=NULL;
-            return opened;
-        }
-        if(g->VideoClient!=c)return STATUS_INVALID_HANDLE;
-        NTSTATUS closed=IrisDelete(g->Video);
-        if(NT_SUCCESS(closed)){g->Video=NULL;g->VideoClient=NULL;}
-        return closed;
-    }
     if(code==GPU_IOCTL_SPARSE_CAPS || code==GPU_IOCTL_VA_RESERVE || code==GPU_IOCTL_VA_RELEASE || code==GPU_IOCTL_VA_BIND)
         return SparseIo(g,c,request,code,inLength,outLength);
 
@@ -514,6 +522,66 @@ static NTSTATUS Io(A830_BRIDGE *g,A830_CLIENT *c,PIRP request,ULONG code,ULONG i
     }
     request->IoStatus.Information=bytes;return status;
 }
+static NTSTATUS VideoIo(A830_CLIENT *c,PIRP request,ULONG code,ULONG inLength,ULONG outLength) {
+    if(c->Draining)return STATUS_DEVICE_NOT_READY;
+    InterlockedIncrement(&c->PendingRefs);KeClearEvent(&c->Drained);
+    KeReleaseMutex(&Bridge.Lock,FALSE);
+    KeWaitForSingleObject(&Bridge.VideoLock,Executive,KernelMode,FALSE,NULL);
+    KeWaitForSingleObject(&Bridge.Lock,Executive,KernelMode,FALSE,NULL);
+    NTSTATUS status=STATUS_INVALID_PARAMETER;
+    PVOID data=request->AssociatedIrp.SystemBuffer;
+    if(!Bridge.Adapter || !Bridge.Hardware || !Bridge.Hardware->Online || Bridge.Adapter->Stopping || c->Draining)status=STATUS_DEVICE_NOT_READY;
+    else if(code==GPU_IOCTL_VIDEO_OPEN && data && inLength==sizeof(GPU_VIDEO_CONFIG) && !outLength) {
+        if(Bridge.Video)status=STATUS_DEVICE_BUSY;
+        else {
+            Bridge.VideoConfig=*(GPU_VIDEO_CONFIG *)data;Bridge.VideoClient=c;
+            KeReleaseMutex(&Bridge.Lock,FALSE);
+            status=IrisCreate(Bridge.Hardware,Bridge.Device->DriverObject,&Bridge.Video);
+            if(NT_SUCCESS(status))status=IrisStart(Bridge.Video,&Bridge.VideoConfig);
+            if(!NT_SUCCESS(status)) {
+                NTSTATUS closed=CloseVideo();if(!NT_SUCCESS(closed))status=closed;
+            }
+            KeWaitForSingleObject(&Bridge.Lock,Executive,KernelMode,FALSE,NULL);
+        }
+    } else if(Bridge.VideoClient!=c)status=STATUS_INVALID_HANDLE;
+    else if(code==GPU_IOCTL_VIDEO_CLOSE && !inLength && !outLength) {
+        KeReleaseMutex(&Bridge.Lock,FALSE);status=CloseVideo();
+        KeWaitForSingleObject(&Bridge.Lock,Executive,KernelMode,FALSE,NULL);
+    } else if(code==GPU_IOCTL_VIDEO_ENCODE && data && inLength==sizeof(GPU_VIDEO_INPUT) &&
+              request->MdlAddress && outLength>sizeof(GPU_VIDEO_OUTPUT)) {
+        GPU_VIDEO_INPUT input=*(GPU_VIDEO_INPUT *)data;
+        if(input.Keyframe<=1 && (!input.Bitrate || (input.Bitrate>=64000 && input.Bitrate<=40000000)) && !Bridge.VideoInput) {
+            status=STATUS_INVALID_HANDLE;
+            for(ULONG i=0;i<RTL_NUMBER_OF(c->Imports);i++) {
+                A830_ALLOCATION *allocation=c->Imports[i];
+                if(!allocation || c->Deferred.Imports[i] || allocation->Buffer.Address!=input.Address ||
+                   !allocation->Buffer.Contiguous || allocation->Resource.Format!=A830_FORMAT_NV12 ||
+                   allocation->Resource.Width!=Bridge.VideoConfig.Width || allocation->Resource.Height!=Bridge.VideoConfig.Height ||
+                   allocation->Resource.Pitch!=((Bridge.VideoConfig.Width+127)&~127u))continue;
+                GPU_VIDEO_OUTPUT *out=MmGetSystemAddressForMdlSafe(request->MdlAddress,NormalPagePriority|MdlMappingNoExecute);
+                if(!out){status=STATUS_INSUFFICIENT_RESOURCES;break;}
+                allocation->References++;Bridge.VideoInput=allocation;
+                KeReleaseMutex(&Bridge.Lock,FALSE);
+                BOOLEAN keyframe=FALSE;ULONG bytes=0;
+                status=IrisEncode(Bridge.Video,&allocation->Buffer,input.Time,input.Keyframe!=0,input.Bitrate,
+                    (PUCHAR)(out+1),outLength-sizeof(*out),&bytes,&keyframe);
+                KeWaitForSingleObject(&Bridge.Lock,Executive,KernelMode,FALSE,NULL);
+                if(NT_SUCCESS(status)) {
+                    out->Bytes=bytes;out->Keyframe=keyframe;out->Time=input.Time;
+                    request->IoStatus.Information=sizeof(*out)+bytes;
+                    SharedRelease(Bridge.VideoInput);Bridge.VideoInput=NULL;
+                }
+                break;
+            }
+        }
+    }
+    KIRQL old;KeAcquireSpinLock(&c->RefLock,&old);
+    if(!InterlockedDecrement(&c->PendingRefs)) {
+        KeSetEvent(&c->Drained,IO_NO_INCREMENT,FALSE);
+        if(Bridge.Adapter)A830WakeDisplay(Bridge.Adapter);
+    }
+    KeReleaseSpinLock(&c->RefLock,old);KeReleaseMutex(&Bridge.VideoLock,FALSE);return status;
+}
 static NTSTATUS Dispatch(PDEVICE_OBJECT device,PIRP request) {
     PIO_STACK_LOCATION stack=IoGetCurrentIrpStackLocation(request);
     if(device!=Bridge.Device)return Bridge.Previous[stack->MajorFunction](device,request);
@@ -543,9 +611,12 @@ static NTSTATUS Dispatch(PDEVICE_OBJECT device,PIRP request) {
             A830_CLIENT *c=stack->FileObject->FsContext;
             if(c && c!=(PVOID)(ULONG_PTR)1) {
                 if(Bridge.VideoClient==c) {
-                    status=IrisDelete(Bridge.Video);
+                    c->Draining=TRUE;KeReleaseMutex(&Bridge.Lock,FALSE);
+                    KeWaitForSingleObject(&Bridge.VideoLock,Executive,KernelMode,FALSE,NULL);
+                    status=Bridge.VideoClient==c?CloseVideo():STATUS_SUCCESS;
+                    KeReleaseMutex(&Bridge.VideoLock,FALSE);
+                    KeWaitForSingleObject(&Bridge.Lock,Executive,KernelMode,FALSE,NULL);
                     if(!NT_SUCCESS(status))break;
-                    Bridge.Video=NULL;Bridge.VideoClient=NULL;
                 }
                 /* Closing the owner file revokes unsubmitted packets. Tokens
                    already transferred to Submit remain pinned and drain normally. */
@@ -562,8 +633,12 @@ static NTSTATUS Dispatch(PDEVICE_OBJECT device,PIRP request) {
             A830_CLIENT *c=stack->FileObject->FsContext;
             if(!Bridge.Adapter || !c || c==(PVOID)(ULONG_PTR)1 || !c->Owner || IoGetRequestorProcess(request)!=c->Owner)
                 status=STATUS_DEVICE_NOT_READY;
-            else status=Io(&Bridge,c,request,stack->Parameters.DeviceIoControl.IoControlCode,
-                stack->Parameters.DeviceIoControl.InputBufferLength,stack->Parameters.DeviceIoControl.OutputBufferLength);
+            else {
+                ULONG code=stack->Parameters.DeviceIoControl.IoControlCode;
+                status=code==GPU_IOCTL_VIDEO_OPEN || code==GPU_IOCTL_VIDEO_CLOSE || code==GPU_IOCTL_VIDEO_ENCODE?
+                    VideoIo(c,request,code,stack->Parameters.DeviceIoControl.InputBufferLength,stack->Parameters.DeviceIoControl.OutputBufferLength):
+                    Io(&Bridge,c,request,code,stack->Parameters.DeviceIoControl.InputBufferLength,stack->Parameters.DeviceIoControl.OutputBufferLength);
+            }
             break;
         }
         }
@@ -614,6 +689,7 @@ static NTSTATUS SetDeviceLabel(PDEVICE_OBJECT device) {
 }
 NTSTATUS A830BridgeInitialize(PDRIVER_OBJECT object) {
     KeInitializeMutex(&Bridge.Lock,0);
+    KeInitializeMutex(&Bridge.VideoLock,0);
     InitializeListHead(&Bridge.Clients);
     InitializeListHead(&Bridge.Shared);
     ExInitializeRundownProtection(&Bridge.ClockAccess);

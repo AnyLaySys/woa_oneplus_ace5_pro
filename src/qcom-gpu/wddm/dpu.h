@@ -7,6 +7,8 @@
  * has confirmed their replacement. Physical addresses must be contiguous.
  */
 NTSTATUS A830DpuInitialize(PVOID adapter);
+BOOLEAN A830DpuCanRefresh(PVOID adapter);
+NTSTATUS A830DpuSetRefresh(PVOID adapter,ULONG hz);
 NTSTATUS A830DpuStop(PVOID adapter);
 /* Crash/bugcheck path: MMIO only, no allocation, timer deletion or waits. */
 VOID A830DpuRestoreRegisters(PVOID adapter);

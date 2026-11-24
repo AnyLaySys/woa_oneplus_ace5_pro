@@ -187,7 +187,10 @@ typedef struct {
     volatile LONG WakeNeeded;
     ULONG Line;
     ULONGLONG LastEdge,LastSample,EdgeError,Period,TimerLate,PollBegin,PollDue,LineTime,TransactionWait;
+    volatile LONG Changing;
+    ULONG VsyncHz;
 } A830_DPU;
+static ULONGLONG PollStep(A830_DPU *d){return min(max(max(d->Period/128,d->EdgeError/4),500ULL),1000ULL);}
 static BOOLEAN AdvanceTransaction(PVOID context);
 static VOID SampleEdge(A830_DPU *d,ULONGLONG now) {
     if(d->LastEdge) {
@@ -200,7 +203,7 @@ static VOID SampleEdge(A830_DPU *d,ULONGLONG now) {
     d->LastEdge=now;
 }
 static VOID SetPoll(A830_DPU *d,ULONGLONG due) {
-    if(d->Stopping || !d->Enabled || d->TransactionState==4 || !d->Timer)return;
+    if(d->Stopping || d->Changing || !d->Enabled || d->TransactionState==4 || !d->Timer)return;
     if(d->PollDue && d->PollDue<=due)return;
     ULONGLONG now=PreciseTime();d->PollDue=due;
     ExSetTimer(d->Timer,due>now?-(LONGLONG)(due-now):-1,0,NULL);
@@ -281,6 +284,73 @@ static ULONG Read(A830_DPU *d,ULONG offset) {
 static VOID Write(A830_DPU *d,ULONG offset,ULONG value) {
     WRITE_REGISTER_ULONG((PULONG)(d->Registers+offset),value);
 }
+typedef struct {A830_DPU *Dpu;ULONG Sync,Auto,Hz;NTSTATUS Status;BOOLEAN Resume;} REFRESH_ACCESS;
+static BOOLEAN RefreshAccess(PVOID context) {
+    REFRESH_ACCESS *r=context;A830_DPU *d=r->Dpu;
+    if(!r->Resume) {
+        r->Sync=Read(d,d->Intf+0x288);r->Auto=Read(d,d->Intf+0x2b4);
+        Write(d,d->Intf+0x288,r->Sync&~(1u<<20));Write(d,d->Intf+0x2b4,r->Auto&~(1u<<31));
+    } else {
+        if(NT_SUCCESS(r->Status)) {
+            r->Sync=(r->Sync&~0x7ffffu)|(d->VsyncHz/((d->Adapter->DisplayInfo.Height+102)*r->Hz));
+            d->Period=10000000ULL/r->Hz;InterlockedExchange(&d->Adapter->RefreshRate,r->Hz);
+        }
+        Write(d,d->Intf+0x2b4,r->Auto);Write(d,d->Intf+0x288,r->Sync);
+        d->AutoRefresh=r->Auto&(1u<<31);d->LastEdge=d->LastSample=0;
+        InterlockedExchange(&d->Changing,0);SetPoll(d,PreciseTime()+10000);
+    }
+    KeMemoryBarrier();return TRUE;
+}
+NTSTATUS A830DpuSetRefresh(PVOID context,ULONG hz) {
+    A830_ADAPTER *a=context;
+    if(hz!=60 && hz!=90 && hz!=120)return STATUS_INVALID_PARAMETER;
+    if(KeGetCurrentIrql()!=PASSIVE_LEVEL)return STATUS_INVALID_DEVICE_STATE;
+    KeWaitForSingleObject(&a->DisplayPowerLock,Executive,KernelMode,FALSE,NULL);
+    A830_DPU *d=NULL;KIRQL old;NTSTATUS status=STATUS_DEVICE_BUSY;
+    ULONGLONG end=PreciseTime()+2000000;LARGE_INTEGER delay;delay.QuadPart=-10000;
+    do {
+        KeAcquireSpinLock(&a->QueueLock,&old);d=a->Dpu;
+        if(!d || !d->Enabled || d->Stopping || !d->VsyncHz){status=hz==120?STATUS_SUCCESS:STATUS_NOT_SUPPORTED;d=NULL;}
+        else if(A830RefreshRate(a)==hz){status=STATUS_SUCCESS;d=NULL;}
+        else if(!d->Changing && (!d->TransactionState || d->TransactionState==4)) {
+            InterlockedExchange(&d->Changing,1);status=STATUS_SUCCESS;
+        } else {d=NULL;status=STATUS_DEVICE_BUSY;}
+        KeReleaseSpinLock(&a->QueueLock,old);
+        if(status!=STATUS_DEVICE_BUSY)break;
+        KeDelayExecutionThread(KernelMode,FALSE,&delay);
+    } while(PreciseTime()<end);
+    if(d) {
+        ULONG previous=A830RefreshRate(a);
+        REFRESH_ACCESS r={0};r.Dpu=d;r.Hz=hz;BOOLEAN result=FALSE;
+        KeAcquireSpinLock(&a->QueueLock,&old);
+        status=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,RefreshAccess,&r,0,&result);
+        KeReleaseSpinLock(&a->QueueLock,old);
+        if(NT_SUCCESS(status)) {
+            end=PreciseTime()+2000000;
+            while((Read(d,d->Intf+0x2b0)&0xffffu)>0 && (Read(d,d->Intf+0x2b0)&0xffffu)<a->DisplayInfo.Height && PreciseTime()<end)
+                KeDelayExecutionThread(KernelMode,FALSE,&delay);
+            if(PreciseTime()>=end)status=STATUS_IO_TIMEOUT;
+            else {
+                status=A830PanelRefresh(hz);
+                if(!NT_SUCCESS(status)) {
+                    NTSTATUS restored=A830PanelRefresh(previous);
+                    if(!NT_SUCCESS(restored)){InterlockedExchange(&a->Failed,restored);status=restored;}
+                }
+            }
+            r.Status=status;r.Resume=TRUE;
+            KeAcquireSpinLock(&a->QueueLock,&old);
+            NTSTATUS resumed=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,RefreshAccess,&r,0,&result);
+            KeReleaseSpinLock(&a->QueueLock,old);if(!NT_SUCCESS(resumed))status=resumed;
+        } else InterlockedExchange(&d->Changing,0);
+        A830WakeDisplay(a);
+    }
+    KeReleaseMutex(&a->DisplayPowerLock,FALSE);return status;
+}
+BOOLEAN A830DpuCanRefresh(PVOID context) {
+    A830_ADAPTER *a=context;KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);A830_DPU *d=a->Dpu;
+    BOOLEAN ready=d && d->Enabled && !d->Stopping && d->VsyncHz;
+    KeReleaseSpinLock(&a->QueueLock,old);return ready;
+}
 static ULONG TxFrame(A830_DPU *d) {return Read(d,d->Intf+0xac);}
 static VOID Flush(A830_DPU *d) {
     KeMemoryBarrier();
@@ -317,7 +387,7 @@ static VOID FailTransaction(A830_DPU *d,NTSTATUS status) {
 
 static BOOLEAN AdvanceTransaction(PVOID context) {
     A830_DPU *d=context;
-    if(d->Stopping || !d->Enabled || d->TransactionState==4)return TRUE;
+    if(d->Stopping || d->Changing || !d->Enabled || d->TransactionState==4)return TRUE;
     if(!d->TransactionState) {
         LONG64 sequence=ReadAcquire64(&d->Queued);
         if((sequence&1) || sequence<=ReadAcquire64(&d->Applied))return TRUE;
@@ -340,10 +410,10 @@ static BOOLEAN AdvanceTransaction(PVOID context) {
     }
     ULONG line=Read(d,d->Intf+0x2b0)&0xffffu;
     BOOLEAN active=line>0 && line<d->Adapter->DisplayInfo.Height;
-    ULONGLONG now=PreciseTime();d->TransactionWait=2000;
+    ULONGLONG now=PreciseTime(),step=PollStep(d);d->TransactionWait=2000;
     if(active && d->LineTime && line>d->Line && now-d->LineTime<=d->Period) {
         ULONGLONG remaining=(d->Adapter->DisplayInfo.Height-line)*(now-d->LineTime)/(line-d->Line);
-        d->TransactionWait=remaining>4000?min(remaining/2,d->Period/8):1000;
+        d->TransactionWait=remaining>step*4?min(remaining/2,d->Period/8):step;
     }
     d->Line=line;d->LineTime=active?now:0;
     if(d->TransactionState==1) {
@@ -406,7 +476,7 @@ static VOID Poll(PEX_TIMER timer,PVOID context) {
     KIRQL old;KeAcquireSpinLock(&d->Adapter->QueueLock,&old);
     ULONGLONG due=d->PollDue;d->PollDue=0;
     KeReleaseSpinLock(&d->Adapter->QueueLock,old);
-    if(d->Stopping || !d->Enabled || d->TransactionState==4)return;
+    if(d->Stopping || d->Changing || !d->Enabled || d->TransactionState==4)return;
     ULONGLONG now=PreciseTime(),late=due && now>due?now-due:0;
     d->TimerLate=max(min(late,d->Period/4),d->TimerLate-d->TimerLate/32);
     if(d->TransactionState || ReadAcquire64(&d->Queued)>ReadAcquire64(&d->Applied)) {
@@ -426,20 +496,20 @@ static VOID Poll(PEX_TIMER timer,PVOID context) {
         }
         else if(!d->LastEdge)d->LastEdge=now;
         d->PollBegin=now;
-        if(d->Vsync) {
-            BOOLEAN result=FALSE;
-            NTSTATUS status=d->Adapter->Dxgk.DxgkCbSynchronizeExecution(
-                d->Adapter->Dxgk.DeviceHandle,Notify,d,0,&result);
-            if(!NT_SUCCESS(status))InterlockedExchange(&d->Adapter->Failed,status);
-        }
+    }
+    if(edge && d->Vsync) {
+        BOOLEAN result=FALSE;
+        NTSTATUS status=d->Adapter->Dxgk.DxgkCbSynchronizeExecution(
+            d->Adapter->Dxgk.DeviceHandle,Notify,d,0,&result);
+        if(!NT_SUCCESS(status))InterlockedExchange(&d->Adapter->Failed,status);
     }
 
-    now=PreciseTime();ULONGLONG wait=d->LastEdge?1000:2000;
+    now=PreciseTime();ULONGLONG step=PollStep(d),guard=step*2,wait=d->LastEdge?step:2000;
     if(d->LastEdge) {
         ULONGLONG elapsed=edge?now-d->LastEdge:d->PollBegin-d->LastEdge+d->Period/2;
         ULONGLONG next=d->LastEdge+(elapsed/d->Period+1)*d->Period;
-        ULONGLONG lead=d->EdgeError+(d->TimerLate<2000?2000-d->TimerLate:0);
-        if(next>now)wait=next-now>lead?next-now-lead:1000;
+        ULONGLONG lead=d->EdgeError+(d->TimerLate<guard?guard-d->TimerLate:0);
+        if(next>now)wait=next-now>lead?next-now-lead:step;
     }
     if((!d->Vsync && d->Applied==InterlockedCompareExchange64(&d->Queued,0,0)) ||
        now-d->PollBegin>d->Period*2)wait=100000;
@@ -476,8 +546,9 @@ static NTSTATUS Start(A830_ADAPTER *a) {
     if(!QcomGpuScanoutStagingReady(a))return STATUS_NOT_SUPPORTED;
     A830_DPU *d=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*d),GPU_TAG);
     if(!d)return STATUS_INSUFFICIENT_RESOURCES;
-    d->Adapter=a;d->Period=83333;d->EdgeError=10000;a->Dpu=d;
+    d->Adapter=a;d->Period=10000000ULL/A830RefreshRate(a);d->EdgeError=10000;a->Dpu=d;
     NTSTATUS status=Clocks(d);if(!NT_SUCCESS(status))goto failed;
+    if((READ_REGISTER_ULONG((PULONG)(d->Dispcc+0x816c))&0x71fu)<=1)d->VsyncHz=19200000;
 
     if(!TranslationProved(a)){status=STATUS_NOT_SUPPORTED;goto failed;}
     PHYSICAL_ADDRESS p;p.QuadPart=0xae01000;
@@ -647,6 +718,9 @@ static NTSTATUS SynchronizeStop(A830_ADAPTER *a,A830_DPU *d,BOOLEAN retire) {
 }
 NTSTATUS A830DpuStop(PVOID context) {
     A830_ADAPTER *a=context;A830_DPU *d=a->Dpu;if(!d)return RestoreAhb(a);
+    if(d->Enabled && d->VsyncHz && A830RefreshRate(a)!=120) {
+        NTSTATUS restored=A830DpuSetRefresh(a,120);if(!NT_SUCCESS(restored))return restored;
+    }
     NTSTATUS stopped=SynchronizeStop(a,d,FALSE);if(!NT_SUCCESS(stopped))return stopped;
     if(d->Timer){ExDeleteTimer(d->Timer,TRUE,TRUE,NULL);d->Timer=NULL;}
     RestoreTransaction(d);

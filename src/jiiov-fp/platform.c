@@ -96,7 +96,7 @@ static NTSTATUS EnableClock(JFP_DEVICE *device) {
     return NT_SUCCESS(status) && !NT_SUCCESS(released) ? released : status;
 }
 
-NTSTATUS JfpInitialize(JFP_DEVICE *device) {
+static NTSTATUS Initialize(JFP_DEVICE *device) {
     if (device->Faulted || device->Power.Faulted) return STATUS_INVALID_DEVICE_STATE;
     if (device->Info.Flags & JFP_FLAG_CHIP) return STATUS_SUCCESS;
     NTSTATUS status = JfpInspect(device);
@@ -114,9 +114,10 @@ NTSTATUS JfpInitialize(JFP_DEVICE *device) {
     if (!(device->Info.Flags & JFP_FLAG_FIFO)) return STATUS_NOT_SUPPORTED;
     if (device->Info.SequencerStatus & 0x1001u) return STATUS_DEVICE_BUSY;
     if (!device->RegistersOwned) {
-        for (ULONG i = 0; i < RTL_NUMBER_OF(JfpRegisterOffsets); i++)
+        for (ULONG i = 0; i < RTL_NUMBER_OF(JfpRegisterOffsets); i++) {
             device->SavedRegisters[i] = SeRead(device, JfpRegisterOffsets[i]);
-        if (!(device->Info.Flags & JFP_FLAG_REGISTER_IO)) return device->Info.Status;
+            if (!(device->Info.Flags & JFP_FLAG_REGISTER_IO)) return device->Info.Status;
+        }
         device->RegistersOwned = TRUE;
     }
     status = JfpPowerOn(device);
@@ -161,7 +162,7 @@ NTSTATUS JfpInitialize(JFP_DEVICE *device) {
     return status;
 }
 
-VOID JfpRelease(JFP_DEVICE *device) {
+static VOID Restore(JFP_DEVICE *device) {
     if (device->RegistersOwned && device->Se && !device->Faulted) {
         if (!(SeRead(device, 0x40) & 1u)) {
             for (ULONG i = 0; i < RTL_NUMBER_OF(JfpRegisterOffsets); i++)
@@ -178,12 +179,82 @@ VOID JfpRelease(JFP_DEVICE *device) {
     if (device->AddedClockVotes && device->Gcc) {
         PLATFORM_LOCK_GUARD guard = {0};
         if (NT_SUCCESS(PlatformLockAcquire(&guard, FALSE))) {
-            Write(device->Gcc, 0x52008, Read(device->Gcc, 0x52008) & ~device->AddedClockVotes);
+            ULONG vote = Read(device->Gcc, 0x52008);
+            if (vote != MAXULONG) {
+                ULONG remove = device->AddedClockVotes;
+                ULONG remaining = vote & ~remove;
+                ULONG other = Read(device->Gcc, 0x52010);
+                if ((remaining & 0x1ec00000u) || other == MAXULONG || (other & 0x00010000u))
+                    remove &= ~0x003c0000u;
+                Write(device->Gcc, 0x52008, vote & ~remove);
+                device->ClockOwned = FALSE;
+                device->AddedClockVotes = 0;
+            }
             PlatformLockRelease(&guard);
         }
-        device->ClockOwned = FALSE;
-        device->AddedClockVotes = 0;
     }
+    device->Info.Flags &= ~(JFP_FLAG_CLOCK | JFP_FLAG_SPI | JFP_FLAG_FIFO | JFP_FLAG_CHIP);
+}
+
+NTSTATUS JfpSensorClockOn(JFP_DEVICE *device) {
+    NTSTATUS status = JfpQteeTrace(&device->Tee, 24, NULL, STATUS_SUCCESS);
+    if (!NT_SUCCESS(status)) return status;
+    status = EnableClock(device);
+    ULONGLONG observed[8] = {Read(device->Gcc, 0x52008), Read(device->Gcc, 0x1827c),
+        device->AddedClockVotes, device->Info.PowerAddress};
+    JfpQteeTrace(&device->Tee, 25, observed, status);
+    return status;
+}
+
+NTSTATUS JfpSensorOn(JFP_DEVICE *device) {
+    if (!device->Pins || !device->Rsc || !device->Db || device->Power.Faulted)
+        return STATUS_INVALID_DEVICE_STATE;
+    if (device->PinsOwned) return STATUS_INVALID_DEVICE_STATE;
+    for (ULONG i = 0; i < 4; i++) {
+        ULONG pin = Read(device->Pins, (40 + i) * 0x1000);
+        if (pin == MAXULONG || ((pin >> 2) & 15u) > 1) return STATUS_DEVICE_CONFIGURATION_ERROR;
+        device->SavedPins[i] = pin;
+    }
+    device->SavedReset[0] = Read(device->Pins, 78 * 0x1000);
+    device->SavedReset[1] = Read(device->Pins, 78 * 0x1000 + 4);
+    if (device->SavedReset[0] == MAXULONG || device->SavedReset[1] == MAXULONG)
+        return STATUS_IO_DEVICE_ERROR;
+    NTSTATUS status = JfpQteeTrace(&device->Tee, 20, NULL, STATUS_SUCCESS);
+    if (!NT_SUCCESS(status)) return status;
+    status = JfpPowerOn(device);
+    JfpQteeTrace(&device->Tee, 21, NULL, status);
+    if (!NT_SUCCESS(status)) return status;
+    device->PinsOwned = TRUE;
+    Write(device->Pins, 78 * 0x1000 + 4, 0);
+    Write(device->Pins, 78 * 0x1000, 0x200);
+    Delay(3);
+    Write(device->Pins, 78 * 0x1000 + 4, 2);
+    Delay(20);
+    JfpQteeTrace(&device->Tee, 23, NULL, STATUS_SUCCESS);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS JfpSensorOff(JFP_DEVICE *device) {
+    if (device->Tee.Pending) return STATUS_IO_TIMEOUT;
+    JfpQteeTrace(&device->Tee, 26, NULL, STATUS_SUCCESS);
+    Restore(device);
+    JfpQteeTrace(&device->Tee, 27, NULL, STATUS_SUCCESS);
+    NTSTATUS status = JfpPowerOff(device);
+    JfpQteeTrace(&device->Tee, 29, NULL, status);
+    return status;
+}
+
+NTSTATUS JfpInitialize(JFP_DEVICE *device) {
+    NTSTATUS status = Initialize(device);
+    if (!NT_SUCCESS(status)) JfpSensorOff(device);
+    return status;
+}
+
+VOID JfpRelease(JFP_DEVICE *device) {
+    if (device->Tee.VerifyStarted) JfpQteeSessionEnd(device);
+    else JfpQteeRelease(device);
+    device->SessionOwner = NULL;
+    JfpSensorOff(device);
     PUCHAR *mapped[] = {&device->Se, &device->Gcc, &device->Pins, &device->Rsc, &device->Db};
     static const ULONG sizes[] = {0x4000, 0x60000, 0x50000, 0x10000, 0x20000};
     for (ULONG i = 0; i < RTL_NUMBER_OF(mapped); i++) {

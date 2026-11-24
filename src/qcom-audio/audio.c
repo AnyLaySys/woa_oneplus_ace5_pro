@@ -922,6 +922,7 @@ SiaAudioRun(PSIA_DEVICE Dev)
                 if(!NT_SUCCESS(StartStatus)) { AuStopFlow(Dev,Au); InterlockedAnd(&Dev->Running,~(1L<<Direction)); KeSetEvent(&Pcm->IdleEvent,IO_NO_INCREMENT,FALSE); }
                 KeSetEvent(&Pcm->ReadyEvent,IO_NO_INCREMENT,FALSE);
             }
+            if(Direction && Au->Mic && !Flow->Failed && !NT_SUCCESS(SiaMicGain(Dev,Au->Mic)))Flow->Failed=TRUE;
             if(Flow->Blob && (!(Dev->Running&(1u<<Direction)) || Flow->Failed || AuNowMs()-Flow->LastDone>3000)) {
                 if(Dev->Running&(1u<<Direction)) Pcm->Status=STATUS_IO_DEVICE_ERROR;
                 AuStopFlow(Dev,Au); InterlockedAnd(&Dev->Running,~(1L<<Direction));

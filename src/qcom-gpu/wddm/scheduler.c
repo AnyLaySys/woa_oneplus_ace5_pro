@@ -453,9 +453,10 @@ A830_JOB *A830TakePending(A830_ADAPTER *a) {
 }
 VOID A830Worker(PVOID context) {
     A830_ADAPTER *a=context;
-    const ULONGLONG vsyncPeriod=(10000000ULL+A830RefreshRate(a)/2)/A830RefreshRate(a);
+    ULONGLONG vsyncPeriod=(10000000ULL+A830RefreshRate(a)/2)/A830RefreshRate(a);
     ULONGLONG nextVsync=KeQueryInterruptTime()+vsyncPeriod;
     for(;;) {
+        vsyncPeriod=(10000000ULL+A830RefreshRate(a)/2)/A830RefreshRate(a);
         LARGE_INTEGER timeout,*wait=NULL;
         BOOLEAN dpu=A830DpuEnabled(a);
         if(!dpu && a->VsyncEnabled) {
