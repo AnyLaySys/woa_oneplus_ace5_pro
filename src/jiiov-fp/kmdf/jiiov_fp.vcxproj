@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|ARM64"><Configuration>Release</Configuration><Platform>ARM64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{B31F0301-2481-4112-8000-202611240001}</ProjectGuid>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <Platform Condition="'$(Platform)' == ''">ARM64</Platform>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion><DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType><PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries>
+    <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.props" />
+  <PropertyGroup>
+    <TargetName>jiiov_fp</TargetName>
+    <FpVersionDate Condition="'$(FpVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</FpVersionDate>
+    <FpRevision Condition="'$(FpRevision)' == ''">3</FpRevision>
+    <FpDriverDate>$([System.DateTime]::Parse('$(FpVersionDate)').ToString('MM/dd/yyyy'))</FpDriverDate>
+    <FpDriverVersion>$([System.DateTime]::Parse('$(FpVersionDate)').ToString('yy.M.d')).$(FpRevision)</FpDriverVersion>
+    <FpDriverVersionComma>$([System.String]::Copy('$(FpDriverVersion)').Replace('.', ','))</FpDriverVersionComma>
+    <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
+    <OutDir>$(MSBuildThisFileDirectory)..\..\..\out\jiiov-fp\ARM64\Release\bin\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)..\..\..\out\jiiov-fp\ARM64\Release\obj\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><PreprocessorDefinitions>_UNICODE;UNICODE;POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MinSpace</Optimization><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
+    <Link><GenerateDebugInformation>false</GenerateDebugInformation><Profile>false</Profile></Link>
+    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>$(FpDriverDate)</DateStamp><TimeStamp>$(FpDriverVersion)</TimeStamp></Inf>
+    <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=$(FpDriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(FpDriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\driver.c" /><ClCompile Include="..\platform.c" /><ClCompile Include="..\power.c" /><ClCompile Include="..\spi.c" />
+    <ClCompile Include="..\registers.c" /><MARMASM Include="..\scm.asm" />
+    <ClInclude Include="..\fingerprint.h" /><ClInclude Include="..\uapi.h" />
+    <ResourceCompile Include="jiiov_fp.rc" /><Inf Include="jiiov_fp.inx" /><FilesToPackage Include="$(TargetPath)" />
+    <FilesToPackage Include="$(OutDir)jiiov_fp_check.exe" />
+  </ItemGroup>
+  <Target Name="BuildFingerprintCheck" BeforeTargets="PrepareForBuild">
+    <MSBuild Projects="$(MSBuildThisFileDirectory)..\tools\check.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=$(Platform);OutDir=$(OutDir);IntDir=$(IntDir)check\" />
+  </Target>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.targets" />
+</Project>

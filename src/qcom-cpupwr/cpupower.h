@@ -18,6 +18,7 @@ NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(ULONG information,PVOID buffer,
 typedef struct {
     PUCHAR Mailbox,Doorbell;
     ULONG Token;
+    FAST_MUTEX ScmiLock;
     SM_CORE Core[8];
     volatile LONG RegisteredMask,Fault,Stopping,Retention;
     ULONG NominalKhz[2];
@@ -33,6 +34,7 @@ typedef struct {
     PUCHAR Thermal[2];
     volatile LONG CoolingBand[2];
     volatile LONG SweetBand[2],TemperatureAverage[2];
+    volatile LONG Temperature[2];
 } SM_CONTEXT;
 extern SM_CONTEXT Sm;
 
@@ -47,5 +49,8 @@ VOID SmThermalInitialize(VOID);
 VOID SmThermalClose(VOID);
 VOID SmThermalUpdate(VOID);
 ULONG SmEffectiveCeiling(ULONG domain);
+NTSTATUS SmWmiRegister(PDEVICE_OBJECT device,PDEVICE_OBJECT physical);
+DRIVER_DISPATCH SmWmiControl;
+DRIVER_DISPATCH SmForward;
 PEPCALLBACKNOTIFYDPM SmDeviceNotification;
 PEPCALLBACKNOTIFYPPM SmProcessorNotification;

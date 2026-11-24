@@ -7,10 +7,6 @@ static VOID Write(ULONG offset,ULONG value) {
     WRITE_REGISTER_ULONG((PULONG)(Sm.Mailbox+offset),value);
 }
 
-/* Only the worker and initialization path enter this passive-level transport.
- * The mailbox is shared with firmware: never overwrite an occupied channel,
- * including after a timeout, and validate every response's token and length.
- */
 NTSTATUS SmScmiRequest(ULONG command,ULONG domain,ULONG index,SM_REPLY *reply) {
     ULONG bytes,header,status,i;
     LARGE_INTEGER begin,frequency,now,delay;
@@ -18,7 +14,7 @@ NTSTATUS SmScmiRequest(ULONG command,ULONG domain,ULONG index,SM_REPLY *reply) {
     if(KeGetCurrentIrql()!=PASSIVE_LEVEL || domain>=2) return STATUS_INVALID_PARAMETER;
     switch(command) {
     case 0:case 1:bytes=0;break;
-    case 3:bytes=4;break;
+    case 3:case 8:bytes=4;break;
     case 4:bytes=8;if(index>=SM_LEVEL_COUNT)return STATUS_INVALID_PARAMETER;break;
     case 7:bytes=8;
         if(index>=SM_LEVEL_COUNT)
@@ -26,9 +22,8 @@ NTSTATUS SmScmiRequest(ULONG command,ULONG domain,ULONG index,SM_REPLY *reply) {
         break;
     default:return STATUS_ACCESS_DENIED;
     }
+    ExAcquireFastMutex(&Sm.ScmiLock);
     RtlZeroMemory(reply,sizeof(*reply));
-    /* Initialization precedes the worker; all runtime requests use that one
-       worker, so no second host-side transport lock is needed. */
     status=Read(4);
     if(!(status&1) || (status&2)){result=STATUS_DEVICE_BUSY;goto done;}
     header=command | (0x13u<<10) | ((++Sm.Token&1023u)<<18);
@@ -52,6 +47,7 @@ NTSTATUS SmScmiRequest(ULONG command,ULONG domain,ULONG index,SM_REPLY *reply) {
     for(i=0;i<reply->Count;i++)reply->Words[i]=Read(32+i*4);
     if((LONG)Read(28)!=0)result=STATUS_UNSUCCESSFUL;
 done:
+    ExReleaseFastMutex(&Sm.ScmiLock);
     return result;
 }
 

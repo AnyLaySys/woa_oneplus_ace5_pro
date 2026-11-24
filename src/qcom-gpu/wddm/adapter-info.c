@@ -1,12 +1,14 @@
 #include "adapter.h"
+#include "dpu.h"
 
-ULONG A830RefreshRate(const A830_ADAPTER *a) {return a->RefreshRate==120?120u:60u;}
+ULONG A830RefreshRate(const A830_ADAPTER *a) {UNREFERENCED_PARAMETER(a);return 60u;}
 D3DKMDT_VIDEO_SIGNAL_INFO A830Signal(const A830_ADAPTER *a) {
     D3DKMDT_VIDEO_SIGNAL_INFO s={0};s.VideoStandard=D3DKMDT_VSS_OTHER;
-    s.TotalSize.cx=s.ActiveSize.cx=a->DisplayInfo.Width;s.TotalSize.cy=s.ActiveSize.cy=a->DisplayInfo.Height;
-    ULONG hz=A830RefreshRate(a);
-    s.PixelRate=(UINT64)s.TotalSize.cx*s.TotalSize.cy*hz;s.VSyncFreq.Numerator=hz;s.VSyncFreq.Denominator=1;
-    s.HSyncFreq.Numerator=s.TotalSize.cy*hz;s.HSyncFreq.Denominator=1;s.ScanLineOrdering=D3DDDI_VSSLO_PROGRESSIVE;
+    s.ActiveSize.cx=a->DisplayInfo.Width;s.ActiveSize.cy=a->DisplayInfo.Height;
+    s.TotalSize.cx=s.ActiveSize.cx+80;s.TotalSize.cy=s.ActiveSize.cy+20;
+    s.PixelRate=(UINT64)s.TotalSize.cx*s.TotalSize.cy*A830RefreshRate(a)/10000*10000;
+    s.VSyncFreq.Numerator=(UINT)s.PixelRate;s.VSyncFreq.Denominator=s.TotalSize.cx*s.TotalSize.cy;
+    s.HSyncFreq.Numerator=(UINT)s.PixelRate;s.HSyncFreq.Denominator=s.TotalSize.cx;s.ScanLineOrdering=D3DDDI_VSSLO_PROGRESSIVE;
 
     return s;
 }
@@ -14,6 +16,22 @@ D3DKMDT_VIDEO_SIGNAL_INFO A830Signal(const A830_ADAPTER *a) {
 BOOLEAN A830RotationSupported(D3DKMDT_VIDPN_PRESENT_PATH_ROTATION rotation) {
     if(rotation==D3DKMDT_VPPR_IDENTITY)return TRUE;
     return rotation>=D3DKMDT_VPPR_ROTATE90 && rotation<=D3DKMDT_VPPR_ROTATE270;
+}
+VOID A830Edid(const A830_ADAPTER *a,UCHAR e[128]) {
+    RtlZeroMemory(e,128);for(ULONG i=1;i<7;i++)e[i]=0xff;
+    e[8]=9;e[9]=0xe5;e[10]=0x3e;e[11]=3;e[16]=47;e[17]=36;e[18]=1;e[19]=4;
+    e[20]=A830DpuEnabled((PVOID)a)?0xb5:0xa5;e[21]=7;e[22]=16;e[23]=120;e[24]=2;
+    DXGK_COLORIMETRY c=A830Colorimetry();ULONG points[]={c.RedPoint.cx,c.RedPoint.cy,c.GreenPoint.cx,c.GreenPoint.cy,
+        c.BluePoint.cx,c.BluePoint.cy,c.WhitePoint.cx,c.WhitePoint.cy};
+    for(ULONG i=0;i<8;i++){e[25+i/4]|=(UCHAR)((points[i]&3u)<<(6-(i%4)*2));e[27+i]=(UCHAR)(points[i]>>2);}
+    for(ULONG i=38;i<54;i++)e[i]=1;
+    D3DKMDT_VIDEO_SIGNAL_INFO signal=A830Signal(a);
+    ULONG w=signal.ActiveSize.cx,h=signal.ActiveSize.cy,clock=(ULONG)(signal.PixelRate/10000);
+    UCHAR *d=e+54;d[0]=(UCHAR)clock;d[1]=(UCHAR)(clock>>8);
+    d[2]=(UCHAR)w;d[3]=80;d[4]=(UCHAR)((w>>8)<<4);d[5]=(UCHAR)h;d[6]=20;d[7]=(UCHAR)((h>>8)<<4);
+    d[8]=8;d[9]=16;d[10]=0x22;d[12]=71;d[13]=157;d[17]=0x18;
+    e[75]=0xfc;RtlCopyMemory(e+77,"BOE AA590\n   ",13);e[93]=e[111]=0x10;
+    ULONG sum=0;for(ULONG i=0;i<127;i++)sum+=e[i];e[127]=(UCHAR)(0u-sum);
 }
 BOOLEAN A830PathSupport(D3DKMDT_VIDPN_PRESENT_PATH *path,const DXGKARG_ENUMVIDPNCOFUNCMODALITY *args) {
     BOOLEAN changed=FALSE;
@@ -49,7 +67,7 @@ NTSTATUS APIENTRY A830Query(HANDLE adapter,const DXGKARG_QUERYADAPTERINFO *q) {
         c->MaxQueuedFlipOnVSync=1;
         c->MaxAllocationListSlotId=127;c->SchedulingCaps.MultiEngineAware=1;
         c->SchedulingCaps.PreemptionAware=1;c->SchedulingCaps.CancelCommandAware=1;
-        c->GpuEngineTopology.NbAsymetricProcessingNodes=A830_NODE_COUNT;c->WDDMVersion=DXGKDDI_WDDMv2_4;
+        c->GpuEngineTopology.NbAsymetricProcessingNodes=A830_NODE_COUNT;c->WDDMVersion=DXGKDDI_WDDMv3_0;
         c->PreemptionCaps.GraphicsPreemptionGranularity=D3DKMDT_GRAPHICS_PREEMPTION_DMA_BUFFER_BOUNDARY;
         c->PreemptionCaps.ComputePreemptionGranularity=D3DKMDT_COMPUTE_PREEMPTION_DMA_BUFFER_BOUNDARY;
         c->SupportNonVGA=TRUE;c->SupportPerEngineTDR=TRUE;c->SupportSmoothRotation=TRUE;return STATUS_SUCCESS;
@@ -67,9 +85,34 @@ NTSTATUS APIENTRY A830Query(HANDLE adapter,const DXGKARG_QUERYADAPTERINFO *q) {
         DXGK_PAGE_TABLE_LEVEL_DESC *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->PageTableIndexBitCount=9;
         c->PageTableSizeInBytes=c->PageTableAlignmentInBytes=PAGE_SIZE;return STATUS_SUCCESS;
     }
+    if(q->Type==DXGKQAITYPE_DEVICE_TYPE_CAPS) {
+        if(q->OutputDataSize<sizeof(DXGK_DEVICE_TYPE_CAPS))return STATUS_BUFFER_TOO_SMALL;
+        RtlZeroMemory(q->pOutputData,sizeof(DXGK_DEVICE_TYPE_CAPS));return STATUS_SUCCESS;
+    }
     if(q->Type==DXGKQAITYPE_WDDMDEVICECAPS) {
         if(q->OutputDataSize<sizeof(DXGK_WDDMDEVICECAPS))return STATUS_BUFFER_TOO_SMALL;
-        DXGK_WDDMDEVICECAPS *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->WDDMVersion=DXGKDDI_WDDMv2_4;return STATUS_SUCCESS;
+        DXGK_WDDMDEVICECAPS *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));c->WDDMVersion=DXGKDDI_WDDMv3_0;return STATUS_SUCCESS;
+    }
+    if(q->Type==DXGKQAITYPE_DISPLAY_DRIVERCAPS_EXTENSION) {
+        if(q->OutputDataSize<sizeof(DXGK_DISPLAY_DRIVERCAPS_EXTENSION))return STATUS_BUFFER_TOO_SMALL;
+        DXGK_DISPLAY_DRIVERCAPS_EXTENSION *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));
+        c->HdrARGB10ScanoutSupport=A830DpuEnabled(a);return STATUS_SUCCESS;
+    }
+    if(q->Type==DXGKQAITYPE_INTEGRATED_DISPLAY_DESCRIPTOR2 || q->Type==DXGKQAITYPE_QUERYCOLORIMETRYOVERRIDES) {
+        if(q->InputDataSize!=sizeof(DXGK_QAITARGETIN) || !q->pInputData ||
+           ((const DXGK_QAITARGETIN *)q->pInputData)->TargetId)return STATUS_INVALID_PARAMETER;
+        BOOLEAN integrated=q->Type==DXGKQAITYPE_INTEGRATED_DISPLAY_DESCRIPTOR2;
+        ULONG bytes=integrated?sizeof(DXGK_QUERYINTEGRATEDDISPLAYOUT2):sizeof(DXGK_COLORIMETRY);
+        if(q->OutputDataSize<bytes)return STATUS_BUFFER_TOO_SMALL;
+        RtlZeroMemory(q->pOutputData,bytes);
+        DXGK_COLORIMETRY *color=q->pOutputData;
+        if(integrated) {
+            DXGK_QUERYINTEGRATEDDISPLAYOUT2 *c=q->pOutputData;color=&c->Colorimetry;
+            c->DisplayTechnology=DXGK_DT_OLED;c->IntendedUsage=DXGK_DU_GENERIC;
+            c->DescriptorType=DXGK_DDT_EDID;
+            c->LinkCapabilities.WideColorSpace=c->LinkCapabilities.HighColorSpace=c->LinkCapabilities.DynamicColorSpace=A830DpuEnabled(a);
+        }
+        if(A830DpuEnabled(a))*color=A830Colorimetry();return STATUS_SUCCESS;
     }
     if(q->Type==DXGKQAITYPE_NODEPERFDATA) {
         if(q->InputDataSize!=sizeof(UINT) || !q->pInputData || *(const UINT *)q->pInputData>=A830_NODE_COUNT ||
@@ -163,7 +206,7 @@ NTSTATUS APIENTRY A830StandardAllocation(HANDLE adapter,DXGKARG_GETSTANDARDALLOC
     } else return STATUS_NOT_SUPPORTED;
     if(adapter &&
         p->StandardAllocationType!=D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE)r.Flags=1;
-    if(r.Format!=D3DDDIFMT_X8R8G8B8 && r.Format!=D3DDDIFMT_A8R8G8B8)return STATUS_NOT_SUPPORTED;
+    if(!A830ScanoutFormat(r.Format))return STATUS_NOT_SUPPORTED;
     ULONGLONG limit=(r.Flags&1)?GPU_BUFFER_LIMIT:A830_SEGMENT_BYTES;
     if(adapter && (r.Flags&1) && ((A830_ADAPTER *)adapter)->Memory.Shared.Bytes<limit)
         limit=((A830_ADAPTER *)adapter)->Memory.Shared.Bytes;

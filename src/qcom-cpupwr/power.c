@@ -47,7 +47,7 @@ static VOID Worker(PVOID context) {
             ULONG sweet=min(ceiling,SmSustainableLevel(d,(ULONG)Sm.SweetBand[d]));
             ULONGLONG lastRequest=(ULONGLONG)InterlockedCompareExchange64(&Sm.LastRequest[d],0,0),now=KeQueryInterruptTime();
             if(Sm.Busy[d]>=63)raised[d]=now;
-            BOOLEAN hold=DvfsHold(now,raised[d],Sm.Busy[d]>2,lastRequest);
+            BOOLEAN hold=DvfsHold(now,raised[d],Sm.Busy[d]>DVFS_IDLE_PERCENT,lastRequest);
             ULONG target=Sm.Fault?0:SmDemand(d,current,Sm.Busy[d],ceiling,sweet,hold);
             target=DvfsDelayDown(target,current,Sm.Busy[d],ceiling,&down[d]);
             if((LONG)target==Sm.Applied[d])continue;
@@ -55,7 +55,7 @@ static VOID Worker(PVOID context) {
             else if(target>current)raised[d]=now;
         }
         if(!Sm.Fault) {
-            timeout.QuadPart=(Sm.Busy[0]>2 || Sm.Busy[1]>2 || Sm.Applied[0]>0 || Sm.Applied[1]>0 || Sm.CoolingBand[0] || Sm.CoolingBand[1] || Sm.SweetBand[0] || Sm.SweetBand[1])?-(LONGLONG)DVFS_SAMPLE_100NS:-1000000;
+            timeout.QuadPart=(Sm.Busy[0]>DVFS_IDLE_PERCENT || Sm.Busy[1]>DVFS_IDLE_PERCENT || Sm.Applied[0]>0 || Sm.Applied[1]>0 || Sm.CoolingBand[0] || Sm.CoolingBand[1] || Sm.SweetBand[0] || Sm.SweetBand[1])?-(LONGLONG)DVFS_SAMPLE_100NS:-900000;
             wait=&timeout;
         }
     }
@@ -65,7 +65,7 @@ static VOID Worker(PVOID context) {
 static NTSTATUS Finish(PIRP irp,NTSTATUS status) {
     irp->IoStatus.Status=status;irp->IoStatus.Information=0;IoCompleteRequest(irp,0);return status;
 }
-static NTSTATUS Forward(PDEVICE_OBJECT device,PIRP irp) {
+NTSTATUS SmForward(PDEVICE_OBJECT device,PIRP irp) {
     PDEVICE_OBJECT lower=*(PDEVICE_OBJECT *)device->DeviceExtension;
     if(!lower)return Finish(irp,STATUS_INVALID_DEVICE_REQUEST);
     BOOLEAN power=IoGetCurrentIrpStackLocation(irp)->MajorFunction==IRP_MJ_POWER;
@@ -81,11 +81,12 @@ static NTSTATUS Pnp(PDEVICE_OBJECT device,PIRP irp) {
     case IRP_MN_SURPRISE_REMOVAL:irp->IoStatus.Status=STATUS_SUCCESS;break;
     case IRP_MN_REMOVE_DEVICE: {
         PDEVICE_OBJECT lower=*(PDEVICE_OBJECT *)device->DeviceExtension;
-        irp->IoStatus.Status=STATUS_SUCCESS;NTSTATUS status=Forward(device,irp);
+        IoWMIRegistrationControl(device,WMIREG_ACTION_DEREGISTER);
+        irp->IoStatus.Status=STATUS_SUCCESS;NTSTATUS status=SmForward(device,irp);
         IoDetachDevice(lower);IoDeleteDevice(device);return status;
     }
     }
-    return Forward(device,irp);
+    return SmForward(device,irp);
 }
 static NTSTATUS AddDevice(PDRIVER_OBJECT driver,PDEVICE_OBJECT physical) {
     PDEVICE_OBJECT device;NTSTATUS status=IoCreateDevice(driver,sizeof(PDEVICE_OBJECT),NULL,FILE_DEVICE_UNKNOWN,0,FALSE,&device);
@@ -93,6 +94,8 @@ static NTSTATUS AddDevice(PDRIVER_OBJECT driver,PDEVICE_OBJECT physical) {
     PDEVICE_OBJECT lower=IoAttachDeviceToDeviceStack(device,physical);
     if(!lower){IoDeleteDevice(device);return STATUS_NO_SUCH_DEVICE;}
     *(PDEVICE_OBJECT *)device->DeviceExtension=lower;
+    status=SmWmiRegister(device,physical);
+    if(!NT_SUCCESS(status)){IoDetachDevice(lower);IoDeleteDevice(device);return status;}
     device->Flags|=DO_POWER_PAGABLE;device->Flags&=~DO_DEVICE_INITIALIZING;
     return STATUS_SUCCESS;
 }
@@ -114,11 +117,13 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT driver,PUNICODE_STRING path) {
     UNREFERENCED_PARAMETER(path);ULONG midr=(ULONG)_ReadStatusReg(ARM64_SYSREG(3,0,0,0,0));
     if((midr!=0x513f0014 && midr!=0x514f0014) || KeQueryActiveProcessorCountEx(0)!=8)return STATUS_NOT_SUPPORTED;
     RtlZeroMemory(&Sm,sizeof(Sm));KeInitializeEvent(&Sm.Wake,SynchronizationEvent,FALSE);
+    ExInitializeFastMutex(&Sm.ScmiLock);
     for(ULONG c=0;c<8;c++)Sm.Core[c].Number=c;
-    for(ULONG i=0;i<=IRP_MJ_MAXIMUM_FUNCTION;i++)driver->MajorFunction[i]=Forward;
+    for(ULONG i=0;i<=IRP_MJ_MAXIMUM_FUNCTION;i++)driver->MajorFunction[i]=SmForward;
     driver->DriverExtension->AddDevice=AddDevice;
     driver->MajorFunction[IRP_MJ_PNP]=Pnp;
     driver->MajorFunction[IRP_MJ_SHUTDOWN]=Shutdown;
+    driver->MajorFunction[IRP_MJ_SYSTEM_CONTROL]=SmWmiControl;
     SmThermalInitialize();
     Sm.Retention=SmPsci(0x8400000Au,SM_CPU_SUSPEND)>=0;
     NTSTATUS status=SmScmiInitialize();if(!NT_SUCCESS(status))goto fail;

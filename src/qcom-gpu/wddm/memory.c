@@ -3,9 +3,10 @@
 
 NTSTATUS A830MemoryStart(A830_ADAPTER *a) {
     GPU_BO *b=&a->Memory.Segment;
-    PHYSICAL_ADDRESS low={0},high,skip={0};high.QuadPart=0xFFFFFFFFFFF;
+    PHYSICAL_ADDRESS low={0},high,skip={0};high.QuadPart=MAXULONG;
     b->Size=A830_SEGMENT_BYTES;
     b->Cpu=MmAllocateContiguousMemorySpecifyCache(b->Size,low,high,skip,MmWriteCombined);
+    if(!b->Cpu){high.QuadPart=0xFFFFFFFFFFF;b->Cpu=MmAllocateContiguousMemorySpecifyCache(b->Size,low,high,skip,MmWriteCombined);}
     if(!b->Cpu)return STATUS_INSUFFICIENT_RESOURCES;
     b->Mdl=IoAllocateMdl(b->Cpu,b->Size,FALSE,FALSE,NULL);
     if(!b->Mdl){MmFreeContiguousMemory(b->Cpu);RtlZeroMemory(b,sizeof(*b));return STATUS_INSUFFICIENT_RESOURCES;}
@@ -19,7 +20,6 @@ NTSTATUS A830MemoryStart(A830_ADAPTER *a) {
     return status;
 }
 VOID A830MemoryStop(A830_ADAPTER *a) {
-    a->PagingRoot=0;
     A830ScanoutStop(a);
 
     A830SharedStop(a);GpuFree(&a->Memory.Commands);GpuFree(&a->Memory.Segment);
@@ -67,6 +67,8 @@ NTSTATUS APIENTRY A830CreateAllocation(HANDLE adapter,DXGKARG_CREATEALLOCATION *
             ULONG bytes=A830PixelBytes(r.Format);
             if(!bytes || !r.Width || !r.Height || r.Width>MAXULONG/bytes ||
                r.Pitch<r.Width*bytes || r.Height>r.Size/r.Pitch)break;
+            if(r.Format==A830_FORMAT_NV12 && (((r.Width|r.Height|r.Pitch)&1) ||
+               (r.Flags&A830_RESOURCE_PRIMARY) || (ULONGLONG)r.Pitch*(r.Height+r.Height/2)>r.Size))break;
         }
         A830_ALLOCATION *allocation=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*allocation),GPU_TAG);
         if(!allocation){status=STATUS_INSUFFICIENT_RESOURCES;break;}
@@ -130,14 +132,13 @@ static PVOID Segment(A830_ADAPTER *a,ULONGLONG offset,SIZE_T bytes) {
     if(offset>A830_SEGMENT_BYTES || bytes>A830_SEGMENT_BYTES-offset)return NULL;
     return a->Memory.Segment.Cpu+(SIZE_T)offset;
 }
-static NTSTATUS MapVirtualCpu(A830_ADAPTER *a,ULONGLONG address,SIZE_T bytes,PVOID *map,PMDL *mapping) {
+static NTSTATUS MapVirtualCpu(A830_ADAPTER *a,ULONGLONG root,ULONGLONG address,SIZE_T bytes,PVOID *map,PMDL *mapping) {
     *map=NULL;*mapping=NULL;
     if(!bytes || bytes>GPU_MAX_BUFFER_SIZE || address>=0x8000000000ULL || bytes>0x8000000000ULL-address)return STATUS_INVALID_PARAMETER;
     ULONG offset=(ULONG)(address&4095);SIZE_T pages=(offset+bytes+4095)/PAGE_SIZE;
     PMDL mdl=IoAllocateMdl((PVOID)(ULONG_PTR)offset,(ULONG)bytes,FALSE,FALSE,NULL);
     if(!mdl)return STATUS_INSUFFICIENT_RESOURCES;
     PPFN_NUMBER pfns=MmGetMdlPfnArray(mdl);NTSTATUS status=STATUS_SUCCESS;MEMORY_CACHING_TYPE cache=MmCached;
-    ULONGLONG root=(ULONGLONG)InterlockedCompareExchange64((volatile LONG64 *)&a->PagingRoot,0,0);
     for(SIZE_T i=0;i<pages;i++) {
         ULONGLONG physical;status=A830ResolveGpuAddress(a,root,(address&~4095ULL)+i*PAGE_SIZE,&physical);if(!NT_SUCCESS(status))break;
         MEMORY_CACHING_TYPE type=physical>=a->Memory.Segment.Physical && physical-a->Memory.Segment.Physical<A830_SEGMENT_BYTES?MmWriteCombined:MmCached;
@@ -151,6 +152,15 @@ static NTSTATUS MapVirtualCpu(A830_ADAPTER *a,ULONGLONG address,SIZE_T bytes,PVO
         if(!*map && NT_SUCCESS(status))status=STATUS_INSUFFICIENT_RESOURCES;
     }
     if(NT_SUCCESS(status))*mapping=mdl;else IoFreeMdl(mdl);return status;
+}
+NTSTATUS A830ResolvePaging(A830_ADAPTER *a,A830_DMA *dma) {
+    ULONGLONG source=(ULONG_PTR)dma->Source,destination=(ULONG_PTR)dma->Destination;
+    dma->Source=dma->Destination=NULL;
+    NTSTATUS status=STATUS_SUCCESS;
+    if(dma->Operation==10)status=MapVirtualCpu(a,dma->Root,source,dma->Bytes,&dma->Source,&dma->SourceMdl);
+    if(NT_SUCCESS(status))status=MapVirtualCpu(a,dma->Root,destination,dma->Bytes,&dma->Destination,&dma->DestinationMdl);
+    if(NT_SUCCESS(status))dma->Operation=dma->Operation==9?2:dma->Operation==10?3:8;
+    return status;
 }
 static NTSTATUS UpdatePageTableLocked(A830_ADAPTER *a,const DXGK_BUILDPAGINGBUFFER_UPDATEPAGETABLE *p) {
     if(p->UpdateMode!=DXGK_PAGETABLEUPDATE_CPU_VIRTUAL || !p->PageTableAddress.CpuVirtual ||
@@ -189,11 +199,8 @@ static NTSTATUS UpdatePageTable(A830_ADAPTER *a,const DXGK_BUILDPAGINGBUFFER_UPD
     A830_PROCESS *process=p->hProcess;
     if(process)KeWaitForSingleObject(&process->Lock,Executive,KernelMode,FALSE,NULL);
     NTSTATUS status=UpdatePageTableLocked(a,p);
-    if(NT_SUCCESS(status) && process && p->PageTableLevel==2) {
-        ULONGLONG physical=MmGetPhysicalAddress(p->PageTableAddress.CpuVirtual).QuadPart;
-        if(process->System)InterlockedExchange64((volatile LONG64 *)&a->PagingRoot,physical);
-        else if(p->Flags.InitialUpdate || !process->Root)process->Root=physical;
-    }
+    if(NT_SUCCESS(status) && process && !process->System && p->PageTableLevel==2 && (p->Flags.InitialUpdate || !process->Root))
+        process->Root=MmGetPhysicalAddress(p->PageTableAddress.CpuVirtual).QuadPart;
     if(process)KeReleaseMutex(&process->Lock,FALSE);return status;
 }
 NTSTATUS APIENTRY A830Paging(HANDLE adapter,DXGKARG_BUILDPAGINGBUFFER *p) {
@@ -227,22 +234,18 @@ NTSTATUS APIENTRY A830Paging(HANDLE adapter,DXGKARG_BUILDPAGINGBUFFER *p) {
         A830_ALLOCATION *allocation=p->FillVirtual.hAllocation;ULONGLONG offset=p->FillVirtual.AllocationOffsetInBytes,bytes=p->FillVirtual.FillSizeInBytes;
         if(!bytes || bytes>MAXULONG || ((offset|bytes|p->FillVirtual.DestinationVirtualAddress)&3) ||
            (allocation && (offset>allocation->Resource.Size || bytes>allocation->Resource.Size-offset)))return STATUS_INVALID_PARAMETER;
-        dma->Operation=2;dma->Bytes=(ULONG)bytes;dma->Value=p->FillVirtual.FillPattern;
-        NTSTATUS status=MapVirtualCpu(a,p->FillVirtual.DestinationVirtualAddress,(SIZE_T)bytes,&dma->Destination,&dma->DestinationMdl);
-        if(!NT_SUCCESS(status))return status;
+        dma->Operation=9;dma->Bytes=(ULONG)bytes;dma->Value=p->FillVirtual.FillPattern;
+        dma->Destination=(PVOID)(ULONG_PTR)p->FillVirtual.DestinationVirtualAddress;
     } else if(p->Operation==DXGK_OPERATION_VIRTUAL_TRANSFER) {
         const DXGK_BUILDPAGINGBUFFER_TRANSFERVIRTUAL *v=&p->TransferVirtual;A830_ALLOCATION *allocation=v->hAllocation;
         if(!v->TransferSizeInBytes || v->TransferSizeInBytes>MAXULONG ||
            (allocation && (v->AllocationOffsetInBytes>allocation->Resource.Size || v->TransferSizeInBytes>allocation->Resource.Size-v->AllocationOffsetInBytes)))return STATUS_INVALID_PARAMETER;
-        dma->Operation=3;dma->Bytes=(ULONG)v->TransferSizeInBytes;
-        NTSTATUS status=MapVirtualCpu(a,v->SourceVirtualAddress,dma->Bytes,&dma->Source,&dma->SourceMdl);
-        if(NT_SUCCESS(status))status=MapVirtualCpu(a,v->DestinationVirtualAddress,dma->Bytes,&dma->Destination,&dma->DestinationMdl);
-        if(!NT_SUCCESS(status)){A830ReleasePaging(dma);return status;}
+        dma->Operation=10;dma->Bytes=(ULONG)v->TransferSizeInBytes;
+        dma->Source=(PVOID)(ULONG_PTR)v->SourceVirtualAddress;dma->Destination=(PVOID)(ULONG_PTR)v->DestinationVirtualAddress;
     } else if(p->Operation==DXGK_OPERATION_SIGNAL_MONITORED_FENCE) {
         if(p->SignalMonitoredFence.MonitoredFenceGpuVa&7)return STATUS_INVALID_PARAMETER;
-        dma->Operation=8;dma->FenceValue=p->SignalMonitoredFence.MonitoredFenceValue;
-        NTSTATUS status=MapVirtualCpu(a,p->SignalMonitoredFence.MonitoredFenceGpuVa,8,&dma->Destination,&dma->DestinationMdl);
-        if(!NT_SUCCESS(status))return status;
+        dma->Operation=11;dma->Bytes=8;dma->FenceValue=p->SignalMonitoredFence.MonitoredFenceValue;
+        dma->Destination=(PVOID)(ULONG_PTR)p->SignalMonitoredFence.MonitoredFenceGpuVa;
     } else if(p->Operation==DXGK_OPERATION_DISCARD_CONTENT)dma->Operation=0;
     else if(p->Operation==DXGK_OPERATION_FILL) {
         if(p->Fill.FillSize>MAXULONG || (p->Fill.FillSize&3))return STATUS_INVALID_PARAMETER;

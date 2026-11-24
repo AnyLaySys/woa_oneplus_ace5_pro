@@ -156,7 +156,7 @@ extern "C" NTSTATUS WcnStage8Create(PWCN_DEVICE D)
     St=WcnP2pCreate(D);if(!NT_SUCCESS(St))return St;
     St=WcnTdlsCreate(D);if(!NT_SUCCESS(St))return St;
     St=WifiDeviceInitialize(D->Device,&C);if(!NT_SUCCESS(St))return St;
-    S->Tlv.PeerVersion=WifiDeviceGetOsWdiVersion(D->Device);return STATUS_SUCCESS;
+    S->Tlv.PeerVersion=WifiDeviceGetOsWdiVersion(D->Device);WcnBalanceCreate(D);return STATUS_SUCCESS;
 }
 extern "C" NTSTATUS WcnStage8Ready(PWCN_DEVICE D)
 {
@@ -410,7 +410,7 @@ static void S8ResetSession(S8 *S,bool Aborted=false)
         S8ConnectFailure(S,S->ConnectHeader,J->Ap.Bssid,WcnIs2g(J->Ap.Frequency)?WDI_BAND_ID_2400:WDI_BAND_ID_5000,Cancel?WDI_ASSOC_STATUS_ABORTED:WDI_ASSOC_STATUS_FAILURE);
         S8Indicate(S,&S->ConnectHeader,S->Roaming?WDI_INDICATION_ROAM_COMPLETE:WDI_INDICATION_CONNECT_COMPLETE,Cancel?(NTSTATUS)NDIS_STATUS_REQUEST_ABORTED:STATUS_CONNECTION_DISCONNECTED);}
     S8ClearStaging(S);S->Connect=S->Roaming=FALSE;
-    if(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Dp.Failed||D->Ce.SourceFailed||D->Runtime.RuntimeErrors){S8FinishReset(S,STATUS_DEVICE_HARDWARE_ERROR);return;}
+    if(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Dp.Failed||D->Ce.SourceFailed||D->Runtime.Failed){S8FinishReset(S,STATUS_DEVICE_HARDWARE_ERROR);return;}
     if(!J->Started&&!J->PeerCreated&&!J->VdevStarted){S8FinishReset(S,STATUS_SUCCESS);return;}
     S->Resetting=J->Resetting=TRUE;S->ResetStep=J->ReoReleaseStep=0;J->ReoReleaseAt=0;S->ResetAt=WcnNowMs();
     J->VdevStopConfirmed=J->PeerDeleteConfirmed=J->PeerUnmapped=FALSE;
@@ -418,7 +418,7 @@ static void S8ResetSession(S8 *S,bool Aborted=false)
 static void S8ResetService(S8 *S)
 {
     auto D=S->D;auto J=S->J;if(!S->Resetting)return;
-    if(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Dp.Failed||D->Ce.SourceFailed||D->Runtime.RuntimeErrors){S8FinishReset(S,STATUS_DEVICE_HARDWARE_ERROR);return;}
+    if(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Dp.Failed||D->Ce.SourceFailed||D->Runtime.Failed){S8FinishReset(S,STATUS_DEVICE_HARDWARE_ERROR);return;}
     if(WcnNowMs()-S->ResetAt>15000){S8FinishReset(S,STATUS_IO_TIMEOUT);return;}
     NTSTATUS St=STATUS_SUCCESS;
     switch(S->ResetStep){
@@ -728,7 +728,7 @@ static void S8Service(S8 *S)
 extern "C" VOID WcnStage8ChannelChanged(PWCN_DEVICE D,PWCN_JOIN J)
 {auto S=S8Station(D,J);if(S&&S->LinkUp)S8SetLink(S,true);}
 extern "C" VOID WcnStage8Service(PWCN_DEVICE D)
-{WcnP2pService(D);HotspotService(D);if(D->Stage8)S8Service((S8*)D->Stage8);if(D->SecondaryStage8)S8Service((S8*)D->SecondaryStage8);if(D->P2pClient&&D->RoleStage8)S8Service((S8*)D->RoleStage8);}
+{WcnP2pService(D);HotspotService(D);if(D->Stage8)S8Service((S8*)D->Stage8);if(D->SecondaryStage8)S8Service((S8*)D->SecondaryStage8);if(D->P2pClient&&D->RoleStage8)S8Service((S8*)D->RoleStage8);WcnBalanceService(D);}
 static void S8StopState(S8 *S)
 {
     if(!S)return;S8ActionCancel(S,STATUS_CANCELLED);if(S->RoamPending){S8Indicate(S,&S->RoamHeader,WDI_INDICATION_ROAM_COMPLETE,STATUS_CANCELLED);S->RoamPending=FALSE;}KIRQL Irql;KeAcquireSpinLock(&S->Lock,&Irql);S->Stopped=TRUE;KeReleaseSpinLock(&S->Lock,Irql);

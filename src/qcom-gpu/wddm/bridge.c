@@ -3,6 +3,7 @@
 #include "../regs.h"
 #include <wdmsec.h>
 #include "../deferred-free.h"
+#include "../iris.h"
 
 typedef struct {
     LIST_ENTRY Entry;
@@ -30,6 +31,8 @@ typedef struct {
     PDEVICE_OBJECT Device;
     A830_ADAPTER *Adapter;
     GPU *Hardware;
+    IRIS *Video;
+    A830_CLIENT *VideoClient;
     LIST_ENTRY Clients;
     LIST_ENTRY Shared;
     ULONGLONG NextLease;
@@ -77,8 +80,10 @@ NTSTATUS A830SharedCreate(A830_ALLOCATION *allocation) {
         ULONG pitch=allocation->Resource.Pitch,height=allocation->Resource.Height;
         ULONG rows=(height+63)&~63u;
         if(!pitch || rows>GPU_BUFFER_LIMIT/pitch){status=STATUS_INVALID_PARAMETER;goto done;}
-        ULONG size=pitch*rows;
-        status=(allocation->Resource.Flags&A830_RESOURCE_PRIMARY)?A830ScanoutAllocate(Bridge.Adapter,&allocation->Buffer,size):STATUS_NOT_SUPPORTED;
+        ULONG size=max(allocation->Resource.Size,pitch*rows);
+        A830_ADAPTER *a=Bridge.Adapter;
+        BOOLEAN scanout=A830ScanoutFormat(allocation->Resource.Format) && allocation->Resource.Width==a->DisplayInfo.Width && height==a->DisplayInfo.Height;
+        status=scanout?A830ScanoutAllocate(a,&allocation->Buffer,size):STATUS_NOT_SUPPORTED;
         if(!NT_SUCCESS(status))status=GpuAllocate(&allocation->Buffer,size);
         if(!NT_SUCCESS(status))goto done;
         /* A pool slot may be larger than the requested primary. Reserve the
@@ -419,6 +424,20 @@ static NTSTATUS Io(A830_BRIDGE *g,A830_CLIENT *c,PIRP request,ULONG code,ULONG i
     PVOID in=NULL,out=NULL;ULONG_PTR bytes=0;NTSTATUS status=STATUS_INVALID_PARAMETER;
     in=out=request->AssociatedIrp.SystemBuffer;
     if((inLength || outLength) && !in)return STATUS_INVALID_PARAMETER;
+    if(code==GPU_IOCTL_VIDEO_OPEN || code==GPU_IOCTL_VIDEO_CLOSE) {
+        if(inLength || outLength)return STATUS_INVALID_PARAMETER;
+        if(code==GPU_IOCTL_VIDEO_OPEN) {
+            if(g->Video)return STATUS_DEVICE_BUSY;
+            g->VideoClient=c;
+            NTSTATUS opened=IrisCreate(g->Hardware,g->Device->DriverObject,&g->Video);
+            if(!g->Video)g->VideoClient=NULL;
+            return opened;
+        }
+        if(g->VideoClient!=c)return STATUS_INVALID_HANDLE;
+        NTSTATUS closed=IrisDelete(g->Video);
+        if(NT_SUCCESS(closed)){g->Video=NULL;g->VideoClient=NULL;}
+        return closed;
+    }
     if(code==GPU_IOCTL_SPARSE_CAPS || code==GPU_IOCTL_VA_RESERVE || code==GPU_IOCTL_VA_RELEASE || code==GPU_IOCTL_VA_BIND)
         return SparseIo(g,c,request,code,inLength,outLength);
 
@@ -523,6 +542,11 @@ static NTSTATUS Dispatch(PDEVICE_OBJECT device,PIRP request) {
         case IRP_MJ_CLEANUP: {
             A830_CLIENT *c=stack->FileObject->FsContext;
             if(c && c!=(PVOID)(ULONG_PTR)1) {
+                if(Bridge.VideoClient==c) {
+                    status=IrisDelete(Bridge.Video);
+                    if(!NT_SUCCESS(status))break;
+                    Bridge.Video=NULL;Bridge.VideoClient=NULL;
+                }
                 /* Closing the owner file revokes unsubmitted packets. Tokens
                    already transferred to Submit remain pinned and drain normally. */
                 c->Draining=TRUE;KeReleaseMutex(&Bridge.Lock,FALSE);

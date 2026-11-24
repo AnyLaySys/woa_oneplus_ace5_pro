@@ -62,7 +62,7 @@ NTSTATUS CamScmNocFaults32(CAM *c) {return NocFaults(c,0x82000501);}
 
 static NTSTATUS QosEntries(CAM *c,ULONG kind) {
     if(c->CdmPending||c->DmaActive||c->RxActive||c->ScmPending||c->CrmPending||c->TbuPending)return STATUS_DEVICE_BUSY;
-    if(!c->Powered||!CamScmDiagnosticReady(c)||!c->Frame||!c->FrameMdl)return STATUS_DEVICE_NOT_READY;
+    if(!c->Powered||!CamScmDiagnosticReady(c)||!c->Frame||!c->FrameMdl[0])return STATUS_DEVICE_NOT_READY;
     PHYSICAL_ADDRESS physical=MmGetPhysicalAddress(c->Frame);
     if(physical.QuadPart!=c->FrameAddress.QuadPart||!physical.QuadPart||
        (ULONGLONG)physical.QuadPart+CAM_SCM_RDI_BYTES-1>MAXULONG)return STATUS_DEVICE_CONFIGURATION_ERROR;
@@ -75,7 +75,7 @@ static NTSTATUS QosEntries(CAM *c,ULONG kind) {
     ULONG payloadBytes=kind==2?CAM_SCM_CDM_BYTES:kind==1?CAM_SCM_RDI_BYTES:CAM_SCM_SMART_BYTES;
     c->Info.Flags&=~QCAM_FRAME_VALID;RtlZeroMemory(c->Frame,CAM_SCM_RDI_BYTES);
     if(kind==2)CamScmCdmEncode(c->Frame);else if(kind==1)CamScmRdiEncode(c->Frame);else CamScmSmartEncode(c->Frame);
-    KeFlushIoBuffers(c->FrameMdl,FALSE,TRUE);KeMemoryBarrier();
+    for(ULONG i=0;i<RTL_NUMBER_OF(c->FrameMdl);i++)KeFlushIoBuffers(c->FrameMdl[i],FALSE,TRUE);KeMemoryBarrier();
     RtlCopyMemory(c->Trace.ScmSmartPayload,c->Frame,CAM_SCM_RDI_BYTES);c->Trace.ScmPayloadBytes=payloadBytes;
     c->Trace.ScmSmartAddress=physical.QuadPart;
     ULONGLONG registers[8]={0x4200180a,0x83,1,(ULONGLONG)physical.QuadPart,payloadBytes};
@@ -324,7 +324,7 @@ NTSTATUS CamFrameTranslate(CAM *c) {
             ContextFaults(c,c->Trace.ContextBefore);
             if(CamSmmuFault(c->Trace.ContextBefore[0][0]))status=STATUS_DEVICE_BUSY;
             else for(ULONG i=0;i<2;i++) {
-                ULONGLONG page=address+(i?QCAM_FRAME_BYTES-4096:0);
+                ULONGLONG page=address+(i?256:0);
                 c->Diag.Step=175;c->Diag.Region=CamHfTbu;c->Diag.Address=(ULONG)page;
                 c->Diag.Offset=0x458;c->Diag.Mask=MAXULONG;c->Diag.Expected=(ULONG)page;c->Diag.Phase=i;
                 status=CamTbuTranslateAccess(c->Base[CamHfTbu],0x1c00,page,0x409,c->Trace.FrameTranslation[i]);

@@ -24,14 +24,14 @@ NTSTATUS GpuWait(GPU *g,ULONGLONG fence,ULONGLONG timeout) {
     if(!fence)return STATUS_SUCCESS;
     if(!g->Memory.Cpu)return STATUS_DEVICE_NOT_READY;
     ULONGLONG end=KeQueryInterruptTime()+timeout;
-    do {
+    for(;;) {
         KeMemoryBarrier();
         if(*(volatile ULONGLONG *)g->Memory.Cpu>=fence)return STATUS_SUCCESS;
         if(g->Fault)return (NTSTATUS)g->Fault;
-        LARGE_INTEGER delay;delay.QuadPart=-1000;
+        ULONGLONG now=KeQueryInterruptTime();if(now>=end)return STATUS_IO_TIMEOUT;
+        LARGE_INTEGER delay;delay.QuadPart=-(LONGLONG)(end-now);
         KeWaitForSingleObject(&g->Event,Executive,KernelMode,FALSE,&delay);
-    } while(KeQueryInterruptTime()<end);
-    return STATUS_IO_TIMEOUT;
+    }
 }
 static VOID Fence(GPU *g) {
     /* Linux a7xx_submit (also used by A8xx): retire BV before BR's

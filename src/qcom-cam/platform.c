@@ -39,7 +39,7 @@ static NTSTATUS Spmi(CAM *c,PUCHAR base,UCHAR reg,UCHAR *value,BOOLEAN write) {
         c->Diag.Step=write?102:101;c->Diag.Region=write?CamChannels:CamObserve;
         c->Diag.Offset=(ULONG)(base-c->Base[c->Diag.Region])+8;c->Diag.Observed=observed;
         c->Diag.Mask=1;c->Diag.Expected=1;c->Diag.Address=0x88c00u|reg;
-        c->Diag.Phase=write?1:0;c->Diag.Count=1;c->Diag.Slot=(ULONG)((c->ResetRead-c->Base[CamObserve])/0x20);
+        c->Diag.Phase=write?1:0;c->Diag.Count=1;c->Diag.Slot=c->ResetRead?(ULONG)((c->ResetRead-c->Base[CamObserve])/0x20):0;
         RtlCopyMemory(c->Diag.Resource,"pmicgpio",8);return status;
     }
     if(!write)*value=(UCHAR)CamRead(base,0x18);
@@ -50,6 +50,17 @@ NTSTATUS CamReset(CAM *c,BOOLEAN high) {
     if(!c->ResetWrite)return STATUS_DEVICE_NOT_READY;
     UCHAR value=high?0x80:0;
     return Spmi(c,c->ResetWrite,0x44,&value,TRUE);
+}
+
+NTSTATUS CamPmic(CAM *c,ULONG ppid,UCHAR reg,UCHAR *value,BOOLEAN write) {
+    ULONG count=CamRead(c->Base[CamSpmi],4)&0x7ff;
+    for(ULONG i=0;i<count&&i<1024;i++) {
+        ULONG entry=CamRead(c->Base[CamSpmi],0x2000+4*i);
+        if(((entry>>8)&0xfff)!=ppid)continue;
+        if(write&&(CamRead(c->Base[CamOwners],4*i)&7))continue;
+        return Spmi(c,c->Base[write?CamChannels:CamObserve]+i*(write?0x1000:0x20),reg,value,write);
+    }
+    return STATUS_ACCESS_DENIED;
 }
 
 static NTSTATUS ResetPrepare(CAM *c) {
@@ -176,14 +187,14 @@ NTSTATUS CamPowerOn(CAM *c) {
     const ULONG cfgs[]={0x10021f,0x100105,0x100203,0x10020e,0x100001};
     for(ULONG i=0;i<RTL_NUMBER_OF(rcgs)&&NT_SUCCESS(status);i++)status=Rcg(c,cc,rcgs[i],cfgs[i]);
     if(NT_SUCCESS(status)&&c->ProbeLimit==6)return STATUS_SUCCESS;
-    if(NT_SUCCESS(status))status=Domain(c,0x11004);
+    if(NT_SUCCESS(status))status=Domain(c,0x110ec);
     if(NT_SUCCESS(status)&&c->ProbeLimit==7)return STATUS_SUCCESS;
     if(NT_SUCCESS(status))status=CamCrmOn(c);
     if(NT_SUCCESS(status)) {
         c->Trace.DebugXo[0]=CamRead(cc,0x11348);c->Trace.DebugXo[1]=c->Trace.DebugXo[0]|1;
         status=Branch(c,cc,0x11348);c->Trace.DebugXo[2]=CamRead(cc,0x11348);
     }
-    const ULONG clocks[]={0x113ac,0x1139c,0x11360,0x11320,0x11324,0x11284,0x100bc,0x100c0,0x10020,0x11060,0x11064};
+    const ULONG clocks[]={0x113ac,0x1139c,0x11360,0x11320,0x11324,0x11284,0x100bc,0x100c0,0x10020,0x11148,0x1114c};
     for(ULONG i=0;i<RTL_NUMBER_OF(clocks)&&NT_SUCCESS(status);i++)status=Branch(c,cc,clocks[i]);
     if(NT_SUCCESS(status)&&c->ProbeLimit==8)return STATUS_SUCCESS;
     if(NT_SUCCESS(status))status=Rcg(c,mclk,0x401c,1);
@@ -206,9 +217,11 @@ NTSTATUS CamPowerOn(CAM *c) {
 NTSTATUS CamPowerOff(CAM *c) {
     if(c->ScmPending||c->CdmPending||c->TbuPending||c->FrameRouteOwned)return STATUS_DEVICE_BUSY;
     if(c->DmaActive||c->RxActive||c->BusOn)return STATUS_DEVICE_BUSY;
-    NTSTATUS status=CamCrmOff(c);
+    NTSTATUS status=CamFlashStop(c);
+    if(NT_SUCCESS(status))status=CamCrmOff(c);
     if(!NT_SUCCESS(status))return status;
     if(c->Powered&&c->Configured)status=CamSensorStream(c,FALSE);
+    if(c->LensReady){NTSTATUS lens=CamFocusStop(c);if(NT_SUCCESS(status))status=lens;}
     if(c->ResetOwned) {
         NTSTATUS reset=CamReset(c,FALSE);
         if(!NT_SUCCESS(reset))return reset;
@@ -260,7 +273,7 @@ NTSTATUS CamPowerOff(CAM *c) {
             if(!NT_SUCCESS(restored)){c->Faulted=TRUE;return restored;}
         }
         CamWrite(s->Base,s->Offset,s->Original);
-        if(s->Base==c->Base[CamCc]&&(s->Offset==0x1134c||s->Offset==0x11004)&&(s->Original&3)==1) {
+        if(s->Base==c->Base[CamCc]&&(s->Offset==0x1134c||s->Offset==0x110ec)&&(s->Original&3)==1) {
             NTSTATUS restored=CamWait(s->Base,s->Offset+4,0x8000,0x8000,20000);
             if(!NT_SUCCESS(restored)) {
                 c->Diag.Step=135;c->Diag.Region=CamCc;c->Diag.Offset=s->Offset+4;

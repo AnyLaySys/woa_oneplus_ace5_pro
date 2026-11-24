@@ -53,13 +53,13 @@ NTSTATUS CamCciInit(CAM *c) {
     return STATUS_SUCCESS;
 }
 
-NTSTATUS CamCciRead(CAM *c,UCHAR slave,USHORT address,PUCHAR buffer,ULONG bytes) {
+static NTSTATUS Read(CAM *c,UCHAR slave,USHORT address,ULONG addressBytes,PUCHAR buffer,ULONG bytes) {
     if(!buffer||!bytes||bytes>32||slave>0x7f)return STATUS_INVALID_PARAMETER;
     PUCHAR b=c->Base[CamCci];
     ULONG level=CamRead(b,0x21c);
     if(level>16)return STATUS_IO_DEVICE_ERROR;
     while(level--)CamRead(b,0x218);
-    ULONG words[]={6,1|((ULONG)slave<<4)|(3u<<16),0x2b|((ULONG)(address>>8)<<8)|((ULONG)(address&255)<<16),10|(bytes<<4),7};
+    ULONG words[]={6,1|((ULONG)slave<<4)|(3u<<16),addressBytes==2?0x2b|((ULONG)(address>>8)<<8)|((ULONG)(address&255)<<16):0x1b|((ULONG)address<<8),10|(bytes<<4),7};
     NTSTATUS status=Execute(c,words,RTL_NUMBER_OF(words),0x1000);
     if(!NT_SUCCESS(status))return status;
     level=CamRead(b,0x21c);
@@ -75,14 +75,21 @@ NTSTATUS CamCciRead(CAM *c,UCHAR slave,USHORT address,PUCHAR buffer,ULONG bytes)
     return offset==bytes?STATUS_SUCCESS:STATUS_DATA_ERROR;
 }
 
-NTSTATUS CamCciWrite(CAM *c,UCHAR slave,USHORT address,const UCHAR *buffer,ULONG bytes) {
+static NTSTATUS Write(CAM *c,UCHAR slave,USHORT address,ULONG addressBytes,const UCHAR *buffer,ULONG bytes) {
     if(!buffer||!bytes||bytes>8||slave>0x7f)return STATUS_INVALID_PARAMETER;
     UCHAR payload[12]={0};ULONG words[8]={0};
     words[0]=6;words[1]=1|((ULONG)slave<<4)|(3u<<16);
-    payload[0]=(UCHAR)(9|((bytes+2)<<4));payload[1]=(UCHAR)(address>>8);payload[2]=(UCHAR)address;
-    RtlCopyMemory(payload+3,buffer,bytes);
-    ULONG count=(bytes+6)/4;
+    payload[0]=(UCHAR)(9|((bytes+addressBytes)<<4));
+    if(addressBytes==2)payload[1]=(UCHAR)(address>>8);
+    payload[addressBytes]=(UCHAR)address;
+    RtlCopyMemory(payload+addressBytes+1,buffer,bytes);
+    ULONG count=(bytes+addressBytes+4)/4;
     RtlCopyMemory(words+2,payload,count*4);
     words[2+count]=7;words[3+count]=0x308;
     return Execute(c,words,count+4,0x10000);
 }
+
+NTSTATUS CamCciRead(CAM *c,UCHAR slave,USHORT address,PUCHAR buffer,ULONG bytes) {return Read(c,slave,address,2,buffer,bytes);}
+NTSTATUS CamCciWrite(CAM *c,UCHAR slave,USHORT address,const UCHAR *buffer,ULONG bytes) {return Write(c,slave,address,2,buffer,bytes);}
+NTSTATUS CamCciReadByte(CAM *c,UCHAR slave,UCHAR address,PUCHAR buffer,ULONG bytes) {return Read(c,slave,address,1,buffer,bytes);}
+NTSTATUS CamCciWriteByte(CAM *c,UCHAR slave,UCHAR address,const UCHAR *buffer,ULONG bytes) {return Write(c,slave,address,1,buffer,bytes);}

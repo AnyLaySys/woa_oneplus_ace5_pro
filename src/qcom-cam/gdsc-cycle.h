@@ -4,7 +4,7 @@ static NTSTATUS CamGdscCycle(CAM *c) {
     if(!c->Powered)return STATUS_DEVICE_NOT_READY;
     if(c->DmaActive||c->RxActive||c->CrmPending||c->ScmPending)return STATUS_DEVICE_BUSY;
     PUCHAR base=c->Base[CamCc];
-    const ULONG offsets[]={0x11004,0x1134c};
+    const ULONG offsets[]={0x110ec,0x1134c};
     ULONG active[2]={CamRead(base,offsets[0]),CamRead(base,offsets[1])},changed=0;
     NTSTATUS status=STATUS_SUCCESS;
     for(ULONG i=0;i<RTL_NUMBER_OF(offsets);i++) {

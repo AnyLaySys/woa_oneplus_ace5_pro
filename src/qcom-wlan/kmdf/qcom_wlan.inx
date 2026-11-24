@@ -8,7 +8,7 @@ Signature="$WINDOWS NT$"
 Class=Net
 ClassGuid={4d36e972-e325-11ce-bfc1-08002be10318}
 Provider=%ProviderString%
-DriverVer=11/20/2026,26.11.20.64
+DriverVer=11/23/2026,26.11.23.6
 CatalogFile=qcom_wlan.cat
 PnpLockdown=1
 
@@ -31,7 +31,7 @@ qcom_wlan.sys = 1
 CopyFiles = qcom_wlan_CopyFiles
 Characteristics = 0x84
 BusType = 0
-AddReg = qcom_wlan_Ndi
+AddReg = qcom_wlan_Ndi, qcom_wlan_SecondarySta
 *IfType = 71
 *MediaType = 16
 *PhysicalMediaType = 9
@@ -65,6 +65,9 @@ HKR, NetworkInterface, *ConnectionType, 0x00010001, 1
 HKR, NetworkInterface, *DirectionType, 0x00010001, 0
 HKR, NetworkInterface, *AccessType, 0x00010001, 2
 HKR, NetworkInterface, *HardwareLoopback, 0x00010001, 0
+
+[qcom_wlan_SecondarySta]
+HKLM, SYSTEM\CurrentControlSet\Services\WlanSvc\Parameters\SecondarySta, SecondaryStaConfig, 0x00010001, 5
 
 [Strings]
 ProviderString     = "AnyLaySys"

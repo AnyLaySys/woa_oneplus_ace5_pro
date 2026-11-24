@@ -25,6 +25,7 @@ VOID GpuFree(GPU_BO *bo) {
 }
 static NTSTATUS Tables(GPU_VM *vm) {
     GPU_BO *b=&vm->Tables;
+    if(b->Mdl)return STATUS_SUCCESS;
     PHYSICAL_ADDRESS low={0},high,skip={0};high.QuadPart=0xFFFFFFFF;
     /* The 3-level 4K tables cover the supported VA below 16 GB.
      * Sixteen L2 pages plus 8192 L3 pages fit even after mapping churn.
@@ -133,7 +134,6 @@ static VOID MmuStopLocked(GPU *g) {
     PUCHAR m=g->Registers+0xA0000;
     GpuWrite(m,0x800,0);GpuWrite(m,0x804,0);GpuWrite(m,0x814,0);
     GpuWrite(m,g->CbBase,0);GpuWrite(m,g->CbBase+4096,0);
-    for(ULONG i=0;i<2;i++)GpuFree(&g->Vm[i].Tables);
     GpuFree(&g->Prr);
 }
 
@@ -151,7 +151,8 @@ NTSTATUS GpuMapRange(GPU *g,ULONG vm,ULONGLONG address,ULONGLONG size,GPU_BO *bo
 NTSTATUS GpuFlushMappings(GPU *g,ULONG vm) {
     if(vm>1 || KeGetCurrentIrql()>APC_LEVEL)return STATUS_INVALID_PARAMETER;
     KeWaitForSingleObject(&g->MappingLock,Executive,KernelMode,FALSE,NULL);
-    NTSTATUS status=g->Registers && g->Vm[vm].Tables.Mdl?Flush(g,vm):STATUS_DEVICE_NOT_READY;
+    NTSTATUS status=!g->Online?STATUS_SUCCESS:
+        g->Registers && g->Vm[vm].Tables.Mdl?Flush(g,vm):STATUS_DEVICE_NOT_READY;
     KeReleaseMutex(&g->MappingLock,FALSE);return status;
 }
 NTSTATUS GpuMap(GPU *g,ULONG vm,GPU_BO *bo,ULONGLONG address) {

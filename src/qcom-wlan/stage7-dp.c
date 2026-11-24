@@ -20,7 +20,7 @@ static BOOLEAN Dpointer(PWCN_DEVICE D,PWCN_DP_RING R,ULONG *Value)
 {
     if(!R||!R->Desc.Buffer)return FALSE;
     *Value=((volatile ULONG*)D->Dp.Rdp.Va)[R->Id];KeMemoryBarrier();
-    if(*Value>=R->Entries*R->EntryDwords||*Value%R->EntryDwords){D->Runtime.RuntimeErrors++;WcnStage7FailAll(D);return FALSE;}
+    if(*Value>=R->Entries*R->EntryDwords||*Value%R->EntryDwords){D->Runtime.Failed=TRUE;WcnStage7FailAll(D);return FALSE;}
     return TRUE;
 }
 static VOID Dpublish(PWCN_DEVICE D,PWCN_DP_RING R)
@@ -156,36 +156,46 @@ static VOID DtxDone(PWCN_DEVICE D,const ULONG *B)
     if(Ack&&J&&!(D->Runtime.TxUsed[Cookie]&0x20))J->PeerSeenAt=WcnNowMs();
 
     RtlSecureZeroMemory(D->Runtime.TxDma.Va+Cookie*2048,2048);D->Runtime.TxUsed[Cookie]=0;return;
-Bad:D->Runtime.RuntimeErrors++;WcnStage7FailAll(D);
+Bad:D->Runtime.Failed=TRUE;WcnStage7FailAll(D);
 }
 
 /* NULL queue means REO could not perform reordering/PN validation. Do not
  * treat it as generic success: only the observed REO/NULL/MSDU class is
  * eligible, then hardware CCMP integrity plus our per-key/TID replay check
  * is mandatory. The same replay table is shared with normal REO delivery. */
-static ULONG DrxReplay(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *Buffer,const ULONG *B,BOOLEAN Error,ULONG Fc,const UCHAR *F)
+BOOLEAN WcnStage7RxReplay(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *Buffer,const ULONG *B,BOOLEAN Error,ULONG Fc,const UCHAR *F)
 {
     ULONG Valid=Jle32(Buffer+176),I2=Jle32(Buffer+148),Key=Jle32(Buffer+192)&255;
-    ULONG Mpdu=Error?B[3]:B[2],Meta=Error?B[4]:B[3],Group=Buffer[204]&1,Tid=(Fc&0x80)?((I2>>15)&15):16,Mask,Msdu=Error?B[5]:B[4];
-    ULONG64 Pn=(ULONG64)Jle32(Buffer+160)|((ULONG64)(Jle32(Buffer+164)&65535)<<32),Last;
-    if((!J->Authorized&&(Group||Jbe16(F+12)!=0x888e))||!J->PairwiseInstalled||!J->PeerMapped||J->KeyHold)return 14;
-    if((Valid&0x4020du)!=0x4020du||!(Mpdu&(1u<<12))||((I2>>2)&15)!=6)return 15;
-    if((Fc&0x80)&&!(Valid&(1u<<7)))return 15;
-    if(D->Ce.PeerMetadataVersion>1)return 15;
+    ULONG Mpdu=Error?B[3]:B[2],Meta=Error?B[4]:B[3],Group=Buffer[204]&1,Tid=(Fc&0x80)?((I2>>15)&15):16,Mask;
+    ULONG64 Pn=(ULONG64)Jle32(Buffer+160)|((ULONG64)(Jle32(Buffer+164)&65535)<<32);
+    if((!J->Authorized&&(Group||Jbe16(F+12)!=0x888e))||!J->PairwiseInstalled||!J->PeerMapped||J->KeyHold||
+        (Valid&0x4020du)!=0x4020du||!(Mpdu&(1u<<12))||((I2>>2)&15)!=6||
+        ((Fc&0x80)&&!(Valid&(1u<<7)))||D->Ce.PeerMetadataVersion>1)return TRUE;
     Mask=D->Ce.PeerMetadataVersion==1?0x3fff:0xffff;
-    if((Meta&Mask)!=J->PeerId||((Meta>>16)&255)!=J->Vdev||!Jeq(Buffer+204,F,6))return 15;
-    if(!Group&&!Jeq(Buffer+204,J->Mac,6))return 15;
+    if((Meta&Mask)!=J->PeerId||((Meta>>16)&255)!=J->Vdev||!Jeq(Buffer+204,F,6)||(!Group&&!Jeq(Buffer+204,J->Mac,6)))return TRUE;
     ULONG Slot=Group?Key+1u:0;
-    if(Key>3||(!Group&&Key)||!J->Cipher[Slot].Installed||J->KeyUpdate.Slot==Slot+1)return 15;
-    Last=J->RxPnValid[Slot][Tid]?J->RxPn[Slot][Tid]:J->Cipher[Slot].Floor;
-    if(!WcnRxPnAccept(Pn,&Last,&J->RxPnValid[Slot][Tid],Msdu,!Error&&!Group&&(Fc&0x80)))return 16;
-    J->RxPn[Slot][Tid]=Last;
-    return 0;
+    if(Key>3||(!Group&&Key)||!J->Cipher[Slot].Installed||J->KeyUpdate.Slot==Slot+1)return TRUE;
+    return !WcnRxPnAccept(Pn,&J->RxPn[Slot][Tid],J->Cipher[Slot].Floor,!Error&&!Group);
 }
-ULONG WcnStage7RxReplay(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *Buffer,const ULONG *Desc,BOOLEAN Error,ULONG Fc,const UCHAR *F){return DrxReplay(D,J,Buffer,Desc,Error,Fc,F);}
-static VOID DrxDone(PWCN_DEVICE D,const ULONG *B,BOOLEAN Error)
+static BOOLEAN Dmpdu(PWCN_RX_MPDU C,UCHAR *Start,ULONG Info,ULONG Peer,ULONG Msdu)
 {
-    PWCN_JOIN J=&D->Join;ULONG Cookie,Index,Length,Pad,Info13,Info14,Decap,Head,Route,Drop=0,Fc,Valid,Decrypt,Type=0,Mpdu,Msdu,Rbm;BOOLEAN NullQueue=FALSE;ULONG64 Pa;UCHAR *Buffer;
+    if(Msdu&1){
+        C->Left=0;
+        ULONG Count=Info&255;
+        if(!Count||((Msdu&2)!=0)!=(Count==1))return FALSE;
+        if(Count>1&&(Jle32(Start+36)&9)==9){
+            C->Info=Info;C->Peer=Peer;C->Left=Count-1;RtlCopyMemory(C->Start,Start,sizeof(C->Start));
+        }
+        return TRUE;
+    }
+    if(!C->Left||C->Info!=Info||C->Peer!=Peer||((Msdu&2)!=0)!=(C->Left==1)){
+        C->Left=0;return FALSE;
+    }
+    RtlCopyMemory(Start,C->Start,sizeof(C->Start));C->Left--;return TRUE;
+}
+static VOID DrxDone(PWCN_DEVICE D,const ULONG *B,BOOLEAN Error,ULONG Ring)
+{
+    PWCN_JOIN J;ULONG Cookie,Index,Length,Pad,Info13,Info14,Decap,Head,Route,Fc,Valid,Decrypt,Type,Mpdu,Msdu,Rbm;BOOLEAN NullQueue=FALSE;ULONG64 Pa;UCHAR *Buffer;
     if(Error&&(B[2]&(1u<<16))){Cookie=(B[7]>>8)&0xfffff;Pa=B[6]|((ULONG64)(B[7]&255)<<32);}
     else{Cookie=B[1]>>12;Pa=B[0]|((ULONG64)(B[1]&255)<<32);}
     if(Cookie<JRXPPT||Cookie>=JRXPPT+4095)goto Bad;
@@ -195,51 +205,39 @@ static VOID DrxDone(PWCN_DEVICE D,const ULONG *B,BOOLEAN Error)
     KeMemoryBarrier();Info13=Jle32(Buffer+124);Info14=Jle32(Buffer+128);
     Length=Jle32(Buffer+76)&0x3fff;Pad=(Jle16(Buffer+46)>>10)&3;Decap=(Jle32(Buffer+80)>>8)&3;
     Route=(B[7]&S7_REO_PUSH_REASON_MASK)>>S7_REO_PUSH_REASON_SHIFT;
-    Fc=Jle16(Buffer+200);Valid=Jle32(Buffer+176);Decrypt=(Info14>>10)&7;
     Mpdu=Error?B[3]:B[2];Msdu=Error?B[5]:B[4];
+    if(!Error&&!Dmpdu(&D->Runtime.RxMpdu[Ring-1],Buffer+S6_QCC_MPDU_START_TAG_OFFSET,Mpdu,B[3],Msdu))goto Recycle;
+    Fc=Jle16(Buffer+200);Valid=Jle32(Buffer+176);Decrypt=(Info14>>10)&7;
     Rbm=Error?((B[2]&(1u<<16))?((B[2]>>9)&15):((B[1]>>8)&15)):0;
     if(Error)NullQueue=(B[2]&7)==2&&((B[2]>>6)&7)==0&&!(B[2]&0x80000000u)&&
         ((B[2]>>24)&3)==0&&((B[2]>>26)&31)==0&&Rbm==8;
-    if(Error&&!NullQueue)Drop=1;
-    else if(!Error&&((B[7]&1)||Route!=S7_REO_PUSH_ROUTING))Drop=2;
-    else if((Mpdu&((1u<<8)|(1u<<13)|(1u<<14)))||(Fc&(1u<<10)))Drop=3;
-    else if(!(Info14&0x80000000u))Drop=4;
-    else if(Info13&0xfcc39000u)Drop=5;
-    else if(Decap!=2)Drop=6;
-    else if(Length<14||Length>2048-S6_QCC_DESCRIPTOR_BYTES-Pad)Drop=7;
-    else if((Msdu&((1u<<2)|(1u<<17)))||(NullQueue&&((Mpdu&255)!=1||(Msdu&3)!=3)))Drop=8;
-    else if((Valid&9)!=9)Drop=9;
-    else if(WcnHotspotRx(D,Buffer,Length,Pad,Error,B))goto Recycle;
-    else if((J=WcnStation(D,((Error?B[4]:B[3])>>16)&255))==NULL)Drop=10;
-    else if(((Error?B[4]:B[3])&(D->Ce.PeerMetadataVersion==1?0x3fffu:0xffffu))!=J->PeerId&&WcnTdlsRx(D,J,Buffer,Length,Pad,Error,B))goto Recycle;
-    else if(!J->PeerMapped||((Error?B[4]:B[3])&(D->Ce.PeerMetadataVersion==1?0x3fffu:0xffffu))!=J->PeerId||!Jeq(Buffer+210,J->Ap.Bssid,6))Drop=10;
-    else if((Fc&0x030c)!=0x0208)Drop=11;
-    if(!Drop){
+    if((Error&&!NullQueue)||(!Error&&((B[7]&1)||Route!=S7_REO_PUSH_ROUTING))||
+        (Mpdu&((1u<<8)|(1u<<13)|(1u<<14)))||(Fc&(1u<<10))||!(Info14&0x80000000u)||
+        (Info13&0xfcc39000u)||Decap!=2||Length<14||Length>2048-S6_QCC_DESCRIPTOR_BYTES-Pad||
+        (Msdu&((1u<<2)|(1u<<17)))||(NullQueue&&((Mpdu&255)!=1||(Msdu&3)!=3))||(Valid&9)!=9)goto Recycle;
+    if(WcnHotspotRx(D,Buffer,Length,Pad,Error,B))goto Recycle;
+    J=WcnStation(D,((Error?B[4]:B[3])>>16)&255);if(!J)goto Recycle;
+    if(((Error?B[4]:B[3])&(D->Ce.PeerMetadataVersion==1?0x3fffu:0xffffu))!=J->PeerId&&WcnTdlsRx(D,J,Buffer,Length,Pad,Error,B))goto Recycle;
+    if(!J->PeerMapped||((Error?B[4]:B[3])&(D->Ce.PeerMetadataVersion==1?0x3fffu:0xffffu))!=J->PeerId||!Jeq(Buffer+210,J->Ap.Bssid,6)||(Fc&0x030c)!=0x0208)goto Recycle;
+    {
         const UCHAR *Frame=Buffer+S6_QCC_DESCRIPTOR_BYTES+Pad;
         Type=Jbe16(Frame+12);
-        /* Only EAPOL can be unprotected. Protected EAPOL/data both require
-         * successful hardware decryption. Never weaken cookie, CRC, peer,
-         * direction, length, replay-route or controlled-port checks. */
-        // WPS has no PTK: a validated unprotected EAP reply may use NULL-REO.
         BOOLEAN WpsEap=NullQueue&&Type==0x888e&&Length>=18&&!(Fc&0x4000)&&J->Associated&&
             !J->PairwiseInstalled&&J->Ap.Auth==WCN_AUTH_OPEN&&WcnStage8Provisioning(D,J)&&
             Jeq(Frame+6,J->Ap.Bssid,6)&&(Jeq(Frame,J->Mac,6)||Jeq(Frame,(const UCHAR*)"\x01\x80\xc2\x00\x00\x03",6));
         if(NullQueue&&!WpsEap&&((Type!=0x0800&&Type!=0x0806&&Type!=0x86dd)||
-           (!Jeq(Frame,J->Mac,6)&&!Jeq(Frame,(const UCHAR*)"\xff\xff\xff\xff\xff\xff",6)&&!(Frame[0]&1))))Drop=17;
-        if(!Drop&&(Fc&0x4000)){if(Decrypt!=0)Drop=12;else Drop=DrxReplay(D,J,Buffer,B,Error,Fc,Frame);}
-        if(!Drop&&!(Fc&0x4000)){
-            if(Decrypt!=0&&Decrypt!=1)Drop=13;
-            else if(Type!=0x888e&&(J->Ap.Auth!=WCN_AUTH_OPEN||!J->Authorized))Drop=13;
-            else if(NullQueue&&J->Ap.Auth!=WCN_AUTH_OPEN)Drop=13;
-        }
-        if(!Drop){ULONG Rate=Jle32(Buffer+92);if(((Rate>>8)&15)>=2)J->RxMcs=(Rate>>14)&15;
-            J->RxFrames++;WcnStage8Ethernet(D,J,Frame,Length);}
+           (!Jeq(Frame,J->Mac,6)&&!Jeq(Frame,(const UCHAR*)"\xff\xff\xff\xff\xff\xff",6)&&!(Frame[0]&1))))goto Recycle;
+        if(Fc&0x4000){if(Decrypt!=0||WcnStage7RxReplay(D,J,Buffer,B,Error,Fc,Frame))goto Recycle;}
+        else if((Decrypt!=0&&Decrypt!=1)||(Type!=0x888e&&(J->Ap.Auth!=WCN_AUTH_OPEN||!J->Authorized))||
+            (NullQueue&&J->Ap.Auth!=WCN_AUTH_OPEN))goto Recycle;
+        ULONG Rate=Jle32(Buffer+92);if(((Rate>>8)&15)>=2)J->RxMcs=(Rate>>14)&15;
+        J->RxFrames++;WcnStage8Ethernet(D,J,Frame,Length);
     }
 
 Recycle:
     Head=(D->Runtime.RxPendingHead+1)&4095;if(Head==D->Runtime.RxPendingTail)goto Bad;
     D->Runtime.RxPending[D->Runtime.RxPendingHead]=Index;D->Runtime.RxPendingHead=Head;return;
-Bad:D->Runtime.RuntimeErrors++;WcnStage7FailAll(D);
+Bad:D->Runtime.Failed=TRUE;WcnStage7FailAll(D);
 }
 static VOID Drefill(PWCN_DEVICE D)
 {
@@ -248,7 +246,7 @@ static VOID Drefill(PWCN_DEVICE D)
     while(D->Runtime.RxPendingTail!=D->Runtime.RxPendingHead){
         Next=(R->Head+2)%(R->Entries*2);if(Next==Tail)break;
         Index=D->Runtime.RxPending[D->Runtime.RxPendingTail];Cookie=JRXPPT+Index;
-        if(Index>=4095||D->Runtime.RxPosted[Index]){D->Runtime.RuntimeErrors++;WcnStage7FailAll(D);return;}
+        if(Index>=4095||D->Runtime.RxPosted[Index]){D->Runtime.Failed=TRUE;WcnStage7FailAll(D);return;}
         RtlZeroMemory(D->Dp.RxBuffer[Index/256].Va+(Index%256)*2048,2048);
         Pa=D->Dp.Cookies[Cookie].BufferAddress;B=(ULONG*)(R->Desc.Va+R->Head*4);
         B[0]=(ULONG)Pa;B[1]=(ULONG)(Pa>>32)|(6u<<8)|(Cookie<<12);
@@ -320,25 +318,26 @@ NTSTATUS WcnStage7ReoRelease(PWCN_DEVICE D,PWCN_JOIN J)
 }
 VOID WcnStage7DpPoll(PWCN_DEVICE D)
 {
-    PWCN_DP_RING R;ULONG I,Head,Count,B[8];
-    if(!D->Runtime.Ready||D->Runtime.RuntimeErrors||D->Mhi.SysErr||D->Mhi.RddmFailed)return;
+    PWCN_DP_RING R;ULONG I,Head,Count,B[8];BOOLEAN Blocked;
+    if(!D->Runtime.Ready||D->Runtime.Failed||D->Mhi.SysErr||D->Mhi.RddmFailed)return;
     for(I=0;I<D->Dp.RingCount;I++){
         R=&D->Dp.Ring[I];
         if(!DcompletionRing(R))continue;
         if(!Dpointer(D,R,&Head))return;
-        Count=0;
+        Count=0;Blocked=FALSE;
         while(R->Head!=Head&&Count++<256){
             RtlCopyMemory(B,R->Desc.Va+R->Head*4,32);
+            if(R->Id>=1&&R->Id<=8&&WcnStage8RxBlocked(D,(B[3]>>16)&255)){Blocked=TRUE;break;}
             if(R->Id==21)DreoStatus(D,B);
             else if(R->Id==128||R->Id==130||R->Id==132)DtxDone(D,B);
-            else if(R->Id==131)DrxDone(D,B,TRUE);
-            else if(!(B[7]&1))DrxDone(D,B,FALSE);
-            else {D->Runtime.RuntimeErrors++;WcnStage7FailAll(D);}
-            if(D->Runtime.RuntimeErrors)return;
+            else if(R->Id==131)DrxDone(D,B,TRUE,R->Id);
+            else if(!(B[7]&1))DrxDone(D,B,FALSE,R->Id);
+            else {D->Runtime.Failed=TRUE;WcnStage7FailAll(D);}
+            if(D->Runtime.Failed)return;
             R->Head=(R->Head+R->EntryDwords)%(R->Entries*R->EntryDwords);
         }
         Dpublish(D,R);
-        if(R->Head!=Head)KeSetEvent(&D->WorkEvent,IO_NO_INCREMENT,FALSE);
+        if(R->Head!=Head&&!Blocked)KeSetEvent(&D->WorkEvent,IO_NO_INCREMENT,FALSE);
     }
     Drefill(D);
 }

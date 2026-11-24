@@ -455,9 +455,11 @@ typedef struct _WCN_BA {
 typedef struct _WCN_IGTK {UCHAR Key[16],Previous[16];ULONG64 Pn;BOOLEAN Valid,Known,PreviousKnown;} WCN_IGTK;
 typedef struct _WCN_CIPHER_KEY {UCHAR Key[16],Previous[16];ULONG64 Floor;BOOLEAN Known,PreviousKnown,Installed;} WCN_CIPHER_KEY;
 typedef struct _WCN_KEY_UPDATE {UCHAR Slot,Key[16],Rsc[6],Tid;BOOLEAN Delete,Sent,Ack,ReoSent,ResetPn;LONGLONG At;} WCN_KEY_UPDATE;
+typedef struct _WCN_RX_MPDU {ULONG Info,Peer,Left;UCHAR Start[124];} WCN_RX_MPDU,*PWCN_RX_MPDU;
 typedef struct _WCN_RUNTIME {
-    BOOLEAN Ready,ReoPending,ReoDone;USHORT ReoCmd,ReoTid,ReoTag;
-    ULONG RuntimeErrors,ReoStatus,ReoOwner;ULONG64 ReoBase;
+    BOOLEAN Ready,Failed,ReoPending,ReoDone;USHORT ReoCmd,ReoTid,ReoTag;
+    ULONG ReoStatus,ReoOwner;ULONG64 ReoBase;
+    WCN_RX_MPDU RxMpdu[8];
     ULONG RxPending[4096],RxPendingHead,RxPendingTail;UCHAR RxPosted[4096],TxUsed[WCN_TX_SLOTS];WCN_DMA TxDma;
 } WCN_RUNTIME,*PWCN_RUNTIME;
 typedef struct _WCN_JOIN {
@@ -480,7 +482,6 @@ typedef struct _WCN_JOIN {
     UCHAR CsaState,CsaStep;BOOLEAN CsaAck,CsaBlock;WCN_JOIN_AP NextChannel;LONGLONG CsaAt,CsaDeadline;
 
     ULONG64 RxPn[5][17];
-    UCHAR RxPnValid[5][17];
     ULONG Wire[512];
     WCN_DMA MgmtDma,ReoQueue;
     ULONG ReoReleaseStep;LONGLONG ReoReleaseAt;BOOLEAN Resetting,PeerDeleteConfirmed,PeerUnmapped,VdevStopConfirmed;
@@ -488,7 +489,7 @@ typedef struct _WCN_JOIN {
 } WCN_JOIN, *PWCN_JOIN;
 
 typedef struct _WCN_DEVICE {
-    PVOID Stage8,SecondaryStage8,RoleStage8,Hotspot,Tdls,P2p;
+    PVOID Stage8,SecondaryStage8,RoleStage8,Hotspot,Tdls,P2p,Balance;
     BOOLEAN P2pClient;
     ULONG MgmtSequence,MgmtInUse[4];
     WDFDEVICE       Device;
@@ -525,6 +526,11 @@ typedef struct _WCN_DEVICE {
 } WCN_DEVICE, *PWCN_DEVICE;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME (WCN_DEVICE, WcnGetDevice)
+NTSTATUS WcnBalanceCreate(PWCN_DEVICE D);
+PWCN_JOIN WcnBalanceTx(PWCN_DEVICE D,PWCN_JOIN J,UCHAR *Frame,ULONG Length);
+BOOLEAN WcnBalanceRx(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *Frame,ULONG Length);
+BOOLEAN WcnBalanceRxUsesPrimary(PWCN_DEVICE D);
+VOID WcnBalanceService(PWCN_DEVICE D);
 static __inline PWCN_JOIN WcnStation(PWCN_DEVICE D,ULONG Vdev)
 {return Vdev==0?&D->Join:Vdev==2?&D->Secondary:Vdev==1&&D->P2pClient?&D->P2pJoin:NULL;}
 static __inline UCHAR WcnTxOwner(ULONG Vdev){return (UCHAR)(Vdev==1?0x80:Vdev==2?0x40:0);}
@@ -553,8 +559,9 @@ VOID WcnStage7PeerReceive(PWCN_DEVICE D,PWCN_JOIN J,ULONG Event,const UCHAR *P,U
 VOID WcnStage7PeerHtt(PWCN_JOIN J,const UCHAR *P,ULONG N);
 NTSTATUS WcnStage7PeerQueues(PWCN_DEVICE D,PWCN_JOIN J);
 NTSTATUS WcnStage7PublicAction(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR Peer[6],const UCHAR *Body,ULONG N);
-ULONG WcnStage7RxReplay(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *Buffer,const ULONG *Desc,BOOLEAN Error,ULONG Fc,const UCHAR *F);
+BOOLEAN WcnStage7RxReplay(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *Buffer,const ULONG *Desc,BOOLEAN Error,ULONG Fc,const UCHAR *F);
 VOID WcnStage8DirectEthernet(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *F,ULONG N);
+BOOLEAN WcnStage8RxBlocked(PWCN_DEVICE Dev,ULONG Vdev);
 /* Firmware feature gates are actual service bits, not chip-name assumptions. */
 BOOLEAN WcnService(PWCN_DEVICE D,ULONG Service);
 NTSTATUS WcnVdevParam(PWCN_DEVICE D,ULONG Vdev,ULONG Param,ULONG Value);

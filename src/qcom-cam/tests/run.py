@@ -6,10 +6,11 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='qcom-cam-test-') as directory:
     work = Path(directory)
-    for source, name in [(root / 'cci.c', 'cci.c'), (root / 'scm.c', 'scm.c'), (root / 'dma-table.h', 'dma-table.h'),
+    for source, name in [(root / 'cci.c', 'cci.c'), (root / 'focus.c', 'focus.c'), (root / 'pdaf.h', 'pdaf.h'), (root / 'tests/focus.c', 'focus-test.c'), (root / 'tests/pdaf.c', 'pdaf-test.c'), (root / 'scm.c', 'scm.c'), (root / 'dma-table.h', 'dma-table.h'),
                          (root / 'dma-address.h', 'dma-address.h'),
+                         (root / 'frame-map-table.h', 'frame-map-table.h'),
                          (root / 'dma-idle.h', 'dma-idle.h'),
-                         (root / 'rdi-frame.h', 'rdi-frame.h'),
+                         (root / 'rdi-frame.h', 'rdi-frame.h'), (root / 'frame-clock.h', 'frame-clock.h'),
                          (root / 'dma-ready.h', 'dma-ready.h'),
                          (root / 'scm-ready.h', 'scm-ready.h'),
                          (root / 'dma-route.h', 'dma-route.h'),
@@ -22,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix='qcom-cam-test-') as directory:
                          (root / 'tbu-translate.h', 'tbu-translate.h'),
                          (root / 'mnoc-qos.h', 'mnoc-qos.h'),
                          (root / 'scm-qos-payload.h', 'scm-qos-payload.h'),
-                         (root / 'uapi.h', 'uapi.h'), (root / 'video/nv12.h', 'nv12.h'),
+                         (root / 'uapi.h', 'uapi.h'), (root / 'video/nv12.h', 'nv12.h'), (root / 'video/raw-row.h', 'raw-row.h'),
                          (root / 'rpmh-message.h', 'rpmh-message.h'),
                          (root / 'wait.h', 'wait.h'),
                          (root / 'rcg-restore.h', 'rcg-restore.h'),
@@ -37,3 +38,9 @@ with tempfile.TemporaryDirectory(prefix='qcom-cam-test-') as directory:
     subprocess.run(['cc', '-std=c17', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
                     '-g', str(work / 'cci.c'), str(work / 'scm.c'), str(work / 'host.c'), '-o', str(work / 'test')], check=True)
     subprocess.run([str(work / 'test')], check=True)
+    subprocess.run(['cc', '-std=c17', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+                    '-g', str(work / 'focus.c'), str(work / 'focus-test.c'), '-o', str(work / 'focus-test')], check=True)
+    subprocess.run([str(work / 'focus-test')], check=True)
+    subprocess.run(['cc', '-std=c17', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+                    '-g', str(work / 'pdaf-test.c'), '-o', str(work / 'pdaf-test')], check=True)
+    subprocess.run([str(work / 'pdaf-test')], check=True)

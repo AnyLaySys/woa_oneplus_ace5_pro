@@ -21,7 +21,7 @@
   <PropertyGroup>
     <TargetName>qcom_cam</TargetName>
     <CamVersionDate Condition="'$(CamVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</CamVersionDate>
-    <CamRevision Condition="'$(CamRevision)' == ''">137</CamRevision>
+    <CamRevision Condition="'$(CamRevision)' == ''">219</CamRevision>
     <CamDriverDate>$([System.DateTime]::Parse('$(CamVersionDate)').ToString('MM/dd/yyyy'))</CamDriverDate>
     <CamDriverVersion>$([System.DateTime]::Parse('$(CamVersionDate)').ToString('yy.M.d')).$(CamRevision)</CamDriverVersion>
     <CamDriverVersionComma>$([System.String]::Copy('$(CamDriverVersion)').Replace('.', ','))</CamDriverVersionComma>
@@ -30,15 +30,17 @@
     <IntDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-cam\ARM64\Release\obj\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
-    <ClCompile><PreprocessorDefinitions>_UNICODE;UNICODE;POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MinSpace</Optimization><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
+    <ClCompile><PreprocessorDefinitions>_UNICODE;UNICODE;POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MaxSpeed</Optimization><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
     <Link><GenerateDebugInformation>false</GenerateDebugInformation><Profile>false</Profile></Link>
     <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>$(CamDriverDate)</DateStamp><TimeStamp>$(CamDriverVersion)</TimeStamp></Inf>
     <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=$(CamDriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(CamDriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\driver.c" />
+    <ClCompile Include="..\driver.c" /><ClCompile Include="..\video\raw-row.cpp" />
     <ClCompile Include="..\cci.c" />
     <ClCompile Include="..\imx906.c" />
+    <ClCompile Include="..\focus.c" />
+    <ClCompile Include="..\flash.c" />
     <ClCompile Include="..\platform.c" />
     <ClCompile Include="..\rpmh.c" />
     <ClCompile Include="..\capture.c" />
@@ -48,6 +50,7 @@
     <ClCompile Include="..\scm.c" />
     <ClCompile Include="..\scm-audit.c" />
     <MARMASM Include="..\scm-slow.asm" />
+    <MARMASM Include="..\cpu-map.asm" />
     <ClInclude Include="..\cam.h" />
     <ClInclude Include="..\uapi.h" />
     <ClInclude Include="..\imx906-regs.h" />

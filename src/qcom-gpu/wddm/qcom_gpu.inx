@@ -25,6 +25,7 @@ freedreno_icd_x64.json=1
 msvcp140.dll=1
 vcruntime140.dll=1
 gen80000_zap.mbn=1
+vpu35_4v.mbn=1
 [Manufacturer]
 %Manufacturer%=Adreno,NT$ARCH$.10.0...26100
 [Adreno.NT$ARCH$.10.0...26100]
@@ -51,6 +52,7 @@ freedreno_icd_x64.json
 msvcp140.dll
 vcruntime140.dll
 gen80000_zap.mbn
+vpu35_4v.mbn
 [Driver.Render]
 HKR,,VulkanDriverName,0x00010000,"%13%\freedreno_icd.json","%13%\freedreno_icd_x64.json"
 HKR,,UserModeDriverName,0x00010000,"%13%\a830_umd.dll","%13%\a830_umd.dll","%13%\a830_umd.dll"

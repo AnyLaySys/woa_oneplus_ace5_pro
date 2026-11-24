@@ -20,7 +20,7 @@ static VOID Kflags(PWCN_JOIN J)
 VOID WcnStationKeysClear(PWCN_JOIN J)
 {
     RtlSecureZeroMemory(J->Cipher,sizeof(J->Cipher));RtlSecureZeroMemory(&J->KeyUpdate,sizeof(J->KeyUpdate));
-    RtlSecureZeroMemory(J->RxPn,sizeof(J->RxPn));RtlSecureZeroMemory(J->RxPnValid,sizeof(J->RxPnValid));J->KeyHold=J->Authorized=J->PairwiseInstalled=J->GroupInstalled=FALSE;
+    RtlSecureZeroMemory(J->RxPn,sizeof(J->RxPn));J->KeyHold=J->Authorized=J->PairwiseInstalled=J->GroupInstalled=FALSE;
 }
 static NTSTATUS Kbegin(PWCN_DEVICE D,PWCN_JOIN J,BOOLEAN Group,UCHAR Index,const UCHAR *Key,const UCHAR *Rsc,BOOLEAN Delete)
 {
@@ -32,7 +32,7 @@ static NTSTATUS Kbegin(PWCN_DEVICE D,PWCN_JOIN J,BOOLEAN Group,UCHAR Index,const
         if(!Key||!Rsc)return STATUS_INVALID_PARAMETER;Floor=Kpn(Rsc);
         if(K->Known&&Jeq(K->Key,Key,16)){
             if(!K->Installed)return STATUS_INVALID_DEVICE_STATE; // Never revive a deleted key with a reset PN.
-            if(Floor>K->Floor)K->Floor=Floor;for(I=0;I<17;I++)if(J->RxPn[Slot][I]<Floor){J->RxPn[Slot][I]=Floor;J->RxPnValid[Slot][I]=1;}
+            if(Floor>K->Floor)K->Floor=Floor;for(I=0;I<17;I++)if(J->RxPn[Slot][I]<Floor)J->RxPn[Slot][I]=Floor;
             return STATUS_SUCCESS; // No hardware install: TX PN and management PN remain untouched.
         }
         for(I=0;I<5;I++)if((J->Cipher[I].Known&&Jeq(J->Cipher[I].Key,Key,16))||
@@ -86,8 +86,9 @@ NTSTATUS WcnStationKeysService(PWCN_DEVICE D,PWCN_JOIN J)
     }
     if(!U->Delete){
         if(K->Known){RtlCopyMemory(K->Previous,K->Key,16);K->PreviousKnown=TRUE;}RtlCopyMemory(K->Key,U->Key,16);K->Known=K->Installed=TRUE;K->Floor=Kpn(U->Rsc);
-        RtlZeroMemory(J->RxPn[Slot],sizeof(J->RxPn[Slot]));RtlZeroMemory(J->RxPnValid[Slot],sizeof(J->RxPnValid[Slot]));
+        RtlZeroMemory(J->RxPn[Slot],sizeof(J->RxPn[Slot]));
         if(!Slot)J->MgmtRxPn=J->MgmtTxPn=0;
     }else K->Installed=FALSE; // Retain a tombstone until session teardown.
+    if(!Slot)for(I=0;I<ARRAYSIZE(D->Runtime.RxMpdu);I++)if(((D->Runtime.RxMpdu[I].Peer>>16)&255)==J->Vdev)D->Runtime.RxMpdu[I].Left=0;
     Kflags(J);J->KeyHold=FALSE;RtlSecureZeroMemory(U,sizeof(*U));return STATUS_SUCCESS;
 }

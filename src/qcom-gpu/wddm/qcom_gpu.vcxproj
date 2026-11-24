@@ -19,15 +19,15 @@
   <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.props" />
   <PropertyGroup>
     <TargetName>qcom_gpu</TargetName>
-    <A830Revision>67</A830Revision>
-    <A830Version>26.11.20.$(A830Revision)</A830Version>
+    <A830Revision>123</A830Revision>
+    <A830Version>26.11.22.$(A830Revision)</A830Version>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
     <OutDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-gpu\ARM64\Release\bin\</OutDir>
     <IntDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-gpu\ARM64\Release\obj\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
-    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>11/20/2026</DateStamp><TimeStamp>$(A830Version)</TimeStamp></Inf>
-    <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=26,11,20,$(A830Revision);ALS_DRIVER_VERSION_TEXT=$(A830Version);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
+    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>11/22/2026</DateStamp><TimeStamp>$(A830Version)</TimeStamp></Inf>
+    <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=26,11,22,$(A830Revision);ALS_DRIVER_VERSION_TEXT=$(A830Version);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
     <ClCompile><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><DebugInformationFormat>None</DebugInformationFormat><Optimization>MinSpace</Optimization></ClCompile>
     <Link><AdditionalDependencies>displib.lib;wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies><GenerateDebugInformation>false</GenerateDebugInformation><Profile>false</Profile></Link>
   </ItemDefinitionGroup>
@@ -35,7 +35,7 @@
   <Import Project="..\core\core.vcxitems" />
   <ItemGroup><ClCompile Include="shared-memory.c" /><ClInclude Include="memory-layout.h" /></ItemGroup>
   <ItemGroup><FilesToPackage Include="$(OutDir)vulkan_freedreno.dll" /><FilesToPackage Include="$(OutDir)vulkan_freedreno_x64.dll" /><FilesToPackage Include="$(OutDir)freedreno_icd.json" /><FilesToPackage Include="$(OutDir)freedreno_icd_x64.json" /><FilesToPackage Include="$(OutDir)msvcp140.dll" /><FilesToPackage Include="$(OutDir)vcruntime140.dll" /></ItemGroup>
-  <ItemGroup><FilesToPackage Include="$(OutDir)gen80000_zap.mbn" /><ClInclude Include="..\..\qcom-dvfs.h" /></ItemGroup>
+  <ItemGroup><FilesToPackage Include="$(OutDir)gen80000_zap.mbn" /><FilesToPackage Include="$(OutDir)vpu35_4v.mbn" /><ClInclude Include="..\..\qcom-dvfs.h" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.targets" />
 </Project>

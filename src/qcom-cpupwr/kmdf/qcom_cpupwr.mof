@@ -1,0 +1,10 @@
+#pragma namespace("\\\\.\\root\\wmi")
+[WMI,Dynamic,Provider("WMIProv"),Guid("41dcb50c-1eb3-4d70-a868-c0a5ea8f4181")]
+class Qualcomm_CpuDomain {
+    [key,read] string InstanceName;
+    [read] boolean Active;
+    [WmiDataId(1),read,Values{"CPU0-5","CPU6-7"},ValueMap{"0","1"}] uint32 Domain;
+    [WmiDataId(2),read,Units("kHz")] uint32 FrequencyKhz;
+    [WmiDataId(3),read,Units("tenths of degrees Celsius")] sint32 TemperatureDeciC;
+    [WmiDataId(4),read,BitMap{"0","1"},BitValues{"Frequency","Temperature"}] uint32 Valid;
+};

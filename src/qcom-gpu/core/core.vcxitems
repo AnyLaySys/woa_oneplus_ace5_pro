@@ -6,6 +6,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\mmu.c" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\gmu.c" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\gpu.c" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\iris.c" />
     <ClInclude Include="$(MSBuildThisFileDirectory)..\gpu.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)..\policy.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)..\regs.h" />

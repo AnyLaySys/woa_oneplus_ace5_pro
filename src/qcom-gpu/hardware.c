@@ -22,6 +22,7 @@ NTSTATUS GpuPoll(PUCHAR base,ULONG offset,ULONG mask,ULONG value,ULONG timeout) 
     return STATUS_IO_TIMEOUT;
 }
 VOID GpuUnbind(GPU *g) {
+    for(ULONG i=0;i<RTL_NUMBER_OF(g->Vm);i++){GpuFree(&g->Vm[i].Tables);g->Vm[i].Used=0;}
     if(g->Registers)MmUnmapIoSpace(g->Registers,GPU_WINDOW);
     if(g->Gcc)MmUnmapIoSpace(g->Gcc,0x72000);
     if(g->Rsc)MmUnmapIoSpace(g->Rsc,0x10000);

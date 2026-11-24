@@ -1,5 +1,6 @@
 #include "host.h"
 #include "dma-table.h"
+#include "frame-map-table.h"
 #include "dma-route.h"
 #include "cdm-command.h"
 #include "cdm-route.h"
@@ -13,6 +14,7 @@
 #include "dma-ready.h"
 #include "dma-idle.h"
 #include "rdi-frame.h"
+#include "frame-clock.h"
 #include "nv12.h"
 #include "rpmh-message.h"
 #include "wait.h"
@@ -89,9 +91,9 @@ ULONG CamRead(PUCHAR base,ULONG offset) {
     if(base==&cdmBase)return cdmRegs[offset/4];
     if(base==(PUCHAR)smmuRegs){assert(offset<sizeof(smmuRegs));return smmuRegs[offset/4];}
     if(base==&gdscBase) {
-        assert(offset==0x11004||offset==0x11008||offset==0x1134c||offset==0x11350);
+        assert(offset==0x110ec||offset==0x110f0||offset==0x1134c||offset==0x11350);
         ULONG slot=offset>=0x1134c?1:0;
-        return (offset==0x11004||offset==0x1134c)?gdscControl[slot]:gdscStatus[slot];
+        return (offset==0x110ec||offset==0x1134c)?gdscControl[slot]:gdscStatus[slot];
     }
     if(base==(PUCHAR)crmRegs)return crmRegs[offset/4];
     (void)base;
@@ -127,7 +129,7 @@ VOID CamWrite(PUCHAR base,ULONG offset,ULONG value) {
         smmuRegs[offset/4]=value;smmuWrites++;return;
     }
     if(base==&gdscBase) {
-        assert(offset==0x11004||offset==0x1134c);
+        assert(offset==0x110ec||offset==0x1134c);
         ULONG slot=offset==0x1134c?1:0;
         assert(gdscCount<RTL_NUMBER_OF(gdscSequence));
         if(value&1) {
@@ -418,6 +420,16 @@ static VOID CciTests(void) {
         assert((packet[0]&15)==9&&(packet[0]>>4)==count+2&&packet[1]==0x12&&packet[2]==0x34);
         assert(memcmp(packet+3,data,count)==0);
     }
+    for(ULONG count=1;count<=8;count++) {
+        Fresh(&c);for(ULONG i=0;i<count;i++)data[i]=(UCHAR)(0x90+i);
+        assert(CamCciWriteByte(&c,0x0c,0x84,data,count)==STATUS_SUCCESS);
+        UCHAR *packet=(UCHAR *)(words+2);
+        assert((packet[0]>>4)==count+1&&packet[1]==0x84&&memcmp(packet+2,data,count)==0);
+        assert(words[wordCount-2]==7&&words[wordCount-1]==0x308);
+    }
+    Fresh(&c);memset(data,0,sizeof(data));
+    assert(CamCciReadByte(&c,0x0c,0x03,data,2)==STATUS_SUCCESS&&words[2]==0x31b);
+    assert(data[0]==0xa5&&data[1]==0xa4&&data[2]==0);
     for(ULONG count=1;count<=32;count++) {
         Fresh(&c);memset(data,0,sizeof(data));
         assert(CamCciRead(&c,0x1a,0x1234,data,count)==STATUS_SUCCESS);
@@ -440,10 +452,10 @@ static VOID RcgTests(void) {
     assert(rcgActive==0x203&&(regs[0x300/4]&3)==3);
 }
 
-static ULONGLONG Walk(ULONGLONG *tables,ULONGLONG root,ULONGLONG address) {
+static ULONGLONG WalkBound(ULONGLONG *tables,ULONGLONG root,ULONGLONG address,ULONG bytes) {
     ULONG shifts[]={30,21,12};ULONGLONG at=root;
     for(ULONG i=0;i<3;i++) {
-        assert(at>=root&&at<root+40960);
+        assert(at>=root&&at<root+bytes);
         ULONGLONG value=tables[(at-root)/8+((address>>shifts[i])&511)];
         if((value&3)!=3)return UINT64_MAX;
         at=value&0x0000fffffffff000ULL;
@@ -451,15 +463,38 @@ static ULONGLONG Walk(ULONGLONG *tables,ULONGLONG root,ULONGLONG address) {
     return at|(address&4095);
 }
 
+static ULONGLONG Walk(ULONGLONG *tables,ULONGLONG root,ULONGLONG address) {
+    return WalkBound(tables,root,address,40960);
+}
+
+static VOID FrameMapTableTests(void) {
+    ULONGLONG *table=malloc(CAM_FRAME_MAP_TABLE_BYTES);assert(table);
+    const ULONGLONG root=0x200000,physical=0xbc0000000ULL;
+    assert(CamFrameMapTable(table,root,physical,QCAM_ARENA_BYTES));
+    for(ULONG page=0;page<QCAM_ARENA_BYTES/4096;page++) {
+        ULONGLONG va=CAM_FRAME_MAP_IOVA+(ULONGLONG)page*4096;
+        for(ULONG offset=0;offset<4096;offset+=256)
+            assert(WalkBound(table,root,va+offset,CAM_FRAME_MAP_TABLE_BYTES)==physical+(ULONGLONG)page*4096+offset);
+    }
+    assert(WalkBound(table,root,CAM_FRAME_MAP_IOVA-1,CAM_FRAME_MAP_TABLE_BYTES)==UINT64_MAX);
+    assert(WalkBound(table,root,CAM_FRAME_MAP_IOVA+QCAM_ARENA_BYTES,CAM_FRAME_MAP_TABLE_BYTES)==UINT64_MAX);
+    assert(!CamFrameMapTable(table,root+1,physical,QCAM_ARENA_BYTES));
+    assert(!CamFrameMapTable(table,root,physical+1,QCAM_ARENA_BYTES));
+    assert(!CamFrameMapTable(table,root,physical,16385u*4096));
+    assert(!CamFrameMapTable(table,0xfffff000,physical,QCAM_ARENA_BYTES));
+    assert(!CamFrameMapTable(table,root,0xffffff000ULL,QCAM_ARENA_BYTES));
+    free(table);
+}
+
 static VOID DmaTests(void) {
     CAM ready={0};memset(regs,0,sizeof(regs));
     assert(!CamDiagnosticDmaReady(&ready));ready.ReceiverVerified=TRUE;
     assert(!CamDiagnosticDmaReady(&ready));
     regs[0x11300/4]=1;regs[0x112e8/4]=0;regs[0x26014/4]=0x08200001;
-    regs[0x228/4]=0xe0000190;regs[0x11350/4]=regs[0x11008/4]=0x10000;
-    regs[0x266c/4]=regs[0x32cc/4]=regs[0x34dc/4]=1;
+    regs[0x228/4]=0xe0000190;regs[0x11350/4]=regs[0x110f0/4]=0x10000;
+    regs[0x2a8c/4]=regs[0x32cc/4]=regs[0x34dc/4]=1;
     assert(CamDiagnosticDmaReady(&ready));
-    const ULONG disabled[]={0x11300,0x26014,0x228,0x11350,0x11008,0x266c,0x32cc,0x34dc};
+    const ULONG disabled[]={0x11300,0x26014,0x228,0x11350,0x110f0,0x2a8c,0x32cc,0x34dc};
     for(ULONG i=0;i<RTL_NUMBER_OF(disabled);i++) {
         ULONG old=regs[disabled[i]/4];regs[disabled[i]/4]=0;
         assert(!CamDiagnosticDmaReady(&ready));regs[disabled[i]/4]=old;
@@ -524,9 +559,44 @@ static VOID ColorTests(void) {
         }
         assert(image[QCAM_VIDEO_BYTES]==0xa5);
     }
+    ColorFrame(raw,200,400,240);assert(CamNv12(raw,QCAM_FRAME_BYTES,image,QCAM_VIDEO_BYTES));
+    for(ULONG p=QCAM_VIDEO_WIDTH*QCAM_VIDEO_HEIGHT;p<QCAM_VIDEO_BYTES;p++)assert(image[p]>=127&&image[p]<=129);
+    ColorFrame(raw,72,80,74);assert(CamNv12(raw,QCAM_FRAME_BYTES,image,QCAM_VIDEO_BYTES));
+    for(ULONG p=QCAM_VIDEO_WIDTH*QCAM_VIDEO_HEIGHT;p<QCAM_VIDEO_BYTES;p++)assert(image[p]>=127&&image[p]<=129);
+    ULONG gains[3]={512,256,384};ColorFrame(raw,64,64,64);CamWhiteBalance(raw,0,gains);
+    assert(gains[0]==512&&gains[1]==256&&gains[2]==384);
+    for(ULONG value=64;value<1023;value++)assert(CamColor(value)<=CamColor(value+1));
     assert(!CamNv12(raw,QCAM_FRAME_BYTES-1,image,QCAM_VIDEO_BYTES));
     assert(!CamNv12(raw,QCAM_FRAME_BYTES,image,QCAM_VIDEO_BYTES-1));
+    UCHAR *dual=malloc(QCAM_FRAME_BYTES*4+256),*expected=malloc(QCAM_VIDEO_BYTES);assert(dual&&expected);
+    ColorFrame(raw,240,350,280);assert(CamNv12(raw,QCAM_FRAME_BYTES,expected,QCAM_VIDEO_BYTES));
+    memset(dual,0xa5,QCAM_FRAME_BYTES*4+256);
+    for(ULONG offset=0;offset<QCAM_FRAME_BYTES;offset++)dual[offset+((offset&256)?QCAM_FRAME_BYTES*2+256:0)]=raw[offset];
+    assert(CamNv12Dual(dual,QCAM_FRAME_BYTES,QCAM_FRAME_BYTES*2+256,image,QCAM_VIDEO_BYTES));
+    assert(!memcmp(image,expected,QCAM_VIDEO_BYTES));free(expected);free(dual);
     free(image);free(raw);
+}
+
+static VOID ExposureTests(void) {
+    UCHAR *raw=malloc(QCAM_FRAME_BYTES),*dual=malloc(QCAM_FRAME_BYTES*4+256);assert(raw&&dual);
+    ULONG gains[3]={256,256,256};
+    ColorFrame(raw,320,320,320);assert(CamExposureTarget(raw,0,gains,QCAM_ZOOM_MIN,1000)==1000);
+    ColorFrame(raw,64,64,64);assert(CamExposureTarget(raw,0,gains,QCAM_ZOOM_MIN,1000)==2000);
+    ColorFrame(raw,1023,1023,1023);assert(CamExposureTarget(raw,0,gains,QCAM_ZOOM_MIN,1000)==500);
+    ColorFrame(raw,864,192,192);
+    ULONGLONG normal=CamExposureTarget(raw,0,gains,QCAM_ZOOM_MIN,1000);assert(normal>800&&normal<900);
+    gains[0]=512;assert(CamExposureTarget(raw,0,gains,QCAM_ZOOM_MIN,1000)==500);gains[0]=256;
+    ColorFrame(raw,80,80,80);
+    for(ULONG y=QCAM_HEIGHT/4;y<QCAM_HEIGHT*3/4;y++)for(ULONG x=QCAM_WIDTH/4;x<QCAM_WIDTH*3/4;x+=4) {
+        UCHAR *p=raw+y*QCAM_STRIDE+x/4*5;for(ULONG i=0;i<4;i++)p[i]=216;p[4]=0;
+    }
+    normal=CamExposureTarget(raw,0,gains,QCAM_ZOOM_MIN,1000);assert(normal>800&&normal<900);
+    assert(CamExposureTarget(raw,0,gains,QCAM_ZOOM_MAX,1000)==500);
+    memset(dual,0xa5,QCAM_FRAME_BYTES*4+256);
+    for(ULONG offset=0;offset<QCAM_FRAME_BYTES;offset++)dual[offset+((offset&256)?QCAM_FRAME_BYTES*2+256:0)]=raw[offset];
+    assert(CamExposureTarget(dual,QCAM_FRAME_BYTES*2+256,gains,QCAM_ZOOM_MIN,1000)==normal);
+    assert(CamExposureTarget(dual,QCAM_FRAME_BYTES*2+256,gains,QCAM_ZOOM_MAX,1000)==500);
+    free(dual);free(raw);
 }
 
 static ULONG VrmTransaction(ULONG message,ULONG data,ULONG *rail) {
@@ -655,15 +725,15 @@ static VOID ScmTests(void) {
     c.ScmPending=FALSE;ScmMock.WaitError=FALSE;ScmMock.WaitForeign=TRUE;ScmMock.WakePolls=0;
     assert(CamScmQos(&c)==STATUS_DEVICE_BUSY&&c.ScmPending);
     c.ScmPending=FALSE;ScmMock.WaitForeign=FALSE;ScmMock.QosStatus=0;
-    regs[0xf0/4]=0;regs[0x228/4]=400;regs[0x266c/4]=1;regs[0x32cc/4]=1;regs[0x34dc/4]=1;
+    regs[0xf0/4]=0;regs[0x228/4]=400;regs[0x2a8c/4]=1;regs[0x32cc/4]=1;regs[0x34dc/4]=1;
     assert(CamScmQos(&c)==STATUS_DEVICE_NOT_READY);
     regs[0x32cc/4]=0;
     assert(CamScmQos(&c)==STATUS_DEVICE_NOT_READY);
     c.ReceiverVerified=TRUE;regs[0xf0/4]=0;regs[0xf8/4]=0;
     regs[0x11300/4]=1;regs[0x11310/4]=1;regs[0x112e8/4]=0;regs[0x26014/4]=1;
-    regs[0x11350/4]=0x10000;regs[0x11008/4]=0x10000;
+    regs[0x11350/4]=0x10000;regs[0x110f0/4]=0x10000;
     regs[0x228/4]=0xe0000190;regs[0x220/4]=0xe0000190;regs[0x224/4]=0xe0000190;
-    const ULONG domains[]={0,6,7};
+    const ULONG domains[]={2,6,7};
     for(ULONG i=0;i<3;i++) {
         regs[(0x266c+domains[i]*0x210)/4]=1;
         for(ULONG state=0;state<3;state++)regs[(0x11c+domains[i]*0x20+state*4)/4]=1;
@@ -710,7 +780,7 @@ static VOID DmaIdleTests(void) {
     regs[0x5220/4]=0x90001;
     assert(CamDmaStopped(NULL,NULL,NULL,tbu,tbu));
     assert(CamDmaDrain(NULL,NULL,NULL,tbu,tbu,5)==STATUS_SUCCESS);
-    const ULONG busyRegs[]={0xf0,0xf8,0x2400,0xe04};
+    const ULONG busyRegs[]={0xf0,0xf8,0x2400,0x2500,0x2600,0x2700,0xe04,0x1004,0x1204,0x1404};
     for(ULONG i=0;i<RTL_NUMBER_OF(busyRegs);i++) {
         regs[busyRegs[i]/4]=1;
         assert(!CamDmaStopped(NULL,NULL,NULL,tbu,tbu));
@@ -723,13 +793,34 @@ static VOID DmaIdleTests(void) {
         assert(tbuRegs[slot]==(1ULL<<40));tbuRegs[slot]=0;
     }
     assert(CamDmaStopped(NULL,NULL,NULL,tbu,tbu));
+    assert(CamRdiPairReady(0xf0000,0xc0000,100,100,120,120,80));
+    assert(!CamRdiPairReady(0x40000,0xc0000,100,100,120,120,80));
+    assert(!CamRdiPairReady(0xc0000,0xc0000,100,100,120,121,80));
+    assert(!CamRdiPairReady(0xc0000,0xc0000,130,130,120,120,80));
+    assert(!CamRdiPairReady(0xc0000,0xc0000,100,110,120,120,80));
+    assert(!CamRdiPairReady(0xc0000,0xc0000,100,100,120,120,120));
+    assert(!CamRdiPairReady(0xc0000,0xc0000,0,0,0,0,0));
     assert(!CamRdiFrameComplete(0,0xe11e18,0));
     assert(!CamRdiFrameComplete(QCAM_HEIGHT-1,0xe11e18,0));
     assert(!CamRdiFrameComplete(QCAM_HEIGHT,0x800010,0));
-    assert(CamRdiFrameComplete(QCAM_HEIGHT,0xe11e18,0));
+    assert(!CamRdiFrameComplete(QCAM_HEIGHT,0xe11e18,0));
+    assert(CamRdiFrameComplete(QCAM_HEIGHT,0xe11e18,0x10000));
     assert(CamRdiFrameComplete(QCAM_HEIGHT,0x10,0x10000));
     for(ULONG bit=0;bit<32;bit++)if(CAM_RDI_FATAL_IRQ&(1u<<bit))
         assert(!CamRdiFrameComplete(QCAM_HEIGHT,8|(1u<<bit),0x10000));
 }
 
-int main(void) {TbuTests();MeasureTests();CdmTests();FrameRouteTests();WaitTests();CrmTests();GdscTests();RcgTests();CciTests();DmaTests();ColorTests();PowerTests();ScmTests();DmaIdleTests();puts("DMA idle gating, RDI frame boundaries, TBU translation, clock measurement, frame and CDM routing, completion, wait preemption, CRM acknowledgment, GDSC sequencing, CCI, C-PHY, DMA, NV12, RPMh and powered secure QoS passed");return 0;}
+static VOID FrameClockTests(void) {
+    CAM_FRAME_CLOCK clock={0};QCAM_FRAME_TIME frame={sizeof(frame),QCAM_ABI,QCAM_SENSOR_CLOCK,1,0,0,0xfffff000ULL,0xfffff000ULL+264000,10200000};
+    LONGLONG time=0;assert(CamFrameClock(&clock,&frame,10000000,50000000,&time));assert(time==50062500);
+    frame.Sof+=320000;frame.Eof+=320000;frame.Captured=10750000;frame.Sequence++;
+    LONGLONG previous=time;assert(CamFrameClock(&clock,&frame,10000000,50000000,&time));assert(time-previous==166666);
+    frame.Sof+=640000;frame.Eof+=640000;frame.Captured=10900000;frame.Sequence++;frame.Dropped++;
+    previous=time;assert(CamFrameClock(&clock,&frame,10000000,50000000,&time));assert(time-previous==333334);
+    assert(!CamFrameClock(&clock,&frame,10000000,50000000,&time));
+    frame.ClockHz=0;assert(!CamFrameClock(&clock,&frame,10000000,50000000,&time));
+    frame.ClockHz=QCAM_SENSOR_CLOCK;frame.Eof=frame.Sof-1;assert(!CamFrameClock(&clock,&frame,10000000,50000000,&time));
+    assert(CamFrameTicks(19200000ULL*1000000000+320000,QCAM_SENSOR_CLOCK)==10000000000000000ULL+166666);
+}
+
+int main(void) {FrameClockTests();TbuTests();MeasureTests();CdmTests();FrameRouteTests();WaitTests();CrmTests();GdscTests();RcgTests();CciTests();DmaTests();FrameMapTableTests();ColorTests();ExposureTests();PowerTests();ScmTests();DmaIdleTests();puts("DMA idle gating, RDI frame boundaries, TBU translation, clock measurement, frame and CDM routing, completion, wait preemption, CRM acknowledgment, GDSC sequencing, CCI, C-PHY, DMA, NV12, exposure highlights and crop metering, RPMh and powered secure QoS passed");return 0;}

@@ -23,7 +23,7 @@ struct HOTSPOT_CLIENT {
     BOOLEAN Used,ClientMapped,ClientCreated,OsPeer,NotifyDisconnect,Associated,Authorized,AssocConfirmed,DeleteSent,DeleteConfirmed,Unmapped,MgmtBusy;
     ULONG MgmtStatus;LONGLONG ClientAt;WCN_DMA Reo,Retired[8];ULONG RetiredCount;
     UCHAR Assoc[1024];ULONG AssocLength;WDI_MESSAGE_HEADER AssocHeader;BOOLEAN AssocPending;
-    HOTSPOT_KEY PairKey;ULONG64 Pn[17];UCHAR PnValid[17];
+    HOTSPOT_KEY PairKey;ULONG64 PnFloor,Pn[17];
 };
 struct HOTSPOT {
     PWCN_DEVICE D;S8 *Go;WIFIDIRECTDEVICE Device;ULONG DevicePort;
@@ -440,7 +440,7 @@ static void HkeysService(HOTSPOT *H)
             else{RtlZeroMemory(H->Wire,sizeof(H->Wire));auto C=(wmi_vdev_install_key_cmd*)H->Wire;JHDR(C,S7_WMI_TAG_VDEV_INSTALL_KEY_CMD);C->vdev_id=1;RtlCopyMemory(C->peer_macaddr.addr,K->Group?H->Mac:Peer->Client,6);C->key_idx=K->Index;C->key_flags=K->Group?1:0;C->key_cipher=H->KeyDelete?0:4;C->key_len=H->KeyDelete?0:16;RtlCopyMemory(&C->key_rsc_counter,K->Rsc,6);ULONG Off=sizeof(*C)/4;H->Wire[Off++]=Jtlv(17,H->KeyDelete?0:16);if(!H->KeyDelete)RtlCopyMemory(H->Wire+Off,K->Bytes,16);H->KeyDone=FALSE;St=WcnWmiSend(H->D,0x5009,H->Wire,(Off+(H->KeyDelete?0:4))*4);RtlSecureZeroMemory(H->Wire,sizeof(H->Wire));if(NT_SUCCESS(St))K->Sent=TRUE;}}
         if(K->Sent&&H->KeyDone){if(H->KeyStatus)St=STATUS_DEVICE_HARDWARE_ERROR;else{if(H->KeyDelete){Slot->Valid=FALSE;RtlSecureZeroMemory(Slot->Bytes,16);}
                 else{if(!Slot->Valid||!Jeq(Slot->Bytes,K->Bytes,16)){if(K->Group&&!H->GroupKey[0].Valid&&!H->GroupKey[1].Valid&&!H->GroupKey[2].Valid&&!H->GroupKey[3].Valid){H->DefaultKey=K->Index;H->DefaultPending=TRUE;}RtlCopyMemory(Slot->Bytes,K->Bytes,16);
-                        if(Peer){ULONG64 Pn=Jle32(K->Rsc)|((ULONG64)Jle16(K->Rsc+4)<<32);for(ULONG I=0;I<17;I++)Peer->Pn[I]=Pn;RtlZeroMemory(Peer->PnValid,sizeof(Peer->PnValid));}}Slot->Valid=TRUE;}
+                        if(Peer){ULONG64 Pn=Jle32(K->Rsc)|((ULONG64)Jle16(K->Rsc+4)<<32);Peer->PnFloor=Pn;for(ULONG I=0;I<17;I++)Peer->Pn[I]=Pn;for(auto &M:H->D->Runtime.RxMpdu)if(((M.Peer>>16)&255)==1&&(M.Peer&(H->D->Ce.PeerMetadataVersion==1?0x3fffu:0xffffu))==Peer->PeerId)M.Left=0;}}Slot->Valid=TRUE;}
                 RtlSecureZeroMemory(K->Bytes,16);H->KeyStep++;}}}
     if(St!=STATUS_DEVICE_BUSY&&(!NT_SUCCESS(St)||H->KeyStep==H->KeyCount)){auto R=H->KeyRequest;H->KeyRequest=nullptr;S8Complete(R,St);RtlSecureZeroMemory(H->Keys,sizeof(H->Keys));if(!NT_SUCCESS(St))Hfail(H);}
 }
@@ -610,7 +610,7 @@ extern "C" BOOLEAN WcnHotspotRx(PWCN_DEVICE D,const UCHAR *B,ULONG N,ULONG Pad,B
     const UCHAR *F=B+392+Pad;bool Eapol=Jbe16(F+12)==0x888e;
     if(Fc&0x4000){ULONG Tid=(Fc&0x80)?((I2>>15)&15):16;ULONG64 Pn=Jle32(B+160)|((ULONG64)(Jle32(B+164)&65535)<<32);
         if(!C->PairKey.Valid||(!Eapol&&!C->Authorized)||(Valid&0x4020du)!=0x4020du||!(Mpdu&(1u<<12))||((I2>>2)&15)!=6||(Jle32(B+192)&255)||((Fc&0x80)&&!(Valid&128)))return TRUE;
-        if(!WcnRxPnAccept(Pn,&C->Pn[Tid],&C->PnValid[Tid],Msdu,!Error&&(Fc&0x80)))return TRUE;
+        if(!WcnRxPnAccept(Pn,&C->Pn[Tid],C->PnFloor,!Error))return TRUE;
     }else if(!Eapol||(Msdu&3)!=3)return TRUE;
     if(!Jeq(F+6,C->Client,6)||(!Eapol&&!C->Authorized))return TRUE;S8ReceiveEthernet(H->Go,F,N);return TRUE;
 }

@@ -46,7 +46,7 @@ NTSTATUS A830ScanoutStart(PVOID context) {
 }
 NTSTATUS A830ScanoutAllocate(PVOID context,GPU_BO *buffer,ULONG bytes) {
     A830_ADAPTER *a=context;SCANOUT_POOL *pool=a->ScanoutPool;
-    if(!pool)return STATUS_INSUFFICIENT_RESOURCES;
+    if(!pool)return AllocateLow(buffer,(bytes+PAGE_SIZE-1)&~(PAGE_SIZE-1));
     NTSTATUS status=STATUS_INSUFFICIENT_RESOURCES;ExAcquireFastMutex(&pool->Lock);
     if(!pool->Closing)for(ULONG i=0;i<SCANOUT_COUNT;i++) {
         SCANOUT_SLOT *slot=pool->Slots+i;

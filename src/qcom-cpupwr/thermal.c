@@ -2,6 +2,7 @@
 VOID SmThermalInitialize(VOID) {
     for(ULONG d=0;d<2;d++) {
         Sm.TemperatureAverage[d]=MINLONG;
+        Sm.Temperature[d]=MINLONG;
         PHYSICAL_ADDRESS p;p.QuadPart=0x0c228000ULL+d*0x1000;
         Sm.Thermal[d]=MmMapIoSpaceEx(p,PAGE_SIZE,PAGE_READONLY|PAGE_NOCACHE);
     }
@@ -21,6 +22,7 @@ VOID SmThermalUpdate(VOID) {
             if(raw!=MAXULONG && (raw&0x200000u) && value>=-400 && value<=2000)
                 temperature=max(temperature,value);
         }
+        InterlockedExchange(&Sm.Temperature[d],temperature);
         if(temperature==MINLONG){InterlockedExchange(&Sm.TemperatureAverage[d],MINLONG);continue;}
         InterlockedExchange(&Sm.CoolingBand[d],(LONG)DvfsCoolingBand((ULONG)Sm.CoolingBand[d],temperature));
         LONG average=DvfsTemperatureAverage(Sm.TemperatureAverage[d],temperature);

@@ -2,23 +2,12 @@
 #include "dpu.h"
 
 NTSTATUS A830DisplayStart(A830_ADAPTER *a) {
-    /* Read once at PASSIVE startup; mode enumeration and current-mode queries
-       use the same bounded value. The inherited panel is already 120 Hz. */
-    a->RefreshRate=60;
-    UNICODE_STRING path=RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\qcom_gpu\\Parameters");
-    UNICODE_STRING name=RTL_CONSTANT_STRING(L"RefreshRate");OBJECT_ATTRIBUTES attributes;HANDLE key;
-    InitializeObjectAttributes(&attributes,&path,OBJ_KERNEL_HANDLE|OBJ_CASE_INSENSITIVE,NULL,NULL);
-    if(NT_SUCCESS(ZwOpenKey(&key,KEY_QUERY_VALUE,&attributes))) {
-        UCHAR storage[sizeof(KEY_VALUE_PARTIAL_INFORMATION)+sizeof(ULONG)];ULONG used=0;
-        PKEY_VALUE_PARTIAL_INFORMATION value=(PVOID)storage;
-        NTSTATUS read=ZwQueryValueKey(key,&name,KeyValuePartialInformation,storage,sizeof(storage),&used);ZwClose(key);
-        if(NT_SUCCESS(read) && value->Type==REG_DWORD && value->DataLength==sizeof(ULONG) && *(PULONG)value->Data==120)a->RefreshRate=120;
-    }
     NTSTATUS status=a->Dxgk.DxgkCbAcquirePostDisplayOwnership(a->Dxgk.DeviceHandle,&a->DisplayInfo);
     if(!NT_SUCCESS(status))return status;
     DXGK_DISPLAY_INFORMATION *d=&a->DisplayInfo;
     status=A830DisplayLayout(d,&a->FramebufferSize);if(!NT_SUCCESS(status))return status;
 
+    a->SourceFormat=d->ColorFormat;InterlockedExchange(&a->HdrEnabled,0);
     a->Visible=TRUE;a->PanelOn=a->AdapterOn=a->MonitorOn=TRUE;return STATUS_SUCCESS;
 }
 VOID A830DisplayStop(A830_ADAPTER *a) {
@@ -35,7 +24,7 @@ static NTSTATUS SourceModes(A830_ADAPTER *a,D3DKMDT_HVIDPN h,const DXGK_VIDPN_IN
         const D3DKMDT_VIDPN_SOURCE_MODE *pinned=NULL;NTSTATUS pinnedStatus=i->pfnAcquirePinnedModeInfo(set,&pinned);
         if(NT_SUCCESS(pinnedStatus) && pinned) {
             BOOLEAN valid=pinned->Type==D3DKMDT_RMT_GRAPHICS && pinned->Format.Graphics.PrimSurfSize.cx==a->DisplayInfo.Width &&
-                pinned->Format.Graphics.PrimSurfSize.cy==a->DisplayInfo.Height && pinned->Format.Graphics.PixelFormat==a->DisplayInfo.ColorFormat;
+                pinned->Format.Graphics.PrimSurfSize.cy==a->DisplayInfo.Height && A830ScanoutFormat(pinned->Format.Graphics.PixelFormat);
             i->pfnReleaseModeInfo(set,pinned);v->pfnReleaseSourceModeSet(h,set);
             return valid?STATUS_SUCCESS:STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_SOURCE_MODE;
         }
@@ -43,11 +32,12 @@ static NTSTATUS SourceModes(A830_ADAPTER *a,D3DKMDT_HVIDPN h,const DXGK_VIDPN_IN
         if(!NT_SUCCESS(pinnedStatus))return pinnedStatus;
     }
     NTSTATUS status=v->pfnCreateNewSourceModeSet(h,0,&set,&i);if(!NT_SUCCESS(status))return status;
-    D3DKMDT_VIDPN_SOURCE_MODE *m=NULL;status=i->pfnCreateNewModeInfo(set,&m);
-    if(NT_SUCCESS(status)) {
+    ULONG formats[]={a->DisplayInfo.ColorFormat,D3DDDIFMT_A2B10G10R10,D3DDDIFMT_A2R10G10B10};
+    for(ULONG n=0;NT_SUCCESS(status) && n<(A830DpuEnabled(a)?RTL_NUMBER_OF(formats):1u);n++) {
+        D3DKMDT_VIDPN_SOURCE_MODE *m=NULL;status=i->pfnCreateNewModeInfo(set,&m);if(!NT_SUCCESS(status))break;
         m->Type=D3DKMDT_RMT_GRAPHICS;m->Format.Graphics.PrimSurfSize.cx=a->DisplayInfo.Width;
         m->Format.Graphics.PrimSurfSize.cy=a->DisplayInfo.Height;m->Format.Graphics.VisibleRegionSize=m->Format.Graphics.PrimSurfSize;
-        m->Format.Graphics.Stride=(a->DisplayInfo.Width*4+255)&~255u;m->Format.Graphics.PixelFormat=a->DisplayInfo.ColorFormat;
+        m->Format.Graphics.Stride=(a->DisplayInfo.Width*4+255)&~255u;m->Format.Graphics.PixelFormat=formats[n];
         m->Format.Graphics.ColorBasis=D3DKMDT_CB_SCRGB;m->Format.Graphics.PixelValueAccessMode=D3DKMDT_PVAM_DIRECT;
         status=i->pfnAddMode(set,m);if(!NT_SUCCESS(status))i->pfnReleaseModeInfo(set,m);
     }
@@ -71,6 +61,7 @@ static NTSTATUS TargetModes(A830_ADAPTER *a,D3DKMDT_HVIDPN h,const DXGK_VIDPN_IN
     D3DKMDT_VIDPN_TARGET_MODE *m=NULL;status=i->pfnCreateNewModeInfo(set,&m);
     if(NT_SUCCESS(status)) {
         m->VideoSignalInfo=A830Signal(a);m->Preference=D3DKMDT_MP_PREFERRED;
+        m->WireFormatAndPreference.Rgb=D3DKMDT_BITS_PER_COMPONENT_08|(A830DpuEnabled(a)?D3DKMDT_BITS_PER_COMPONENT_10:0);
         status=i->pfnAddMode(set,m);if(!NT_SUCCESS(status))i->pfnReleaseModeInfo(set,m);
     }
     if(NT_SUCCESS(status))status=v->pfnAssignTargetModeSet(h,0,set);
@@ -135,18 +126,53 @@ static NTSTATUS APIENTRY Commit(HANDLE adapter,const DXGKARG_COMMITVIDPN *p) {
     if(status==STATUS_GRAPHICS_MODE_NOT_PINNED && !m)status=STATUS_SUCCESS;
     if(NT_SUCCESS(status) && m) {
         if(m->Type!=D3DKMDT_RMT_GRAPHICS || m->Format.Graphics.PrimSurfSize.cx!=a->DisplayInfo.Width ||
-            m->Format.Graphics.PrimSurfSize.cy!=a->DisplayInfo.Height || m->Format.Graphics.PixelFormat!=a->DisplayInfo.ColorFormat)
+            m->Format.Graphics.PrimSurfSize.cy!=a->DisplayInfo.Height || !A830ScanoutFormat(m->Format.Graphics.PixelFormat))
             status=STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_SOURCE_MODE;
+        if(NT_SUCCESS(status))a->SourceFormat=m->Format.Graphics.PixelFormat;
         i->pfnReleaseModeInfo(set,m);
     }
     v->pfnReleaseSourceModeSet(p->hFunctionalVidPn,set);return status;
+}
+static NTSTATUS APIENTRY Timings(HANDLE adapter,DXGKARG_SETTIMINGSFROMVIDPN *p) {
+    if(!p->pResultsFlags || p->PathCount>1 || (p->PathCount && !p->pSetTimingPathInfo))return STATUS_INVALID_PARAMETER;
+    A830_ADAPTER *a=adapter;DXGK_SET_TIMING_PATH_INFO *path=p->pSetTimingPathInfo;
+    if(p->PathCount && path->VidPnTargetId)return STATUS_INVALID_PARAMETER;
+    BOOLEAN hdr=a->HdrEnabled!=0;
+    if(p->PathCount && path->Input.Active && !path->Input.PreserveInherited) {
+        hdr=path->OutputWireColorSpace==D3DDDI_OUTPUT_WIRE_COLOR_SPACE_G2084_P2020;
+        if(hdr && !A830DpuEnabled(a))return STATUS_NOT_SUPPORTED;
+        if(!hdr && path->OutputWireColorSpace!=D3DDDI_OUTPUT_WIRE_COLOR_SPACE_G22_P709 &&
+           path->OutputWireColorSpace!=D3DDDI_OUTPUT_WIRE_COLOR_SPACE_G22_P709_WCG)return STATUS_NOT_SUPPORTED;
+        UINT bits=path->SelectedWireFormat.Rgb;
+        if((bits!=D3DKMDT_BITS_PER_COMPONENT_08 && (bits!=D3DKMDT_BITS_PER_COMPONENT_10 || !A830DpuEnabled(a))) ||
+           (hdr && bits!=D3DKMDT_BITS_PER_COMPONENT_10) ||
+           path->SelectedWireFormat.YCbCr444 || path->SelectedWireFormat.YCbCr422 ||
+           path->SelectedWireFormat.YCbCr420 || path->SelectedWireFormat.Intensity)return STATUS_NOT_SUPPORTED;
+    }
+    DXGKARG_COMMITVIDPN commit={0};commit.hFunctionalVidPn=p->hFunctionalVidPn;
+    NTSTATUS status=Commit(a,&commit);if(!NT_SUCCESS(status))return status;
+    if(p->PathCount){status=A830DisplayPower(a,0,path->Input.Active!=0);if(!NT_SUCCESS(status))return status;}
+    InterlockedExchange(&a->HdrEnabled,hdr);p->pResultsFlags->Value=0;
+    if(p->PathCount) {
+        a->Visible=path->Input.Active!=0;path->OutputFlags=0;
+        RtlZeroMemory(&path->TargetState,sizeof(path->TargetState));path->TargetState.ConnectionChangeId=1;
+        path->TargetState.ConnectionStatus=LinkConfigurationSucceeded;
+        path->GlitchCause=DXGK_GLITCH_CAUSE_NONE;path->GlitchEffect=DXGK_GLITCH_EFFECT_SEAMLESS;
+        path->GlitchDuration=DXGK_GLITCH_DURATION_NONE;
+    }
+    return STATUS_SUCCESS;
+}
+static NTSTATUS APIENTRY Colorimetry(HANDLE adapter,UINT target,DXGK_COLORIMETRY color) {
+    UNREFERENCED_PARAMETER(adapter);UNREFERENCED_PARAMETER(color);return target?STATUS_INVALID_PARAMETER:STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDRESS *p) {
     A830_ADAPTER *a=adapter;
 
     if(p->VidPnSourceId || !a->FramebufferSize || !a->Memory.Segment.Cpu)return STATUS_INVALID_PARAMETER;
     A830_ALLOCATION *allocation=p->hAllocation;
-    if(allocation && ((allocation->Resource.Format!=D3DDDIFMT_X8R8G8B8 && allocation->Resource.Format!=D3DDDIFMT_A8R8G8B8) || allocation->Resource.Pitch<a->DisplayInfo.Width*4 || allocation->Resource.Width!=a->DisplayInfo.Width ||
+    ULONG format=allocation?allocation->Resource.Format:a->SourceFormat;
+    if(!A830ScanoutFormat(format) || (!A830DpuEnabled(a) && format!=(ULONG)a->DisplayInfo.ColorFormat))return STATUS_NOT_SUPPORTED;
+    if(allocation && (allocation->Resource.Pitch<a->DisplayInfo.Width*4 || allocation->Resource.Width!=a->DisplayInfo.Width ||
         allocation->Resource.Height!=a->DisplayInfo.Height || allocation->Resource.Size<(SIZE_T)allocation->Resource.Pitch*a->DisplayInfo.Height)) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -161,7 +187,7 @@ static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDR
             /* Bridge teardown sees either this transient pin or the published
                pending/active physical address; there is no unowned window. */
             InterlockedIncrement(&allocation->ScanoutReferences);
-            NTSTATUS status=A830DpuQueue(a,allocation->Buffer.Physical,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
+            NTSTATUS status=A830DpuQueue(a,allocation->Buffer.Physical,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart,format,a->HdrEnabled!=0);
             InterlockedDecrement(&allocation->ScanoutReferences);return status;
         }
         if(QcomGpuScanoutEnabled(a)) {
@@ -176,7 +202,7 @@ static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDR
         ULONGLONG physical=a->Memory.Segment.Physical+offset;
         if(QcomGpuScanoutBusy(a) || physical>MAXULONG || bytes-1>MAXULONG-physical)
             return QcomGpuScanoutQueue(a,NULL,offset,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
-        return A830DpuQueue(a,physical,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
+        return A830DpuQueue(a,physical,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart,format,a->HdrEnabled!=0);
     }
     if(QcomGpuScanoutEnabled(a)) {
         a->ScanoutPitch=pitch;
@@ -246,8 +272,9 @@ static NTSTATUS APIENTRY MonitorModes(HANDLE adapter,const DXGKARG_RECOMMENDMONI
     D3DKMDT_MONITOR_SOURCE_MODE *m;const DXGK_MONITORSOURCEMODESET_INTERFACE *i=p->pMonitorSourceModeSetInterface;
     NTSTATUS status=i->pfnCreateNewModeInfo(p->hMonitorSourceModeSet,&m);if(!NT_SUCCESS(status))return status;
     m->VideoSignalInfo=A830Signal(a);m->Origin=D3DKMDT_MCO_DRIVER;m->Preference=D3DKMDT_MP_PREFERRED;
-    m->ColorBasis=D3DKMDT_CB_SRGB;m->ColorCoeffDynamicRanges.FirstChannel=8;m->ColorCoeffDynamicRanges.SecondChannel=8;
-    m->ColorCoeffDynamicRanges.ThirdChannel=8;m->ColorCoeffDynamicRanges.FourthChannel=8;
+    ULONG bits=A830DpuEnabled(a)?10u:8u;
+    m->ColorBasis=D3DKMDT_CB_SRGB;m->ColorCoeffDynamicRanges.FirstChannel=bits;m->ColorCoeffDynamicRanges.SecondChannel=bits;
+    m->ColorCoeffDynamicRanges.ThirdChannel=bits;m->ColorCoeffDynamicRanges.FourthChannel=0;
     status=i->pfnAddMode(p->hMonitorSourceModeSet,m);if(!NT_SUCCESS(status))i->pfnReleaseModeInfo(p->hMonitorSourceModeSet,m);return status;
 }
 static NTSTATUS APIENTRY HardwareCaps(HANDLE adapter,DXGKARG_QUERYVIDPNHWCAPABILITY *p) {
@@ -277,6 +304,7 @@ VOID A830DisplayDdi(DRIVER_INITIALIZATION_DATA *d) {
     d->DxgkDdiGetScanLine=ScanLine;
     d->DxgkDdiIsSupportedVidPn=Supported;d->DxgkDdiRecommendFunctionalVidPn=Recommend;
     d->DxgkDdiEnumVidPnCofuncModality=Cofunc;d->DxgkDdiCommitVidPn=Commit;
+    d->DxgkDdiSetTimingsFromVidPn=Timings;d->DxgkDdiSetTargetAdjustedColorimetry=Colorimetry;
     d->DxgkDdiSetVidPnSourceAddress=Address;d->DxgkDdiSetVidPnSourceAddressWithMultiPlaneOverlay=OverlayAddress;d->DxgkDdiSetVidPnSourceVisibility=Visible;
     d->DxgkDdiSetVidPnSourceAddressWithMultiPlaneOverlay2=OverlayAddress2;d->DxgkDdiSetVidPnSourceAddressWithMultiPlaneOverlay3=OverlayAddress3;
     d->DxgkDdiGetMultiPlaneOverlayCaps=OverlayCaps;d->DxgkDdiCheckMultiPlaneOverlaySupport=OverlaySupport;

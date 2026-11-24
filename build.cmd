@@ -19,6 +19,7 @@ if /i "%NAME%"=="qcom-cpupwr" (set "NAME=qcom-cpupwr"& set "TARGET=qcom_cpupwr")
 if /i "%NAME%"=="qcom-keys" (set "NAME=qcom-keys"& set "TARGET=qcom_keys")
 if /i "%NAME%"=="qcom-sensors" (set "NAME=qcom-sensors"& set "TARGET=qcom_sensors")
 if /i "%NAME%"=="nxp-nfc" (set "NAME=nxp-nfc"& set "TARGET=nxp_nfc")
+if /i "%NAME%"=="jiiov-fp" (set "NAME=jiiov-fp"& set "TARGET=jiiov_fp")
 if /i "%NAME%"=="qcom-ir" (set "NAME=qcom-ir"& set "TARGET=qcom_ir")
 if /i "%NAME%"=="ir-remote" (set "NAME=ir-remote"& set "TARGET=ir_remote")
 if /i "%NAME%"=="qcom-cam" (set "NAME=qcom-cam"& set "TARGET=qcom_cam")
@@ -81,6 +82,8 @@ if defined GPU_PACKAGE (
   )
   copy /y "%ROOT%\fw\gpu\gen80000_zap.mbn" "%BIN%\gen80000_zap.mbn" >nul
   if errorlevel 1 exit /b 1
+  copy /y "%ROOT%\fw\gpu\vpu35_4v.mbn" "%BIN%\vpu35_4v.mbn" >nul
+  if errorlevel 1 exit /b 1
 )
 "%MSB%" "%PROJECT%" /t:Rebuild /p:Configuration=Release /p:Platform=ARM64 /p:WindowsTargetPlatformVersion=10.0.26100.0 /p:OutDir="%BIN%/" /p:IntDir="%WORK%\obj/" /p:SkipPackageVerification=true /p:SignMode=Off /v:minimal
 if errorlevel 1 exit /b 1
@@ -98,7 +101,7 @@ if defined GPU_PACKAGE (
     "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%%F"
     if errorlevel 1 exit /b 1
   )
-  for %%F in (freedreno_icd.json freedreno_icd_x64.json msvcp140.dll vcruntime140.dll gen80000_zap.mbn) do (
+  for %%F in (freedreno_icd.json freedreno_icd_x64.json msvcp140.dll vcruntime140.dll gen80000_zap.mbn vpu35_4v.mbn) do (
     copy /y "%BIN%\%%F" "%DST%\%%F" >nul
     if errorlevel 1 exit /b 1
   )
@@ -106,6 +109,12 @@ if defined GPU_PACKAGE (
 "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%TARGET%.%DRIVER_EXT%"
 if errorlevel 1 exit /b 1
 if /i "%NAME%"=="ir-remote" goto build_done
+if /i "%NAME%"=="jiiov-fp" (
+  copy /y "%BIN%\jiiov_fp_check.exe" "%DST%\jiiov_fp_check.exe" >nul
+  if errorlevel 1 exit /b 1
+  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\jiiov_fp_check.exe"
+  if errorlevel 1 exit /b 1
+)
 if /i "%NAME%"=="qcom-cam" (
   for %%F in (qcom_cam_video.sys qcom_cam_video.inf) do (
     copy /y "%BIN%\%%F" "%DST%\%%F" >nul
@@ -164,7 +173,7 @@ dir "%DST%" /b
 exit /b 0
 
 :build_all
-for %%D in (syna-touch qcom-audio qcom-bt qcom-wlan ti-batt qcom-cpupwr qcom-keys qcom-sensors nxp-nfc qcom-ir qcom-cam qcom-gpu) do (
+for %%D in (syna-touch qcom-audio qcom-bt qcom-wlan ti-batt qcom-cpupwr qcom-keys qcom-sensors nxp-nfc jiiov-fp qcom-ir qcom-cam qcom-gpu) do (
   echo.
   echo Building %%D...
   call "%~f0" %%D
@@ -250,6 +259,7 @@ echo        build.cmd qcom-cpupwr
 echo        build.cmd qcom-keys
 echo        build.cmd qcom-sensors
 echo        build.cmd nxp-nfc
+echo        build.cmd jiiov-fp
 echo        build.cmd qcom-ir
 echo        build.cmd ir-remote
 echo        build.cmd qcom-cam
@@ -503,7 +513,7 @@ def build_umd(arch, compiler, link):
     with ThreadPoolExecutor(max_workers=6) as pool:
         objects = list(pool.map(compile_file, files))
         objects += list(pool.map(compile_file, [
-            umd / (name + '.cpp') for name in ['core', 'driver', 'interop', 'pipeline', 'query', 'resource', 'shader', 'state']]))
+            umd / (name + '.cpp') for name in ['core', 'd3d11', 'driver', 'interop', 'pipeline', 'query', 'resource', 'shader', 'state', 'video']]))
     definition = umd_build / 'a830_umd.def'
     write(definition, 'LIBRARY a830_umd\nEXPORTS\nOpenAdapter10\nOpenAdapter10_2\n')
     run('lld-link', '/DLL', '/MACHINE:' + machine, '/OUT:' + str(umd_build / ('a830_umd_' + arch + '.dll')),

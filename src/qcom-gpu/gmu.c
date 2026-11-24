@@ -5,15 +5,15 @@
 
 typedef struct { ULONG Status,Address,Type,Size,MessageSize,Dropped,RxWatermark,TxWatermark,RxRequest,TxRequest,Read,Write; } HFI_QUEUE;
 typedef struct { ULONG Version,Size,Offset,Stride,Count,Active; HFI_QUEUE Queue[3]; } HFI_TABLE;
-NTSTATUS GpuFirmware(PCWSTR name,PUCHAR *data,PULONG size) {
+NTSTATUS GpuFirmware(HANDLE directory,PCWSTR name,ULONG maximum,PUCHAR *data,PULONG size) {
     UNICODE_STRING path;RtlInitUnicodeString(&path,name);
-    OBJECT_ATTRIBUTES attr;InitializeObjectAttributes(&attr,&path,OBJ_KERNEL_HANDLE|OBJ_CASE_INSENSITIVE,NULL,NULL);
+    OBJECT_ATTRIBUTES attr;InitializeObjectAttributes(&attr,&path,OBJ_KERNEL_HANDLE|OBJ_CASE_INSENSITIVE,directory,NULL);
     IO_STATUS_BLOCK io;HANDLE file;
     NTSTATUS status=ZwCreateFile(&file,FILE_GENERIC_READ,&attr,&io,NULL,0,FILE_SHARE_READ,FILE_OPEN,FILE_SYNCHRONOUS_IO_NONALERT|FILE_NON_DIRECTORY_FILE,NULL,0);
     if(!NT_SUCCESS(status))return status;
     FILE_STANDARD_INFORMATION info;
     status=ZwQueryInformationFile(file,&io,&info,sizeof(info),FileStandardInformation);
-    if(NT_SUCCESS(status) && (info.EndOfFile.QuadPart<=0 || info.EndOfFile.QuadPart>0x40000))status=STATUS_INVALID_IMAGE_FORMAT;
+    if(NT_SUCCESS(status) && (info.EndOfFile.QuadPart<=0 || info.EndOfFile.QuadPart>maximum))status=STATUS_INVALID_IMAGE_FORMAT;
     if(NT_SUCCESS(status)) {
         *size=(ULONG)info.EndOfFile.QuadPart;*data=ExAllocatePool2(POOL_FLAG_NON_PAGED,*size,GPU_TAG);
         if(!*data)status=STATUS_INSUFFICIENT_RESOURCES;
@@ -31,7 +31,7 @@ static NTSTATUS Allocate(GPU *g,GPU_BO *bo,ULONG vm,ULONG size,ULONGLONG address
 }
 static NTSTATUS Load(GPU *g) {
     PUCHAR data=NULL;ULONG size=0;
-    NTSTATUS status=GpuFirmware(L"\\SystemRoot\\System32\\drivers\\qcom-gpu\\gen80000_gmu.bin",&data,&size);
+    NTSTATUS status=GpuFirmware(NULL,L"\\SystemRoot\\System32\\drivers\\qcom-gpu\\gen80000_gmu.bin",0x40000,&data,&size);
     if(!NT_SUCCESS(status))return status;
     for(ULONG at=0;at<size;) {
         if(size-at<16){status=STATUS_INVALID_IMAGE_FORMAT;break;}

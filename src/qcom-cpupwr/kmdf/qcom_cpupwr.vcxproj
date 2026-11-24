@@ -21,13 +21,16 @@
   <PropertyGroup><TargetName>qcom_cpupwr</TargetName><Inf2CatUseLocalTime>true</Inf2CatUseLocalTime></PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><LanguageStandard_C>stdc17</LanguageStandard_C><DebugInformationFormat>None</DebugInformationFormat><Optimization>MinSpace</Optimization></ClCompile>
-    <Link><GenerateDebugInformation>false</GenerateDebugInformation><Profile>false</Profile></Link>
+    <Link><GenerateDebugInformation>false</GenerateDebugInformation><Profile>false</Profile><AdditionalDependencies>wmilib.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
     <DriverSign><FileDigestAlgorithm>sha256</FileDigestAlgorithm></DriverSign>
-    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>11/20/2026</DateStamp><TimeStamp>26.11.20.8</TimeStamp></Inf>
+    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>11/22/2026</DateStamp><TimeStamp>26.11.22.11</TimeStamp></Inf>
+    <ResourceCompile><AdditionalIncludeDirectories>$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\power.c"/><ClCompile Include="..\pep.c"/><ClCompile Include="..\scmi.c"/>
-    <ClCompile Include="..\thermal.c"/>
+    <ClCompile Include="..\thermal.c"/><ClCompile Include="..\wmi.c"/>
+    <Mofcomp Include="qcom_cpupwr.mof"><CreateBinaryMofFile>$(IntDir)qcom_cpupwr.bmf</CreateBinaryMofFile></Mofcomp>
+    <ResourceCompile Include="qcom_cpupwr.rc"/>
     <MARMASM Include="..\idle.asm"/>
     <ClInclude Include="..\cpupower.h"/><ClInclude Include="..\policy.h"/><ClInclude Include="..\..\qcom-dvfs.h"/>
     <Inf Include="qcom_cpupwr.inx"/><FilesToPackage Include="$(TargetPath)"/>

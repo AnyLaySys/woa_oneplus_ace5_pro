@@ -17,7 +17,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup><TargetName>qcom_cam_video</TargetName><Inf2CatUseLocalTime>true</Inf2CatUseLocalTime></PropertyGroup>
   <ItemDefinitionGroup>
-    <ClCompile><PreprocessorDefinitions>_UNICODE;UNICODE;POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MinSpace</Optimization><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
+    <ClCompile><PreprocessorDefinitions>_UNICODE;UNICODE;POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MaxSpeed</Optimization><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
     <Link><AdditionalDependencies>ks.lib;ksguid.lib;%(AdditionalDependencies)</AdditionalDependencies><GenerateDebugInformation>false</GenerateDebugInformation><Profile>false</Profile></Link>
     <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>$(CamDriverDate)</DateStamp><TimeStamp>$(CamDriverVersion)</TimeStamp></Inf>
     <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=$(CamDriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(CamDriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>

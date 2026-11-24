@@ -4,17 +4,16 @@
 
 void error(Device *d, HRESULT hr) {
  if (!d || SUCCEEDED(hr)) return;
-
  d->failure=hr;
  if(d->errors.pfnSetErrorCb)d->errors.pfnSetErrorCb(d->core,hr);
 }
 bool check(Device *d,VkResult result) {
  if(result==VK_SUCCESS)return true;
-
  error(d,result==VK_ERROR_DEVICE_LOST?DXGI_ERROR_DEVICE_REMOVED:E_FAIL);return false;
 }
 VkFormat format(DXGI_FORMAT f) {
  switch(f) {
+ case DXGI_FORMAT_NV12:return VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
  case DXGI_FORMAT_R32G32B32A32_FLOAT:return VK_FORMAT_R32G32B32A32_SFLOAT;
  case DXGI_FORMAT_R32G32B32A32_UINT:return VK_FORMAT_R32G32B32A32_UINT;
  case DXGI_FORMAT_R32G32B32A32_SINT:return VK_FORMAT_R32G32B32A32_SINT;
@@ -62,8 +61,8 @@ VkFormat format(DXGI_FORMAT f) {
  case DXGI_FORMAT_R16_SNORM:return VK_FORMAT_R16_SNORM;
  case DXGI_FORMAT_R16_SINT:return VK_FORMAT_R16_SINT;
  case DXGI_FORMAT_R8_TYPELESS:
- case DXGI_FORMAT_R8_UNORM:
- case DXGI_FORMAT_A8_UNORM:return VK_FORMAT_R8_UNORM;
+ case DXGI_FORMAT_R8_UNORM:return VK_FORMAT_R8_UNORM;
+ case DXGI_FORMAT_A8_UNORM:return VK_FORMAT_A8_UNORM_KHR;
  case DXGI_FORMAT_R8_UINT:return VK_FORMAT_R8_UINT;
  case DXGI_FORMAT_R8_SNORM:return VK_FORMAT_R8_SNORM;
  case DXGI_FORMAT_R8_SINT:return VK_FORMAT_R8_SINT;
@@ -79,6 +78,7 @@ VkFormat format(DXGI_FORMAT f) {
  }
 }
 unsigned pixel_bytes(DXGI_FORMAT f) {
+ if(f==DXGI_FORMAT_NV12)return 1;
  if(f>=DXGI_FORMAT_R32G32B32A32_TYPELESS && f<=DXGI_FORMAT_R32G32B32A32_SINT)return 16;
  if(f>=DXGI_FORMAT_R32G32B32_TYPELESS && f<=DXGI_FORMAT_R32G32B32_SINT)return 12;
  if(f>=DXGI_FORMAT_R16G16B16A16_TYPELESS && f<=DXGI_FORMAT_R32G32_SINT)return 8;
@@ -96,10 +96,10 @@ static UINT memory_type(Device *d,UINT bits,VkMemoryPropertyFlags wanted) {
  return ~0u;
 }
 bool buffer_create(Device *d,Storage &s,VkDeviceSize size,VkBufferUsageFlags usage) {
-
  VkBufferUsageFlags required=usage|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
  auto best=d->buffer_cache.end();
- for(auto it=d->buffer_cache.begin();it!=d->buffer_cache.end();++it) {
+ auto first=std::lower_bound(d->buffer_cache.begin(),d->buffer_cache.end(),std::max<VkDeviceSize>(size,256),[](const Storage &entry,VkDeviceSize capacity){return entry.capacity<capacity;});
+ for(auto it=first;it!=d->buffer_cache.end() && it->capacity<=std::max<VkDeviceSize>(4096,size*2);++it) {
    if(it->capacity<std::max<VkDeviceSize>(size,256) || it->size>std::max<VkDeviceSize>(4096,size*2) || (it->usage&required)!=required)continue;
    if(best==d->buffer_cache.end() || it->size<best->size)best=it;
  }
@@ -124,7 +124,7 @@ bool buffer_rename(Device *d,Resource *r) {
  if(!begin(d))return false;
  Storage next;
  if(!buffer_create(d,next,r->width,r->storage.usage)){storage_destroy(d,next);return false;}
- d->renamed.push_back(r->storage);r->storage=next;r->generation++;return true;
+ d->transient_bytes+=r->storage.size;d->renamed.push_back(r->storage);r->storage=next;r->generation++;d->resource_revision++;return true;
 }
 void storage_destroy(Device *d,Storage &s) {
  if(s.map)d->vk.UnmapMemory(d->device,s.memory);
@@ -135,25 +135,45 @@ void storage_destroy(Device *d,Storage &s) {
 }
 void buffer_recycle(Device *d,Storage &s) {
  if(s.buffer && s.map && s.size<=16777216 && d->buffer_cache_bytes+s.size<=67108864 && d->buffer_cache.size()<384) {
-   s.used=0;s.stages=0;s.access=0;d->buffer_cache_bytes+=s.size;d->buffer_cache.push_back(s);s={};
+   s.used=0;s.stages=0;s.access=0;d->buffer_cache_bytes+=s.size;auto position=std::lower_bound(d->buffer_cache.begin(),d->buffer_cache.end(),s.capacity,[](const Storage &entry,VkDeviceSize capacity){return entry.capacity<capacity;});d->buffer_cache.insert(position,std::move(s));s={};
  } else storage_destroy(d,s);
 }
 void storage_recycle(Device *d,Storage &s) {
  if(s.used>d->completed && begin(d)){d->temporary.push_back(s);s={};return;}
  if(s.image && !s.external && s.memory && s.size<=33554432 && d->image_cache_bytes+s.size<=100663296 && d->image_cache.size()<64) {
-   d->vk.DestroyImage(d->device,s.image,nullptr);s.image=VK_NULL_HANDLE;s.initialized=false;s.used=0;
+   d->vk.DestroyImage(d->device,s.image,nullptr);s.image=VK_NULL_HANDLE;s.initialized=false;s.used=0;s.subresources.clear();s.discarded=0;
    d->image_cache_bytes+=s.size;d->image_cache.push_back(s);s={};
  } else buffer_recycle(d,s);
 }
-bool sync_memory(Device *d,Storage &s,bool read) {
-
+bool sync_memory(Device *d,Storage &s,bool read,VkDeviceSize offset,VkDeviceSize size) {
  if(s.coherent)return true;
- VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=s.memory;range.size=VK_WHOLE_SIZE;
+ VkDeviceSize atom=d->properties.limits.nonCoherentAtomSize,end=size==VK_WHOLE_SIZE?s.size:std::min(s.size,((offset+size+atom-1)/atom)*atom);
+ offset=offset/atom*atom;
+ VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=s.memory;range.offset=offset;range.size=end-offset;
  return check(d,read?d->vk.InvalidateMappedMemoryRanges(d->device,1,&range):d->vk.FlushMappedMemoryRanges(d->device,1,&range));
+}
+Storage *upload_space(Device *d,VkDeviceSize size,VkDeviceSize &offset) {
+ if(!begin(d))return nullptr;
+ VkDeviceSize alignment=std::max<VkDeviceSize>(4,std::max(d->properties.limits.optimalBufferCopyOffsetAlignment,d->properties.limits.nonCoherentAtomSize));
+ offset=(d->upload_offset+alignment-1)/alignment*alignment;
+ if(!d->upload.buffer || offset+size>d->upload.capacity) {
+   if(d->upload.buffer){d->transient_bytes+=d->upload.size;d->temporary.push_back(std::move(d->upload));}d->upload={};
+   if(!buffer_create(d,d->upload,std::max<VkDeviceSize>(1048576,size),0))return nullptr;offset=0;
+ }
+ d->upload_offset=offset+size;return &d->upload;
+}
+bool ready(Device *d,uint64_t serial) {
+ if(serial<=d->completed)return true;
+ for(Batch *b:{static_cast<Batch *>(d),&d->pending})if(b->submitted>d->completed) {
+   VkResult result=d->vk.GetFenceStatus(d->device,b->fence);
+   if(result==VK_SUCCESS)d->completed=std::max(d->completed,b->submitted);
+   else if(result!=VK_NOT_READY){check(d,result);return false;}
+ }
+ return serial<=d->completed;
 }
 static bool retire(Device *d,Batch &b) {
  if(!b.submitted)return true;
- if(!check(d,d->vk.WaitForFences(d->device,1,&b.fence,VK_TRUE,10000000000ull)))return false;
+ if(b.submitted>d->completed && !check(d,d->vk.WaitForFences(d->device,1,&b.fence,VK_TRUE,10000000000ull)))return false;
  d->completed=std::max(d->completed,b.submitted);b.submitted=0;
  for(auto f:b.retired_framebuffers)d->vk.DestroyFramebuffer(d->device,f,nullptr);b.retired_framebuffers.clear();
  for(auto &v:b.retired_views){if(v.image)d->vk.DestroyImageView(d->device,v.image,nullptr);if(v.buffer)d->vk.DestroyBufferView(d->device,v.buffer,nullptr);}b.retired_views.clear();
@@ -162,47 +182,62 @@ static bool retire(Device *d,Batch &b) {
  for(auto &s:b.renamed)buffer_recycle(d,s);b.renamed.clear();
  for(auto &s:b.temporary)storage_recycle(d,s);b.temporary.clear();
  for(auto &cache:b.descriptor_cache)cache.clear();
+ b.upload_offset=0;b.transient_bytes=0;b.constants_offset=0;b.upload.used=0;b.upload.stages=0;b.upload.access=0;
+ b.blit_constants.storage.used=0;b.blit_constants.storage.stages=0;b.blit_constants.storage.access=0;
  return check(d,d->vk.ResetCommandPool(d->device,b.commands,0)) && check(d,d->vk.ResetDescriptorPool(d->device,b.descriptors,0));
 }
 bool begin(Device *d) {
  if(FAILED(d->failure))return false;
  if(d->recording)return true;
+ if(d->pending.submitted && ready(d,d->pending.submitted) && !retire(d,d->pending))return false;
  if(!retire(d,*d))return false;
- d->bound_pipeline=VK_NULL_HANDLE;d->bound_sets={};d->bound={};
+ d->bound_pipeline=VK_NULL_HANDLE;d->bound_sets={};d->bound_offsets={};d->bound={};
  VkCommandBufferBeginInfo ci{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};ci.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
  d->recording=check(d,d->vk.BeginCommandBuffer(d->cmd,&ci));return d->recording;
 }
 void end_pass(Device *d) {
  if(!d->render_pass)return;
-
  d->vk.CmdEndRenderPass(d->cmd);d->render_pass=false;d->pass_views.clear();
 }
-void access(Device *d,Storage &s,VkPipelineStageFlags stages,VkAccessFlags mask,bool attachment) {
+void access(Device *d,Storage &s,VkPipelineStageFlags stages,VkAccessFlags mask,bool attachment,UINT level,UINT levels,UINT layer,UINT layers) {
  if(!begin(d))return;
  if(stages&VK_PIPELINE_STAGE_TRANSFER_BIT)end_pass(d);
  const VkAccessFlags writes=VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
- AccessState *shared=s.external?&d->shared_access[s.address]:nullptr;
- VkPipelineStageFlags source=shared?shared->stages:s.stages;VkAccessFlags previous=shared?shared->mask:s.access;
- bool external=shared && shared->used!=d->next_submit;
- if(external){source|=VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT|VK_PIPELINE_STAGE_HOST_BIT;previous|=writes|VK_ACCESS_HOST_WRITE_BIT;}
- bool transition=s.image && !s.initialized;
- bool hazard=external || ((previous && ((previous|mask)&writes)) && !(attachment && d->render_pass && previous==mask && source==stages));
- if(transition || hazard) {
-   end_pass(d);
-   if(s.image) {
-     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.srcAccessMask=previous;b.dstAccessMask=mask;
-     b.oldLayout=transition?(s.external?VK_IMAGE_LAYOUT_PREINITIALIZED:VK_IMAGE_LAYOUT_UNDEFINED):VK_IMAGE_LAYOUT_GENERAL;b.newLayout=VK_IMAGE_LAYOUT_GENERAL;
-     b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=s.image;b.subresourceRange={s.aspects,0,VK_REMAINING_MIP_LEVELS,0,VK_REMAINING_ARRAY_LAYERS};
-     d->vk.CmdPipelineBarrier(d->cmd,source?source:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,stages,0,0,nullptr,0,nullptr,1,&b);s.initialized=true;
-   } else {
-     VkBufferMemoryBarrier b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};b.srcAccessMask=previous;b.dstAccessMask=mask;
-     b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.buffer=s.buffer;b.size=VK_WHOLE_SIZE;
-     d->vk.CmdPipelineBarrier(d->cmd,source,stages,0,0,nullptr,1,&b,0,nullptr);
+ auto &barriers=d->image_barriers;barriers.clear();VkPipelineStageFlags sources=0;
+ auto barrier=[&](AccessState &state,const VkImageSubresourceRange &range,bool external) {
+   VkPipelineStageFlags source=state.stages;VkAccessFlags previous=state.mask;
+   if(external){source|=VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT|VK_PIPELINE_STAGE_HOST_BIT;previous|=writes|VK_ACCESS_HOST_WRITE_BIT;}
+   bool transition=s.image && !state.initialized;
+   bool hazard=external || ((previous && ((previous|mask)&writes)) && !(attachment && d->render_pass && previous==mask && source==stages));
+   if(transition || hazard) {
+     end_pass(d);
+     if(s.image) {
+       VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.srcAccessMask=previous;b.dstAccessMask=mask;
+       b.oldLayout=transition?(s.external?VK_IMAGE_LAYOUT_PREINITIALIZED:VK_IMAGE_LAYOUT_UNDEFINED):VK_IMAGE_LAYOUT_GENERAL;b.newLayout=VK_IMAGE_LAYOUT_GENERAL;
+       b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=s.image;b.subresourceRange=range;
+       barriers.push_back(b);sources|=source?source:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;state.initialized=true;
+     } else {
+       VkBufferMemoryBarrier b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};b.srcAccessMask=previous;b.dstAccessMask=mask;
+       b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.buffer=s.buffer;b.size=VK_WHOLE_SIZE;
+       d->vk.CmdPipelineBarrier(d->cmd,source?source:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,stages,0,0,nullptr,1,&b,0,nullptr);
+     }
+     source=0;previous=0;
    }
-   source=0;previous=0;
+   state.stages=source|stages;state.mask=previous|mask;state.used=d->next_submit;
+ };
+ if(!s.subresources.empty()) {
+   UINT count=(UINT)s.subresources.size()/s.levels;
+   levels=std::min(levels,s.levels-level);layers=std::min(layers,count-layer);
+   for(UINT a=layer;a<layer+layers;a++)for(UINT m=level;m<level+levels;m++)barrier(s.subresources[a*s.levels+m],{s.aspects,m,1,a,1},false);
+   s.stages|=stages;s.access|=mask;
+ } else {
+   AccessState state{s.stages,s.access,s.used,s.initialized};AccessState *shared=s.external?&d->shared_access[s.address]:nullptr;
+   if(shared){state.stages=shared->stages;state.mask=shared->mask;state.used=shared->used;}
+   barrier(state,{s.aspects,0,VK_REMAINING_MIP_LEVELS,0,VK_REMAINING_ARRAY_LAYERS},shared && shared->used!=d->next_submit);
+   s.stages=state.stages;s.access=state.mask;s.initialized=state.initialized;if(shared)*shared=state;
  }
- s.stages=source|stages;s.access=previous|mask;s.used=d->next_submit;
- if(shared)*shared={s.stages,s.access,s.used};
+ if(!barriers.empty())d->vk.CmdPipelineBarrier(d->cmd,sources,stages,0,0,nullptr,0,nullptr,(UINT)barriers.size(),barriers.data());
+ s.used=d->next_submit;if(!attachment)s.discarded=0;
  if((s.map || s.external) && (mask&writes)){d->export_stages|=stages;d->export_access|=mask&writes;}
 }
 bool flush(Device *d,bool wait) {
@@ -223,17 +258,39 @@ bool flush(Device *d,bool wait) {
  }
  return !wait || (retire(d,d->pending) && retire(d,*d));
 }
-bool image_create(Device *d,Resource *r,uint64_t address,unsigned size) {
-
+bool wait_for(Device *d,uint64_t serial,bool wait) {
+ if(FAILED(d->failure))return false;
+ if(serial==d->next_submit && !flush(d))return false;
+ if(ready(d,serial))return true;
+ if(FAILED(d->failure))return false;
+ if(wait)for(Batch *b:{static_cast<Batch *>(d),&d->pending})if(b->submitted==serial)return retire(d,*b);
+ d->errors.pfnSetErrorCb(d->core,DXGI_DDI_ERR_WASSTILLDRAWING);return false;
+}
+static VkImageCreateInfo image_info(Resource *r,bool linear) {
  VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
  ci.imageType=r->dimension==D3D10DDIRESOURCE_TEXTURE1D?VK_IMAGE_TYPE_1D:r->dimension==D3D10DDIRESOURCE_TEXTURE3D?VK_IMAGE_TYPE_3D:VK_IMAGE_TYPE_2D;
  ci.format=r->vkformat;ci.extent={r->width,r->height,r->depth};ci.mipLevels=r->levels;ci.arrayLayers=r->layers;ci.samples=VK_SAMPLE_COUNT_1_BIT;
- ci.tiling=address?VK_IMAGE_TILING_LINEAR:VK_IMAGE_TILING_OPTIMAL;
+ ci.tiling=linear?VK_IMAGE_TILING_LINEAR:VK_IMAGE_TILING_OPTIMAL;
  ci.usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
- if(r->bind&D3D10_DDI_BIND_RENDER_TARGET)ci.usage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+ if(r->format==DXGI_FORMAT_NV12)ci.flags|=VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+ else if(r->bind&D3D10_DDI_BIND_RENDER_TARGET)ci.usage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
  if(r->bind&D3D10_DDI_BIND_DEPTH_STENCIL)ci.usage|=VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
- ci.initialLayout=address?VK_IMAGE_LAYOUT_PREINITIALIZED:VK_IMAGE_LAYOUT_UNDEFINED;
+ ci.initialLayout=linear?VK_IMAGE_LAYOUT_PREINITIALIZED:VK_IMAGE_LAYOUT_UNDEFINED;
  if(r->dimension==D3D10DDIRESOURCE_TEXTURECUBE)ci.flags|=VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+ return ci;
+}
+bool image_layout(Device *d,Resource *r,UINT *pitch,UINT *size) {
+ auto ci=image_info(r,true);VkImage image=VK_NULL_HANDLE;
+ if(!check(d,d->vk.CreateImage(d->device,&ci,nullptr,&image)))return false;
+ VkMemoryRequirements req{};d->vk.GetImageMemoryRequirements(d->device,image,&req);
+ VkImageSubresource sub{};sub.aspectMask=r->format==DXGI_FORMAT_NV12?VK_IMAGE_ASPECT_PLANE_0_BIT:VK_IMAGE_ASPECT_COLOR_BIT;
+ VkSubresourceLayout layout{};d->vk.GetImageSubresourceLayout(d->device,image,&sub,&layout);
+ d->vk.DestroyImage(d->device,image,nullptr);
+ if(req.size>0x4000000 || layout.rowPitch>UINT_MAX || layout.offset){error(d,E_OUTOFMEMORY);return false;}
+ *pitch=(UINT)layout.rowPitch;*size=(UINT)req.size;return true;
+}
+bool image_create(Device *d,Resource *r,uint64_t address,unsigned size) {
+ auto ci=image_info(r,address!=0);
  if(!check(d,d->vk.CreateImage(d->device,&ci,nullptr,&r->storage.image)))return false;
  VkMemoryRequirements req;d->vk.GetImageMemoryRequirements(d->device,r->storage.image,&req);
  UINT type=memory_type(d,req.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);if(type==~0u)type=memory_type(d,req.memoryTypeBits,0);
@@ -241,6 +298,7 @@ bool image_create(Device *d,Resource *r,uint64_t address,unsigned size) {
  VkMemoryOpaqueCaptureAddressAllocateInfo replay{VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO};replay.opaqueCaptureAddress=address;
  VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};dedicated.image=r->storage.image;dedicated.pNext=address?&replay:nullptr;
  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.pNext=address?&dedicated:nullptr;ai.allocationSize=address?size:req.size;ai.memoryTypeIndex=type;
+ r->storage.levels=r->levels;if(!address && r->levels*r->layers>1)r->storage.subresources.resize((size_t)r->levels*r->layers);
  r->storage.size=ai.allocationSize;r->storage.memory_type=type;r->storage.external=address!=0;r->storage.address=address;r->storage.aspects=aspects(r->format);
  if(!address) {
    auto best=d->image_cache.end();
@@ -253,7 +311,7 @@ bool image_create(Device *d,Resource *r,uint64_t address,unsigned size) {
  if(!r->storage.memory && !check(d,d->vk.AllocateMemory(d->device,&ai,nullptr,&r->storage.memory)))return false;
  if(!check(d,d->vk.BindImageMemory(d->device,r->storage.image,r->storage.memory,0)))return false;
  if(address) {
-   VkImageSubresource sub{VK_IMAGE_ASPECT_COLOR_BIT,0,0};VkSubresourceLayout layout{};
+   VkImageSubresource sub{};sub.aspectMask=r->format==DXGI_FORMAT_NV12?VK_IMAGE_ASPECT_PLANE_0_BIT:VK_IMAGE_ASPECT_COLOR_BIT;VkSubresourceLayout layout{};
    d->vk.GetImageSubresourceLayout(d->device,r->storage.image,&sub,&layout);
    if(layout.rowPitch!=r->pitch || layout.offset){error(d,E_INVALIDARG);return false;}
  }
@@ -269,9 +327,9 @@ void view_destroy(Device *d,View *v) {
    if((d->recording || d->submitted || d->pending.submitted) && begin(d))d->retired_views.push_back({v->image,v->buffer});
    else {if(v->image)d->vk.DestroyImageView(d->device,v->image,nullptr);if(v->buffer)d->vk.DestroyBufferView(d->device,v->buffer,nullptr);}
  }
- v->image=VK_NULL_HANDLE;v->buffer=VK_NULL_HANDLE;v->generation=0;
+ v->image=VK_NULL_HANDLE;v->buffer=VK_NULL_HANDLE;v->generation=0;d->resource_revision++;
 }
-bool view_create(Device *d,View *v,bool sampled) {
+bool view_create(Device *d,View *v,bool sampled,bool flat) {
  if(!v || !v->resource)return false;
  if(v->generation==v->resource->generation && (v->image||v->buffer))return true;
  if(v->image||v->buffer)view_destroy(d,v);
@@ -284,11 +342,15 @@ bool view_create(Device *d,View *v,bool sampled) {
    VkImageViewCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};ci.image=r->storage.image;ci.format=format(v->format);
    ci.viewType=r->dimension==D3D10DDIRESOURCE_TEXTURE1D?(r->layers>1?VK_IMAGE_VIEW_TYPE_1D_ARRAY:VK_IMAGE_VIEW_TYPE_1D):r->dimension==D3D10DDIRESOURCE_TEXTURE3D?VK_IMAGE_VIEW_TYPE_3D:r->layers>1?VK_IMAGE_VIEW_TYPE_2D_ARRAY:VK_IMAGE_VIEW_TYPE_2D;
    if(sampled && r->dimension==D3D10DDIRESOURCE_TEXTURECUBE)ci.viewType=VK_IMAGE_VIEW_TYPE_CUBE;
+   if(flat)ci.viewType=VK_IMAGE_VIEW_TYPE_2D;
    ci.subresourceRange={aspects(v->format),v->level,v->levels,v->layer,v->layers};
-   if(sampled && v->format==DXGI_FORMAT_A8_UNORM)ci.components={VK_COMPONENT_SWIZZLE_ZERO,VK_COMPONENT_SWIZZLE_ZERO,VK_COMPONENT_SWIZZLE_ZERO,VK_COMPONENT_SWIZZLE_R};
+   if(r->format==DXGI_FORMAT_NV12) {
+     if(v->format!=DXGI_FORMAT_R8_UNORM && v->format!=DXGI_FORMAT_R8G8_UNORM){error(d,DXGI_ERROR_UNSUPPORTED);return false;}
+     ci.subresourceRange.aspectMask=v->format==DXGI_FORMAT_R8_UNORM?VK_IMAGE_ASPECT_PLANE_0_BIT:VK_IMAGE_ASPECT_PLANE_1_BIT;
+   }
    if(!check(d,d->vk.CreateImageView(d->device,&ci,nullptr,&v->image)))return false;
  }
- v->generation=r->generation;return true;
+ v->generation=r->generation;d->resource_revision++;return true;
 }
 static HRESULT WINAPI host_create(void *user,HANDLE event,HANDLE *context,void **page) {
  Device *d=(Device *)user;A830_CONTEXT_DATA data={A830_ABI_VERSION,0,(GPU_U64)(uintptr_t)event,0};
@@ -308,7 +370,6 @@ static HRESULT WINAPI host_render(void *user,const void *commands,UINT size) {
  if(!d->command_buffer || size>d->command_buffer_size){LeaveCriticalSection(&d->lock);return E_INVALIDARG;}
  memcpy(d->command_buffer,commands,size);D3DDDICB_RENDER r{};r.hContext=d->context;r.CommandLength=size;
  HRESULT hr=d->callbacks.pfnRenderCb(d->runtime,&r);d->command_buffer=r.pNewCommandBuffer;d->command_buffer_size=r.NewCommandBufferSize;
-
  LeaveCriticalSection(&d->lock);return hr;
 }
 static void WINAPI host_destroy(void *user) {
@@ -326,7 +387,6 @@ static HRESULT WINAPI host_synchronize(void *user,unsigned object,uint64_t value
  LeaveCriticalSection(&d->lock);return hr;
 }
 bool initialize(Device *d) {
-
  HMODULE self=nullptr;WCHAR path[MAX_PATH];
  if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCWSTR)(uintptr_t)initialize,&self) || !GetModuleFileNameW(self,path,MAX_PATH))return false;
  WCHAR *tail=wcsrchr(path,L'\\');if(!tail)return false;tail[1]=0;wcscat(path,A830_MODULE(L"vulkan_freedreno"));
@@ -336,7 +396,7 @@ bool initialize(Device *d) {
  if(!gpa)gpa=(PFN_vkGetInstanceProcAddr)GetProcAddress(d->module,"vkGetInstanceProcAddr");
  if(!set||!gpa){error(d,E_FAIL);return false;}
  auto create=(PFN_vkCreateInstance)gpa(nullptr,"vkCreateInstance");
- VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};app.pApplicationName="A830 Direct DDI";app.apiVersion=VK_API_VERSION_1_1;
+ VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};app.pApplicationName="A830 Direct DDI";app.apiVersion=VK_API_VERSION_1_3;
  VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};ici.pApplicationInfo=&app;
  if(!create || !check(d,create(&ici,nullptr,&d->instance)))return false;
 #define LOAD_INSTANCE(name) d->vk.name=(PFN_vk##name)gpa(d->instance,"vk" #name);
@@ -346,11 +406,15 @@ bool initialize(Device *d) {
  std::vector<VkPhysicalDevice> devices(count);d->vk.EnumeratePhysicalDevices(d->instance,&count,devices.data());d->physical=devices[0];
  d->vk.GetPhysicalDeviceProperties(d->physical,&d->properties);d->vk.GetPhysicalDeviceMemoryProperties(d->physical,&d->memory);
  VkPhysicalDeviceFeatures supported{};d->vk.GetPhysicalDeviceFeatures(d->physical,&supported);
+ VkPhysicalDeviceSamplerYcbcrConversionFeatures ycbcr{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES};
+ VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};features2.pNext=&ycbcr;d->vk.GetPhysicalDeviceFeatures2(d->physical,&features2);
+ VkPhysicalDeviceMaintenance5FeaturesKHR maintenance{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR,nullptr,VK_TRUE};ycbcr.pNext=&maintenance;
  VkPhysicalDeviceFeatures features{};features.robustBufferAccess=supported.robustBufferAccess;features.independentBlend=supported.independentBlend;features.dualSrcBlend=supported.dualSrcBlend;features.geometryShader=supported.geometryShader;features.samplerAnisotropy=supported.samplerAnisotropy;features.depthClamp=supported.depthClamp;features.fillModeNonSolid=supported.fillModeNonSolid;features.occlusionQueryPrecise=supported.occlusionQueryPrecise;
  UINT family_count=0;d->vk.GetPhysicalDeviceQueueFamilyProperties(d->physical,&family_count,nullptr);std::vector<VkQueueFamilyProperties> families(family_count);d->vk.GetPhysicalDeviceQueueFamilyProperties(d->physical,&family_count,families.data());
  UINT family=0;while(family<family_count && !(families[family].queueFlags&VK_QUEUE_GRAPHICS_BIT))family++;if(family==family_count)return false;
  float priority=1;VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};qci.queueFamilyIndex=family;qci.queueCount=1;qci.pQueuePriorities=&priority;
- VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};dci.queueCreateInfoCount=1;dci.pQueueCreateInfos=&qci;dci.pEnabledFeatures=&features;
+ const char *extension=VK_KHR_MAINTENANCE_5_EXTENSION_NAME;
+ VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};dci.pNext=&ycbcr;dci.queueCreateInfoCount=1;dci.pQueueCreateInfos=&qci;dci.pEnabledFeatures=&features;dci.enabledExtensionCount=1;dci.ppEnabledExtensionNames=&extension;
  A830_HOST host={A830_HOST_VERSION,sizeof(A830_HOST),d,host_create,host_render,host_destroy,host_synchronize,open_present_image,query_present_image,close_present_image};set(&host);VkResult result=d->vk.CreateDevice(d->physical,&dci,nullptr,&d->device);set(nullptr);
  if(!check(d,result))return false;
 #define LOAD_DEVICE(name) {auto p=d->vk.GetDeviceProcAddr(d->device,"vk" #name);if(p)d->vk.name=(PFN_vk##name)p;}
@@ -360,7 +424,7 @@ bool initialize(Device *d) {
  for(UINT stage=0;stage<3;stage++) {
    VkShaderStageFlags flags=stage==0?VK_SHADER_STAGE_VERTEX_BIT:stage==1?VK_SHADER_STAGE_FRAGMENT_BIT:VK_SHADER_STAGE_GEOMETRY_BIT;
    std::vector<VkDescriptorSetLayoutBinding> bindings;
-   for(UINT i=0;i<16;i++)bindings.push_back({i,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,1,flags,nullptr});
+   for(UINT i=0;i<16;i++)bindings.push_back({i,i?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,1,flags,nullptr});
    for(UINT i=0;i<16;i++)bindings.push_back({16+i,VK_DESCRIPTOR_TYPE_SAMPLER,1,flags,nullptr});
    for(UINT i=0;i<128;i++)bindings.push_back({32+i,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,1,flags,nullptr});
    for(UINT i=0;i<128;i++)bindings.push_back({160+i,VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,1,flags,nullptr});
@@ -369,8 +433,8 @@ bool initialize(Device *d) {
  }
  VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};lci.setLayoutCount=3;lci.pSetLayouts=d->sets;
  if(!check(d,d->vk.CreatePipelineLayout(d->device,&lci,nullptr,&d->pipeline_layout)))return false;
- VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,32768},{VK_DESCRIPTOR_TYPE_SAMPLER,32768},{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,262144},{VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,262144}};
- VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};pool.maxSets=1536;pool.poolSizeCount=4;pool.pPoolSizes=sizes;
+ VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,2048},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,32768},{VK_DESCRIPTOR_TYPE_SAMPLER,32768},{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,262144},{VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,262144}};
+ VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};pool.maxSets=1536;pool.poolSizeCount=(UINT)std::size(sizes);pool.pPoolSizes=sizes;
  for(Batch *b:{static_cast<Batch *>(d),&d->pending}) {
    VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pci.queueFamilyIndex=family;
    if(!check(d,d->vk.CreateCommandPool(d->device,&pci,nullptr,&b->commands)))return false;
@@ -383,22 +447,25 @@ bool initialize(Device *d) {
  if(!buffer_create(d,d->dummy_buffer,65536,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT))return false;
  memset(d->dummy_buffer.map,0,65536);
  d->dummy_image.width=d->dummy_image.height=1;d->dummy_image.dimension=D3D10DDIRESOURCE_TEXTURE2D;d->dummy_image.format=DXGI_FORMAT_R8G8B8A8_UNORM;d->dummy_image.vkformat=VK_FORMAT_R8G8B8A8_UNORM;
- if(!image_create(d,&d->dummy_image))return false;
+ if(!image_create(d,&d->dummy_image) || !begin(d))return false;
+ access(d,d->dummy_image.storage,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
  VkClearColorValue zero{};VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};d->vk.CmdClearColorImage(d->cmd,d->dummy_image.storage.image,VK_IMAGE_LAYOUT_GENERAL,&zero,1,&range);
  d->dummy_view.resource=&d->dummy_image;d->dummy_view.format=d->dummy_image.format;if(!view_create(d,&d->dummy_view,true))return false;
  VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};sampler.magFilter=sampler.minFilter=VK_FILTER_NEAREST;sampler.addressModeU=sampler.addressModeV=sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;sampler.maxLod=1000;
  if(!check(d,d->vk.CreateSampler(d->device,&sampler,nullptr,&d->dummy_sampler.handle)))return false;
-
  return flush(d,true);
 }
 void destroy(Device *d) {
  if(d->device) {
    flush(d,true);d->vk.DeviceWaitIdle(d->device);
-   for(auto &p:d->pipelines){d->vk.DestroyPipeline(d->device,p.second.handle,nullptr);d->vk.DestroyRenderPass(d->device,p.second.pass,nullptr);}
+   for(auto &p:d->shader_cache){auto &s=p.second;if(s.module)d->vk.DestroyShaderModule(d->device,s.module,nullptr);if(s.dual_module)d->vk.DestroyShaderModule(d->device,s.dual_module,nullptr);}
+   for(auto &p:d->render_passes)d->vk.DestroyRenderPass(d->device,p.second,nullptr);
+   for(auto &p:d->pipelines){d->vk.DestroyPipeline(d->device,p.second.handle,nullptr);}
    for(Batch *b:{static_cast<Batch *>(d),&d->pending}) {
      for(auto f:b->retired_framebuffers)d->vk.DestroyFramebuffer(d->device,f,nullptr);
      for(auto &s:b->temporary)storage_destroy(d,s);
      for(auto &s:b->renamed)storage_destroy(d,s);
+     storage_destroy(d,b->upload);storage_destroy(d,b->blit_constants.storage);
      for(auto &v:b->retired_views){if(v.image)d->vk.DestroyImageView(d->device,v.image,nullptr);if(v.buffer)d->vk.DestroyBufferView(d->device,v.buffer,nullptr);}
      for(auto sampler:b->retired_samplers)d->vk.DestroySampler(d->device,sampler,nullptr);
      for(auto query:b->retired_queries)d->vk.DestroyQueryPool(d->device,query,nullptr);
@@ -411,10 +478,6 @@ void destroy(Device *d) {
    for(auto &s:d->image_cache)storage_destroy(d,s);
    view_destroy(d,&d->dummy_view);storage_destroy(d,d->dummy_buffer);storage_destroy(d,d->dummy_image.storage);
    if(d->dummy_sampler.handle)d->vk.DestroySampler(d->device,d->dummy_sampler.handle,nullptr);
-   if(d->rotation_sampler.handle)d->vk.DestroySampler(d->device,d->rotation_sampler.handle,nullptr);
-   if(d->rotation_vertex.module)d->vk.DestroyShaderModule(d->device,d->rotation_vertex.module,nullptr);
-   if(d->rotation_pixel.module)d->vk.DestroyShaderModule(d->device,d->rotation_pixel.module,nullptr);
-   storage_destroy(d,d->rotation_constants.storage);
    if(d->pipeline_cache)d->vk.DestroyPipelineCache(d->device,d->pipeline_cache,nullptr);
    if(d->pipeline_layout)d->vk.DestroyPipelineLayout(d->device,d->pipeline_layout,nullptr);
    for(auto layout:d->sets)if(layout)d->vk.DestroyDescriptorSetLayout(d->device,layout,nullptr);
@@ -422,6 +485,5 @@ void destroy(Device *d) {
  }
  if(d->instance)d->vk.DestroyInstance(d->instance,nullptr);
  if(d->module)FreeLibrary(d->module);
-
  DeleteCriticalSection(&d->lock);
 }

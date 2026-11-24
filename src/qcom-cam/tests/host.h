@@ -6,6 +6,7 @@
 typedef uint32_t ULONG;
 typedef int32_t LONG;
 typedef uint64_t ULONGLONG;
+typedef int64_t LONGLONG;
 typedef uint16_t USHORT;
 typedef uint8_t UCHAR;
 typedef char CHAR;
@@ -16,6 +17,8 @@ typedef PFN_NUMBER *PPFN_NUMBER;
 typedef ULONGLONG *PULONGLONG;
 typedef int32_t NTSTATUS;
 #define VOID void
+#define min(a,b) ((a)<(b)?(a):(b))
+#define max(a,b) ((a)>(b)?(a):(b))
 #define TRUE 1
 #define FALSE 0
 #define STATUS_SUCCESS 0
@@ -28,6 +31,7 @@ typedef int32_t NTSTATUS;
 #define STATUS_DATA_ERROR -7
 #define STATUS_NOT_SUPPORTED -8
 #define STATUS_DEVICE_NOT_READY -9
+#define STATUS_NO_SUCH_DEVICE -10
 #define MAXULONG UINT32_MAX
 #define NT_SUCCESS(s) ((s)>=0)
 #define RTL_NUMBER_OF(a) (sizeof(a)/sizeof((a)[0]))
@@ -35,6 +39,7 @@ typedef int32_t NTSTATUS;
 #define RtlCopyMemory(d,s,n) memcpy(d,s,n)
 enum { CamCci,CamCpas,CamCrm,CamCc,CamGcc,CamSmmu };
 #include "uapi.h"
+#include "pdaf.h"
 typedef struct {
     PUCHAR Base[6]; QCAM_INFO Info; BOOLEAN Faulted,Powered,DmaActive,RxActive,ScmAvailable,ScmPending,CdmPending,CrmPending,ReceiverVerified,ScmWaitqKnown,ScmFastWaitq,StaticQosReady;
     QCAM_DIAG Diag; QCAM_TRACE Trace;
@@ -43,6 +48,19 @@ typedef struct {
     ULONGLONG ScmResumeArgs[8];
     ULONG ScmAuditSequence;
     ULONG FrameRoute[4];
+    BOOLEAN LensReady;
+    ULONG FocusPosition,FocusTarget,FocusFlags,FocusWait;
+    LONG FocusStatus;
+    CAM_PDAF_CAL FocusCalibration;
+    CAM_PDAF_RESULT FocusResult;
+    LONG FocusWorkspace[2520];
+    ULONG FocusSequence,FocusStable,FocusMisses,FocusSamples;
+    BOOLEAN FocusComplete,FocusWindowValid;
+    ULONG FocusWindow;
+    QCAM_ROI_OPTIONS FocusRoi;
+    ULONG FocusRoiX,FocusRoiY;
+    ULONG VideoZoom;
+    UCHAR *PdafLatest;QCAM_PDAF_FRAME PdafInfo;
 } CAM;
 ULONG CamRead(PUCHAR base,ULONG offset);
 VOID CamWrite(PUCHAR base,ULONG offset,ULONG value);
@@ -65,3 +83,8 @@ NTSTATUS CamScmQosRaw(CAM *c);
 NTSTATUS CamScmContinue(CAM *c);
 NTSTATUS CamScmAudit(CAM *c,ULONG phase,const ULONGLONG *registers,NTSTATUS result);
 NTSTATUS CamScmIoProbe(CAM *c);
+
+NTSTATUS CamCciReadByte(CAM *c,UCHAR slave,UCHAR address,PUCHAR buffer,ULONG bytes);
+NTSTATUS CamCciWriteByte(CAM *c,UCHAR slave,UCHAR address,const UCHAR *buffer,ULONG bytes);
+
+NTSTATUS CamPdafPrepare(CAM *c);

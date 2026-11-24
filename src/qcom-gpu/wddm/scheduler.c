@@ -235,33 +235,6 @@ BOOLEAN A830InterruptComplete(PVOID context) {
     }
     return TRUE;
 }
-static BOOLEAN PollAtInterrupt(PVOID context) {
-    A830_ADAPTER *a=context;
-    A830InterruptComplete(a);
-    return TRUE;
-}
-static VOID PollCompletion(A830_ADAPTER *a) {
-    if(a->Stopping || a->Failed || a->IrqRead==a->IrqWrite)return;
-    BOOLEAN result=FALSE;
-
-    NTSTATUS status=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,PollAtInterrupt,a,0,&result);
-    if(!NT_SUCCESS(status))InterlockedExchange(&a->Failed,status);
-}
-static PLARGE_INTEGER WorkerTimeout(A830_ADAPTER *a,BOOLEAN dpu,ULONGLONG now,ULONGLONG nextVsync,PLARGE_INTEGER timeout) {
-    BOOLEAN pending=FALSE;
-    if(!a->Stopping && !a->Failed) {
-        KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);
-        pending=a->IrqRead!=a->IrqWrite || !IsListEmpty(&a->Pending) || !IsListEmpty(&a->Inflight) || a->PreemptPending || a->CpuBarriers;
-        KeReleaseSpinLock(&a->QueueLock,old);
-    }
-    if(a->VsyncEnabled && !dpu) {
-        timeout->QuadPart=nextVsync>now?-(LONGLONG)(nextVsync-now):0;
-        if(pending && timeout->QuadPart<-100000)timeout->QuadPart=-100000;
-        return timeout;
-    }
-    if(!pending)return NULL;
-    timeout->QuadPart=-100000;return timeout;
-}
 /* Caller holds QueueLock. Ring records are single-producer, ISR consumes only
    fully published records and never takes a PASSIVE/DISPATCH spin lock. */
 static NTSTATUS IssueJob(A830_ADAPTER *a,A830_JOB *job) {
@@ -336,8 +309,10 @@ NTSTATUS APIENTRY A830SubmitVirtual(HANDLE adapter,const DXGKARG_SUBMITCOMMANDVI
     if(p->Flags.Paging) {
         if(!c || c->Adapter!=a || node>=A830_NODE_COUNT || p->DmaBufferPrivateDataSize!=sizeof(A830_DMA))goto fail;
         const A830_DMA *dma=p->pDmaBufferPrivateData;
-        if(!dma || (dma->Operation!=0 && dma->Operation!=2 && dma->Operation!=3 && dma->Operation!=8))goto fail;
-        DXGKARG_SUBMITCOMMAND submit={0};submit.pDmaBufferPrivateData=p->pDmaBufferPrivateData;submit.DmaBufferPrivateDataSize=p->DmaBufferPrivateDataSize;
+        if(!dma || (dma->Operation!=0 && dma->Operation!=2 && dma->Operation!=3 && dma->Operation!=8 &&
+            (dma->Operation<9 || dma->Operation>11)))goto fail;
+        A830_DMA paging=*dma;paging.Root=(ULONGLONG)InterlockedCompareExchange64((volatile LONG64 *)&c->PagingRoot,0,0);
+        DXGKARG_SUBMITCOMMAND submit={0};submit.pDmaBufferPrivateData=&paging;submit.DmaBufferPrivateDataSize=sizeof(paging);
         submit.DmaBufferPrivateDataSubmissionEndOffset=sizeof(A830_DMA);submit.SubmissionFenceId=p->SubmissionFenceId;submit.Flags=p->Flags;submit.NodeOrdinal=node;
         return A830Submit(a,&submit);
     }
@@ -411,6 +386,11 @@ static BOOLEAN TakePreemption(A830_ADAPTER *a,PULONG node,PULONG fence) {
 }
 VOID A830Retire(A830_ADAPTER *a) {
     if(a->Failed && !a->Stopping)return;
+    if(!a->Stopping && a->IrqRead!=a->IrqWrite) {
+        BOOLEAN result=FALSE;
+        NTSTATUS status=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,A830InterruptComplete,a,0,&result);
+        if(!NT_SUCCESS(status)){InterlockedExchange(&a->Failed,status);return;}
+    }
     ULONGLONG completed=a->Hardware.Memory.Cpu?*(volatile ULONGLONG *)a->Hardware.Memory.Cpu:0;
     for(;;) {
         PLIST_ENTRY entry=ExInterlockedRemoveHeadList(&a->Inflight,&a->QueueLock);if(!entry)break;
@@ -430,7 +410,10 @@ static BOOLEAN NotifyVsync(PVOID context) {
     InterlockedExchange(&a->SchedulerDpcPending,1);
     return a->Dxgk.DxgkCbQueueDpc(a->Dxgk.DeviceHandle);
 }
-static NTSTATUS Execute(A830_ADAPTER *a,const A830_DMA *dma) {
+static NTSTATUS Execute(A830_ADAPTER *a,A830_DMA *dma) {
+    if(dma->Operation>=9 && dma->Operation<=11) {
+        NTSTATUS status=A830ResolvePaging(a,dma);if(!NT_SUCCESS(status))return status;
+    }
     if(dma->Operation==0)return STATUS_SUCCESS;
     if(dma->Operation==8) {
         if(!dma->Destination || ((ULONG_PTR)dma->Destination&7))return STATUS_INVALID_PARAMETER;
@@ -473,10 +456,13 @@ VOID A830Worker(PVOID context) {
     const ULONGLONG vsyncPeriod=(10000000ULL+A830RefreshRate(a)/2)/A830RefreshRate(a);
     ULONGLONG nextVsync=KeQueryInterruptTime()+vsyncPeriod;
     for(;;) {
-        LARGE_INTEGER timeout;ULONGLONG now=KeQueryInterruptTime();
+        LARGE_INTEGER timeout,*wait=NULL;
         BOOLEAN dpu=A830DpuEnabled(a);
-        KeWaitForSingleObject(&a->Wake,Executive,KernelMode,FALSE,WorkerTimeout(a,dpu,now,nextVsync,&timeout));
-        PollCompletion(a);
+        if(!dpu && a->VsyncEnabled) {
+            ULONGLONG now=KeQueryInterruptTime();
+            timeout.QuadPart=nextVsync>now?-(LONGLONG)(nextVsync-now):0;wait=&timeout;
+        }
+        KeWaitForSingleObject(&a->Wake,Executive,KernelMode,FALSE,wait);
         A830Retire(a);
         A830DpuWork(a);
         A830BridgeCollectShared();
@@ -490,7 +476,7 @@ VOID A830Worker(PVOID context) {
             a->Notify.DmaPageFaulted.FaultErrorCode.IsDeviceSpecificCode=1;
             a->Notify.DmaPageFaulted.FaultErrorCode.DeviceSpecificCode=(ULONG)a->Failed&0x7fffffffu;Signal(a);
         }
-        now=KeQueryInterruptTime();BOOLEAN tick=!dpu && a->VsyncEnabled && now>=nextVsync;
+        ULONGLONG now=KeQueryInterruptTime();BOOLEAN tick=!dpu && a->VsyncEnabled && now>=nextVsync;
         if(tick)nextVsync=now+vsyncPeriod;
         if(QcomGpuScanoutEnabled(a))QcomGpuScanoutPump(a);
         if(tick && a->ScanoutPitch) {

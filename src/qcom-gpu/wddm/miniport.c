@@ -181,11 +181,20 @@ static NTSTATUS ChildStatus(PVOID context,PDXGK_CHILD_STATUS status,BOOLEAN nonD
     status->HotPlug.Connected=TRUE;return STATUS_SUCCESS;
 }
 static NTSTATUS APIENTRY MonitorLink(HANDLE adapter,DXGKARG_UPDATEMONITORLINKINFO *p) {
-    UNREFERENCED_PARAMETER(adapter);if(p->VideoPresentTargetId)return STATUS_INVALID_PARAMETER;
-    p->MonitorLinkInfo.Capabilities.Value=0;p->MonitorLinkInfo.DitheringSupport.Value=0;return STATUS_SUCCESS;
+    if(p->VideoPresentTargetId)return STATUS_INVALID_PARAMETER;
+    p->MonitorLinkInfo.Capabilities.Value=0;p->MonitorLinkInfo.DitheringSupport.Value=0;
+    if(A830DpuEnabled(adapter)) {
+        p->MonitorLinkInfo.Capabilities.WideColorSpace=p->MonitorLinkInfo.Capabilities.HighColorSpace=1;
+        p->MonitorLinkInfo.Capabilities.DynamicColorSpace=1;
+    }
+    return STATUS_SUCCESS;
 }
 static NTSTATUS Descriptor(PVOID context,ULONG child,PDXGK_DEVICE_DESCRIPTOR descriptor) {
-    UNREFERENCED_PARAMETER(context);UNREFERENCED_PARAMETER(child);UNREFERENCED_PARAMETER(descriptor);return STATUS_MONITOR_NO_DESCRIPTOR;
+    if(child || !descriptor || !descriptor->DescriptorBuffer)return STATUS_INVALID_PARAMETER;
+    if(descriptor->DescriptorOffset>=128)return STATUS_MONITOR_NO_MORE_DESCRIPTOR_DATA;
+    UCHAR edid[128];A830Edid(context,edid);
+    ULONG bytes=min(descriptor->DescriptorLength,128-descriptor->DescriptorOffset);
+    RtlCopyMemory(descriptor->DescriptorBuffer,edid+descriptor->DescriptorOffset,bytes);return STATUS_SUCCESS;
 }
 static NTSTATUS Power(PVOID context,ULONG uid,DEVICE_POWER_STATE state,POWER_ACTION action) {
     UNREFERENCED_PARAMETER(action);
@@ -226,6 +235,9 @@ static NTSTATUS APIENTRY ControlInterrupt(HANDLE adapter,DXGK_INTERRUPT_TYPE typ
         return STATUS_SUCCESS;
     }
     return STATUS_SUCCESS;
+}
+static NTSTATUS APIENTRY ControlInterrupt2(HANDLE adapter,const DXGKARG_CONTROLINTERRUPT2 p) {
+    return ControlInterrupt(adapter,p.InterruptType,p.InterruptState==DXGK_INTERRUPT_ENABLE);
 }
 static NTSTATUS APIENTRY Cancel(HANDLE adapter,const DXGKARG_CANCELCOMMAND *p) {
     UNREFERENCED_PARAMETER(adapter);
@@ -278,7 +290,7 @@ static VOID APIENTRY SetRoot(HANDLE adapter,const DXGKARG_SETROOTPAGETABLE *p) {
     status=A830PhysicalAddress(a,p->Address.SegmentId,p->Address.SegmentOffset,&physical);
     if(!NT_SUCCESS(status))goto fail;
     if(!physical || (physical&4095) || physical>>44){status=STATUS_INVALID_ADDRESS;goto fail;}
-    if(c->System){InterlockedExchange64((volatile LONG64 *)&a->PagingRoot,physical);return;}
+    if(c->System){InterlockedExchange64((volatile LONG64 *)&c->PagingRoot,physical);return;}
     if(!c->Virtual || !c->AddressSpace){status=STATUS_INVALID_DEVICE_STATE;goto fail;}
     A830_PROCESS *process=c->AddressSpace;
     KeWaitForSingleObject(&process->Lock,Executive,KernelMode,FALSE,NULL);
@@ -345,7 +357,7 @@ static NTSTATUS APIENTRY Describe(HANDLE adapter,DXGKARG_DESCRIBEALLOCATION *p) 
     A830_ALLOCATION *a=p->hAllocation;
     p->Width=a->Resource.Width;p->Height=a->Resource.Height;p->Format=a->Resource.Format;
     p->MultisampleMethod.NumSamples=1;p->MultisampleMethod.NumQualityLevels=0;
-    p->RefreshRate.Numerator=A830RefreshRate(adapter);p->RefreshRate.Denominator=1;
+    p->RefreshRate=A830Signal(adapter).VSyncFreq;
     p->Rotation=a->Resource.Rotation?(D3DDDI_ROTATION)a->Resource.Rotation:D3DDDI_ROTATION_IDENTITY;
     p->PrivateDriverFormatAttribute=0;p->Flags.Value=0;
     return STATUS_SUCCESS;
@@ -415,6 +427,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT object,PUNICODE_STRING path) {
     d.DxgkDdiStopCapture=StopCapture;d.DxgkDdiSetStablePowerState=StablePower;
     d.DxgkDdiCalibrateGpuClock=Calibrate;
     d.DxgkDdiPresent=Present;d.DxgkDdiControlInterrupt=ControlInterrupt;d.DxgkDdiCancelCommand=Cancel;
+    d.DxgkDdiControlInterrupt2=ControlInterrupt2;
     d.DxgkDdiQueryAdapterInfo=A830Query;d.DxgkDdiCreateDevice=CreateDevice;d.DxgkDdiDestroyDevice=DestroyDevice;
     d.DxgkDdiCreateAllocation=A830CreateAllocation;d.DxgkDdiDestroyAllocation=A830DestroyAllocation;
     d.DxgkDdiOpenAllocation=Open;d.DxgkDdiCloseAllocation=Close;d.DxgkDdiDescribeAllocation=Describe;

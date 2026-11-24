@@ -3,5 +3,10 @@
 #define CAM_RDI_FATAL_IRQ 0x241c6001u
 
 static BOOLEAN CamRdiFrameComplete(ULONG packets,ULONG rdiIrq,ULONG busIrq) {
-    return packets>=QCAM_HEIGHT&&!(rdiIrq&CAM_RDI_FATAL_IRQ)&&((rdiIrq&8)||(busIrq&0x10000));
+    return packets>=QCAM_HEIGHT&&!(rdiIrq&CAM_RDI_FATAL_IRQ)&&(busIrq&0x10000);
+}
+
+static BOOLEAN CamRdiPairReady(ULONG bus,ULONG mask,ULONGLONG sof0,ULONGLONG sof1,ULONGLONG eof0,ULONGLONG eof1,ULONGLONG previous) {
+    return (bus&mask)==mask&&eof0&&eof0==eof1&&eof0!=previous&&sof0==sof1&&
+        sof0<=eof0;
 }

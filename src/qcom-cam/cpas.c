@@ -5,7 +5,7 @@
 #include "scm-ready.h"
 #include "../platform/lock.h"
 
-static const ULONG PerfDomains[]={0,6,7};
+static const ULONG PerfDomains[]={2,6,7};
 
 static NTSTATUS NocRead(CAM *c,ULONG offset,ULONG *value) {
     ULONGLONG registers[8]={0xad90000+offset};
@@ -26,7 +26,7 @@ NTSTATUS CamNocRegisters(CAM *c) {
         c->Diag.Mask=1;c->Diag.Expected=1;c->Diag.Observed=accepted;RtlCopyMemory(c->Diag.Resource,"noc-gate",8);
         return STATUS_DEVICE_NOT_READY;
     }
-    if((c->DmaActive||c->RxActive)&&((CamRead(c->Base[CamTfe],0x2400)&1)||CamRead(c->Base[CamCsid],0xe04)))return STATUS_DEVICE_BUSY;
+    if((c->DmaActive||c->RxActive)&&(((CamRead(c->Base[CamTfe],0x2400)|CamRead(c->Base[CamTfe],0x2500)|CamRead(c->Base[CamTfe],0x2600)|CamRead(c->Base[CamTfe],0x2700))&1)||CamRead(c->Base[CamCsid],0xe04)||CamRead(c->Base[CamCsid],0x1004)||CamRead(c->Base[CamCsid],0x1204)||CamRead(c->Base[CamCsid],0x1404)))return STATUS_DEVICE_BUSY;
     c->Trace.NocErrorCount[0]=0;c->Trace.NocErrorStatus[0]=STATUS_DEVICE_NOT_READY;
     c->Trace.NocErrorCount[1]=0;c->Trace.NocErrorStatus[1]=STATUS_NOT_SUPPORTED;
     NTSTATUS status=NocRead(c,0x10,&c->Trace.NocErrors[0][0]);

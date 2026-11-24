@@ -16,7 +16,7 @@ static inline ULONG GpuResponsiveDemand(const ULONG *khz,
     int slowPending,int holdRaised) {
     if(current>ceiling)return ceiling;
     ULONG target=GpuChooseLevel(khz,ceiling,342000);
-    if(busy>2 || slowPending) {
+    if(busy>DVFS_IDLE_PERCENT || slowPending) {
         ULONG level=(slowPending || busy>=63)?current+2:
             GpuChooseLevel(khz,sweet,khz[current]*busy/63);
         if(target<level)target=level;

@@ -45,8 +45,9 @@ NTSTATUS CamSensorInit(CAM *c) {
     }
     if(NT_SUCCESS(status)) {
         c->Info.Flags|=QCAM_INITIALIZED;c->Configured=TRUE;
-        c->Info.Exposure=0x0e1c;c->Info.Gain=0x3f00;c->Info.FrameLength=0x1d68;c->Info.Stage=6;
+        c->Info.Exposure=0x0e1c;c->Info.Gain=0x3f00;c->Info.FrameLength=0x0eb4;c->Info.Stage=6;
     }
+    if(NT_SUCCESS(status))status=CamFocusInit(c);
     return status;
 }
 
@@ -61,12 +62,14 @@ NTSTATUS CamSensorStream(CAM *c,BOOLEAN on) {
 }
 
 NTSTATUS CamSensorExposure(CAM *c,ULONG lines,ULONG gain) {
-    if(!c->Configured||c->DmaActive)return STATUS_INVALID_DEVICE_STATE;
+    if(!c->Configured||(c->DmaActive&&!c->StreamFile))return STATUS_INVALID_DEVICE_STATE;
     if(!lines||lines>c->Info.FrameLength-48||gain>0x3fff)return STATUS_INVALID_PARAMETER;
     NTSTATUS status=Set(c,0x0104,1);
     if(!NT_SUCCESS(status))return status;
     status=Set16(c,0x0202,(USHORT)lines);
+    if(NT_SUCCESS(status))status=Set16(c,0x0224,(USHORT)max(lines/2,1u));
     if(NT_SUCCESS(status))status=Set16(c,0x0204,(USHORT)gain);
+    if(NT_SUCCESS(status))status=Set16(c,0x0216,(USHORT)gain);
     NTSTATUS release=Set(c,0x0104,0);
     if(NT_SUCCESS(status))status=release;
     if(NT_SUCCESS(status)){c->Info.Exposure=lines;c->Info.Gain=gain;}

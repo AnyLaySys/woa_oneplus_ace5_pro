@@ -13,6 +13,118 @@
 #include "frame-route.h"
 #include "dma-idle.h"
 #include "rdi-frame.h"
+#include "frame-map-table.h"
+#include "tbu-translate.h"
+ULONGLONG CamCpuTranslate(PVOID address);
+
+static NTSTATUS FrameMap(CAM *c,ULONG slot,ULONG original) {
+    if(c->FrameMapped||c->FrameRouteOwned||c->DmaActive||c->RxActive||c->ScmPending||c->CdmPending||c->TbuPending)
+        return STATUS_DEVICE_BUSY;
+    if(!c->FrameTables) {
+        PHYSICAL_ADDRESS lowest={0},highest,boundary={0};highest.QuadPart=MAXULONG;
+        c->FrameTables=MmAllocateContiguousMemorySpecifyCache(CAM_FRAME_MAP_TABLE_BYTES,lowest,highest,boundary,MmNonCached);
+        if(!c->FrameTables){return STATUS_INSUFFICIENT_RESOURCES;}
+        c->FrameTableAddress=MmGetPhysicalAddress(c->FrameTables);
+    }
+    if(!CamFrameMapTable(c->FrameTables,c->FrameTableAddress.QuadPart,
+       MmGetPhysicalAddress(c->FrameAllocation).QuadPart,QCAM_ARENA_BYTES)){return STATUS_DEVICE_CONFIGURATION_ERROR;}
+    KeMemoryBarrier();
+    PLATFORM_LOCK_GUARD guard={0};NTSTATUS status=PlatformLockAcquire(&guard,TRUE);
+    if(status!=STATUS_SUCCESS)return status;
+    PUCHAR base=c->Base[CamSmmu];BOOLEAN used[83]={0};ULONG bank=MAXULONG;
+    for(ULONG i=0;i<128;i++) {
+        ULONG smr=CamRead(base,0x800+i*4),control=CamRead(base,0xc00+i*4);
+        if((smr&0x80000000u)&&!(control&0x30000)&&(control&255)<83)used[control&255]=TRUE;
+    }
+    for(ULONG i=0;i<16;i++)if(!used[i]) {
+        ULONGLONG scan[8]={i,0x15080000ULL+(ULONGLONG)i*4096};
+        status=CamScmAudit(c,30,scan,STATUS_SUCCESS);if(!NT_SUCCESS(status))goto done;
+        ULONG candidate=CamRead(base,0x80000+i*4096);
+        scan[2]=candidate;status=CamScmAudit(c,31,scan,STATUS_SUCCESS);if(!NT_SUCCESS(status))goto done;
+        if(!(candidate&1)&&!CamSmmuFault(CamRead(base,0x80058+i*4096))){bank=i;break;}
+    }
+    if(bank==MAXULONG){status=STATUS_NOT_SUPPORTED;goto done;}
+    ULONG context=0x80000+bank*4096,id2=CamRead(base,0x28);
+    if(!(id2&0x1000)){status=STATUS_NOT_SUPPORTED;goto done;}
+    const ULONG offsets[]={0x1000+bank*4,0x1800+bank*4,context+4,context+0x10,context+0x30,
+        context+0x20,context+0x24,context+0x28,context+0x2c,context+0x34,context+0x38,context+0x3c};
+    const ULONG values[]={0x1f300,1,1,0x38010|((id2>>4)&15),0x803020,
+        (ULONG)c->FrameTableAddress.QuadPart,(ULONG)(c->FrameTableAddress.QuadPart>>32),0,0,bank,0xff44,0};
+    c->Diag.Step=188;c->Diag.Region=CamSmmu;c->Diag.Slot=bank;
+    for(ULONG i=0;i<RTL_NUMBER_OF(offsets);i++) {
+        ULONGLONG configured[8]={bank,offsets[i],values[i]};
+        status=CamScmAudit(c,32,configured,STATUS_SUCCESS);if(!NT_SUCCESS(status))goto done;
+        c->Diag.Offset=offsets[i];c->Diag.Expected=values[i];status=CamSave(c,base,offsets[i],values[i]);
+        c->Diag.Observed=CamRead(base,offsets[i]);
+        ULONG configuredMask=offsets[i]==context+0x10?0x3801f:offsets[i]==context+0x30?0x00c0ff3f:MAXULONG;
+        if(!NT_SUCCESS(status)||((c->Diag.Observed^values[i])&configuredMask)){status=STATUS_IO_DEVICE_ERROR;goto done;}
+    }
+    c->FrameMapBank=bank;c->FrameMapped=TRUE;
+    c->Diag.Offset=context;c->Diag.Expected=0x67;
+    status=CamSave(c,base,context,0x67);c->Diag.Observed=CamRead(base,context);
+    ULONGLONG enabled[8]={bank,context,0x67,c->Diag.Observed};
+    NTSTATUS enabledAudit=CamScmAudit(c,35,enabled,status);if(!NT_SUCCESS(enabledAudit)){status=enabledAudit;goto done;}
+    if(!NT_SUCCESS(status)||!(c->Diag.Observed&1)){status=STATUS_IO_DEVICE_ERROR;goto done;}
+    CamWrite(base,context+0x610,0);CamWrite(base,context+0x7f0,0);
+    status=CamWait(base,context+0x7f4,1,0,10000);if(!NT_SUCCESS(status))goto done;
+    if(CamRead(base,0x800+slot*4)!=0x80001c00||CamRead(base,0xc00+slot*4)!=original){status=STATUS_DEVICE_BUSY;goto done;}
+    c->FrameRoute[0]=slot;c->FrameRoute[1]=0x80001c00;c->FrameRoute[2]=original;c->FrameRoute[3]=bank;
+    c->FrameRouteOwned=TRUE;
+    CamWrite(base,0x800+slot*4,0);
+    if(CamRead(base,0x800+slot*4)){status=STATUS_IO_DEVICE_ERROR;goto done;}
+    CamWrite(base,0xc00+slot*4,bank);
+    if(CamRead(base,0xc00+slot*4)!=bank){status=STATUS_IO_DEVICE_ERROR;goto done;}
+    CamWrite(base,0x800+slot*4,0x80001c00);
+    if(CamRead(base,0x800+slot*4)!=0x80001c00){status=STATUS_IO_DEVICE_ERROR;goto done;}
+    ULONGLONG translation[8]={bank,context,CAM_FRAME_MAP_IOVA+4096,c->FrameAddress.QuadPart};
+    status=CamScmAudit(c,33,translation,STATUS_SUCCESS);if(!NT_SUCCESS(status))goto done;
+    CamWrite(base,context,0x27);
+    for(ULONG attempt=0;attempt<3;attempt++) {
+        c->TbuPending=TRUE;
+        status=CamTbuTranslateExpected(c->Base[CamHfTbu],0x1c00,CAM_FRAME_MAP_IOVA+4096,
+            MmGetPhysicalAddress(c->Frame).QuadPart,0x409,c->Trace.FrameTranslation[0]);
+        if(status!=STATUS_DEVICE_BUSY)c->TbuPending=FALSE;
+        ULONG fsr=CamRead(base,context+0x58);
+        if(CamSmmuFault(fsr)) {
+            CamWrite(base,context+0x58,fsr);KeMemoryBarrier();
+            if(fsr&0x40000000u)CamWrite(base,context+8,1);
+        }
+        if(NT_SUCCESS(status)||c->TbuPending)break;
+    }
+    CamWrite(base,context,0x67);
+    c->Trace.FrameMapPar=c->Trace.FrameTranslation[0][5];
+    translation[4]=c->Trace.FrameMapPar;status=CamScmAudit(c,34,translation,STATUS_SUCCESS);if(!NT_SUCCESS(status))goto done;
+    if(c->TbuPending){status=STATUS_DEVICE_BUSY;goto done;}
+    if((c->Trace.FrameMapPar&1)||
+       (c->Trace.FrameMapPar>>12)!=(ULONGLONG)MmGetPhysicalAddress(c->Frame).QuadPart) {
+        status=STATUS_DATA_ERROR;goto done;
+    }
+    c->FrameAddress.QuadPart=CAM_FRAME_MAP_IOVA+4096;c->Trace.FrameAddress=c->FrameAddress.QuadPart;
+    c->Trace.FrameMapBank=bank;c->Trace.FrameTableAddress=c->FrameTableAddress.QuadPart;
+    c->Trace.SmmuState[7]=bank;c->Trace.SmmuState[5]=0x1f300;c->Trace.SmmuState[6]=0x67;
+done:
+    c->Diag.Status=status;
+    NTSTATUS released=PlatformLockRelease(&guard);return NT_SUCCESS(status)?released:status;
+}
+
+static NTSTATUS FrameUnmap(CAM *c) {
+    if(!c->FrameMapped)return STATUS_SUCCESS;
+    if(c->DmaActive||c->RxActive||c->BusOn||c->ScmPending||c->CdmPending||c->TbuPending)return STATUS_DEVICE_BUSY;
+    PLATFORM_LOCK_GUARD guard={0};NTSTATUS status=PlatformLockAcquire(&guard,TRUE);
+    if(status!=STATUS_SUCCESS)return status;
+    if(c->FrameRouteOwned)status=CamFrameRouteRestore(c);
+    if(NT_SUCCESS(status)) {
+        PUCHAR base=c->Base[CamSmmu];ULONG context=0x80000+c->FrameMapBank*4096;
+        CamWrite(base,context,0);
+        if(CamRead(base,context)&1)status=STATUS_IO_DEVICE_ERROR;
+        else {
+            CamWrite(base,context+0x610,0);CamWrite(base,context+0x7f0,0);
+            status=CamWait(base,context+0x7f4,1,0,10000);
+        }
+    }
+    if(NT_SUCCESS(status)){c->FrameMapped=FALSE;c->FrameAddress=MmGetPhysicalAddress(c->Frame);}
+    NTSTATUS released=PlatformLockRelease(&guard);return NT_SUCCESS(status)?released:status;
+}
 
 NTSTATUS CamFrameRoutePrepare(CAM *c) {
     if(!c->Powered||!c->BusOn)return STATUS_DEVICE_NOT_READY;
@@ -26,31 +138,54 @@ NTSTATUS CamFrameRoutePrepare(CAM *c) {
     NTSTATUS released=PlatformLockRelease(&guard);return NT_SUCCESS(status)?released:status;
 }
 
+static NTSTATUS AllocatePdaf(CAM *c) {
+    if(!c->PdafEnabled||c->Pdaf)return STATUS_SUCCESS;
+    PHYSICAL_ADDRESS lowest={0},highest,boundary={0};highest.QuadPart=0xfffffffffULL;
+    c->PdafAllocation=MmAllocateContiguousMemorySpecifyCache(QCAM_PDAF_BYTES*4+8192,lowest,highest,boundary,MmCached);
+    if(!c->PdafAllocation)return STATUS_INSUFFICIENT_RESOURCES;
+    c->Pdaf=(PUCHAR)c->PdafAllocation+4096;c->PdafAddress=MmGetPhysicalAddress(c->Pdaf);
+    if(!c->PdafAddress.QuadPart||(c->PdafAddress.QuadPart&511)||
+       (ULONGLONG)c->PdafAddress.QuadPart+QCAM_PDAF_BYTES*4+255>0x1000000000ULL)return STATUS_DEVICE_CONFIGURATION_ERROR;
+    c->PdafLatest=ExAllocatePool2(POOL_FLAG_NON_PAGED,QCAM_PDAF_BYTES,'dPcQ');
+    if(!c->PdafLatest)return STATUS_INSUFFICIENT_RESOURCES;
+    for(ULONG i=0;i<RTL_NUMBER_OF(c->PdafMdl);i++) {
+        c->PdafMdl[i]=IoAllocateMdl((PUCHAR)c->Pdaf+i*QCAM_PDAF_BYTES+(i>=2?256:0),QCAM_PDAF_BYTES,FALSE,FALSE,NULL);
+        if(!c->PdafMdl[i])return STATUS_INSUFFICIENT_RESOURCES;
+        MmBuildMdlForNonPagedPool(c->PdafMdl[i]);
+    }
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS Allocate(CAM *c) {
-    if(c->Frame)return STATUS_SUCCESS;
+    if(c->Frame)return AllocatePdaf(c);
     NTSTATUS status;
     if(!c->DmaEnabler) {
         WDF_DMA_ENABLER_CONFIG config;
-        WDF_DMA_ENABLER_CONFIG_INIT(&config,WdfDmaProfileScatterGather64,QCAM_FRAME_BYTES);
-        config.AddressWidthOverride=32;
+        WDF_DMA_ENABLER_CONFIG_INIT(&config,WdfDmaProfileScatterGather64,QCAM_ARENA_BYTES);
+        config.AddressWidthOverride=36;
         status=WdfDmaEnablerCreate(c->Device,&config,WDF_NO_OBJECT_ATTRIBUTES,&c->DmaEnabler);
         if(!NT_SUCCESS(status))return status;
     }
-    PHYSICAL_ADDRESS lowest={0},highest,boundary={0};highest.QuadPart=MAXULONG;
-    c->Frame=MmAllocateContiguousMemorySpecifyCache(QCAM_FRAME_BYTES,lowest,highest,boundary,MmNonCached);
-    if(!c->Frame)return STATUS_INSUFFICIENT_RESOURCES;
+    PHYSICAL_ADDRESS lowest={0},highest,boundary={0};highest.QuadPart=0xfffffffffULL;
+    c->FrameAllocation=MmAllocateContiguousMemorySpecifyCache(QCAM_ARENA_BYTES,lowest,highest,boundary,MmCached);
+    if(!c->FrameAllocation)return STATUS_INSUFFICIENT_RESOURCES;
+    c->Frame=(PUCHAR)c->FrameAllocation+4096;
     c->FrameContiguous=TRUE;c->FrameAddress=MmGetPhysicalAddress(c->Frame);
-    c->FrameMdl=IoAllocateMdl(c->Frame,QCAM_FRAME_BYTES,FALSE,FALSE,NULL);
-    if(!c->FrameMdl)return STATUS_INSUFFICIENT_RESOURCES;
-    MmBuildMdlForNonPagedPool(c->FrameMdl);
-    if(!c->FrameAddress.QuadPart||(c->FrameAddress.QuadPart&255)||
-       (ULONGLONG)c->FrameAddress.QuadPart+QCAM_FRAME_BYTES-1>MAXULONG)return STATUS_DEVICE_CONFIGURATION_ERROR;
-    return STATUS_SUCCESS;
+    c->Trace.FrameCpuAddress=(ULONGLONG)c->Frame;c->Trace.FrameCpuPar=CamCpuTranslate(c->Frame);
+    for(ULONG i=0;i<RTL_NUMBER_OF(c->FrameMdl);i++) {
+        c->FrameMdl[i]=IoAllocateMdl((PUCHAR)c->Frame+i*QCAM_FRAME_BYTES+(i>=2?256:0),QCAM_FRAME_BYTES,FALSE,FALSE,NULL);
+        if(!c->FrameMdl[i])return STATUS_INSUFFICIENT_RESOURCES;
+        MmBuildMdlForNonPagedPool(c->FrameMdl[i]);
+    }
+    if(!c->FrameAddress.QuadPart||(c->FrameAddress.QuadPart&511)||
+       (ULONGLONG)c->FrameAddress.QuadPart+QCAM_FRAME_BYTES*4+255>0xfffffffffULL)return STATUS_DEVICE_CONFIGURATION_ERROR;
+    return AllocatePdaf(c);
 }
 
 static NTSTATUS Map(CAM *c) {
     PUCHAR b=c->Base[CamSmmu];ULONG id0=CamRead(b,0x20),id1=CamRead(b,0x24),id2=CamRead(b,0x28);
     c->Trace.Smmu[0]=id0;c->Trace.Smmu[1]=id1;c->Trace.Smmu[2]=id2;
+    for(ULONG i=0;i<4;i++)c->Trace.SmmuGlobalBefore[i]=CamRead(b,i?0x4c+i*4:0x48);
     RtlZeroMemory(c->Trace.SmmuState,sizeof(c->Trace.SmmuState));
     c->Trace.FrameAddress=c->FrameAddress.QuadPart;
     c->Trace.FramePhysicalAddress=MmGetPhysicalAddress(c->Frame).QuadPart;
@@ -84,18 +219,24 @@ static NTSTATUS Map(CAM *c) {
     ULONG cbar=CamRead(b,0x1000+bank*4),sctlr=CamRead(b,context+bank*4096);
     c->Trace.SmmuState[5]=cbar;c->Trace.SmmuState[6]=sctlr;c->Diag.Phase=5;
     c->Diag.Offset=context+bank*4096;c->Diag.Mask=1;c->Diag.Expected=0;c->Diag.Observed=sctlr;c->Diag.Count=cbar;
-    return CamDmaIdentity(control,cbar,sctlr)?STATUS_SUCCESS:STATUS_NOT_SUPPORTED;
+    if(!CamDmaIdentity(control,cbar,sctlr))return STATUS_NOT_SUPPORTED;
+    return c->PipelineLimit==12?FrameMap(c,slot,control):STATUS_SUCCESS;
 }
 
 VOID CamDmaFree(CAM *c) {
-    if(c->DmaActive||c->ScmPending||c->CdmPending||c->TbuPending||c->FrameRouteOwned)return;
+    if(c->DmaActive||c->ScmPending||c->CdmPending||c->TbuPending||c->FrameRouteOwned||c->FrameMapped)return;
+    for(ULONG i=0;i<RTL_NUMBER_OF(c->PdafMdl);i++)if(c->PdafMdl[i]){IoFreeMdl(c->PdafMdl[i]);c->PdafMdl[i]=NULL;}
+    if(c->PdafAllocation){MmFreeContiguousMemory(c->PdafAllocation);c->PdafAllocation=NULL;}
+    if(c->PdafLatest){ExFreePoolWithTag(c->PdafLatest,'dPcQ');c->PdafLatest=NULL;}
+    c->Pdaf=NULL;c->PdafAddress.QuadPart=0;
+    if(c->FrameTables){MmFreeContiguousMemory(c->FrameTables);c->FrameTables=NULL;}
     if(c->CommandMdl){IoFreeMdl(c->CommandMdl);c->CommandMdl=NULL;}
     if(c->CommandBuffer){WdfObjectDelete(c->CommandBuffer);c->CommandBuffer=NULL;}
     if(c->CommandContiguous&&c->Command){MmFreeContiguousMemory(c->Command);c->CommandContiguous=FALSE;}
     c->Command=NULL;c->CommandAddress.QuadPart=0;
-    if(c->FrameMdl){IoFreeMdl(c->FrameMdl);c->FrameMdl=NULL;}
+    for(ULONG i=0;i<RTL_NUMBER_OF(c->FrameMdl);i++)if(c->FrameMdl[i]){IoFreeMdl(c->FrameMdl[i]);c->FrameMdl[i]=NULL;}
     if(c->FrameBuffer){WdfObjectDelete(c->FrameBuffer);c->FrameBuffer=NULL;}
-    if(c->FrameContiguous&&c->Frame){MmFreeContiguousMemory(c->Frame);c->FrameContiguous=FALSE;}
+    if(c->FrameContiguous&&c->FrameAllocation){MmFreeContiguousMemory(c->FrameAllocation);c->FrameContiguous=FALSE;c->FrameAllocation=NULL;}
     c->Frame=NULL;
     c->FrameAddress.QuadPart=0;
 }
@@ -133,7 +274,7 @@ VOID CamSnapshot(CAM *c) {
     if(!c->Powered)return;
     PUCHAR s=c->Base[CamCsid],t=c->Base[CamTfe];
     c->Info.CsidIrq|=CamRead(s,0x84);c->Info.CsidRxIrq|=CamRead(s,0xb4);
-    c->Info.TfeIrq|=CamRead(t,0x88);c->Info.TfeBusIrq|=CamRead(t,0x828);
+    c->Info.TfeIrq|=CamRead(t,0x88);c->Info.TfeBusIrq|=CamRead(s,0xa4);
     c->Info.Packets=CamRead(s,0x440);c->Info.MeasuredSize=CamRead(s,0xe94);
 }
 
@@ -170,11 +311,12 @@ static NTSTATUS RawContext(CAM *c,ULONG values[4]) {
 NTSTATUS CamCaptureStart(CAM *c,const QCAM_CAPTURE_OPTIONS *o) {
     if(c->DmaActive||c->RxActive)return STATUS_DEVICE_BUSY;
     if(c->PipelineLimit>=6&&c->PipelineLimit<=12&&!c->ReceiverVerified)return STATUS_DEVICE_NOT_READY;
+    c->PdafEnabled=!c->PipelineLimit;
     NTSTATUS status=Allocate(c);
     if(!NT_SUCCESS(status)){CamDmaFree(c);return status;}
     ULONG exposure=c->Info.Exposure,gain=c->Info.Gain;
     status=CamPowerOn(c);if(!NT_SUCCESS(status))return status;
-    if(exposure) {status=CamSensorExposure(c,exposure,gain);if(!NT_SUCCESS(status))return status;}
+    if(exposure) {status=CamSensorExposure(c,min(exposure,c->Info.FrameLength-48),gain);if(!NT_SUCCESS(status))return status;}
     PUCHAR s=c->Base[CamCsid],t=c->Base[CamTfe];
     c->Info.CsidVersion=CamRead(s,0);c->Info.TfeVersion=CamRead(t,0);
     c->Diag.Step=140;c->Diag.Region=CamCsid;c->Diag.Offset=0;c->Diag.Mask=MAXULONG;
@@ -183,7 +325,7 @@ NTSTATUS CamCaptureStart(CAM *c,const QCAM_CAPTURE_OPTIONS *o) {
     c->Diag.Region=CamTfe;c->Diag.Expected=0x10000000;c->Diag.Observed=c->Info.TfeVersion;
     if(c->Info.TfeVersion!=0x10000000)return STATUS_REVISION_MISMATCH;
     for(ULONG wm=0;wm<28;wm++)if(CamRead(t,0xd00+wm*0x100)&1)return STATUS_DEVICE_BUSY;
-    if(CamRead(s,0xe00)&0x80000000u)return STATUS_DEVICE_BUSY;
+    for(ULONG i=0;i<4;i++)if(CamRead(s,0xe00+i*0x200)&0x80000000u)return STATUS_DEVICE_BUSY;
     if(c->PipelineLimit==5) {
         status=CamCrmOff(c);if(!NT_SUCCESS(status))return status;
         c->Configured=FALSE;status=CamGdscCycle(c);
@@ -207,7 +349,7 @@ NTSTATUS CamCaptureStart(CAM *c,const QCAM_CAPTURE_OPTIONS *o) {
         if(!NT_SUCCESS(status))return status;
     }
     status=CamBusOn(c);if(!NT_SUCCESS(status))return status;
-    if(!c->PipelineLimit||(c->PipelineLimit>=6&&c->PipelineLimit<=12)) {
+    if(!c->PipelineLimit||(c->PipelineLimit>=6&&c->PipelineLimit<=13)) {
         status=CamEnsureStaticQos(c);if(!NT_SUCCESS(status))return status;
     }
     status=ResetCsid(c);if(!NT_SUCCESS(status))return status;
@@ -215,12 +357,22 @@ NTSTATUS CamCaptureStart(CAM *c,const QCAM_CAPTURE_OPTIONS *o) {
     if(c->PipelineLimit==11){status=CamFrameRoutePrepare(c);if(!NT_SUCCESS(status))return status;}
     if(c->PipelineLimit==1||c->PipelineLimit==4||c->PipelineLimit==5)return STATUS_SUCCESS;
     c->Info.Flags&=~QCAM_FRAME_VALID;c->Info.CsidIrq=0;c->Info.CsidRxIrq=0;c->Info.TfeIrq=0;c->Info.TfeBusIrq=0;
-    RtlZeroMemory(c->Frame,QCAM_FRAME_BYTES);KeFlushIoBuffers(c->FrameMdl,TRUE,TRUE);
+    if(c->PipelineLimit>=6&&c->PipelineLimit<=12)RtlFillMemory(c->FrameAllocation,QCAM_ARENA_BYTES,0xa5);
+    else RtlZeroMemory(c->FrameAllocation,QCAM_ARENA_BYTES);
+    for(ULONG i=0;i<RTL_NUMBER_OF(c->FrameMdl);i++)KeFlushIoBuffers(c->FrameMdl[i],FALSE,TRUE);KeMemoryBarrier();
+    RtlZeroMemory(&c->PdafInfo,sizeof(c->PdafInfo));c->PdafSlot=0;c->PdafStamp=0;c->PdafPending=FALSE;
+    if(c->PdafEnabled) {
+        RtlZeroMemory(c->PdafAllocation,QCAM_PDAF_BYTES*4+8192);
+        for(ULONG i=0;i<RTL_NUMBER_OF(c->PdafMdl);i++)KeFlushIoBuffers(c->PdafMdl[i],FALSE,TRUE);
+        KeMemoryBarrier();
+    }
     status=Phy(c,o);if(!NT_SUCCESS(status))return status;
     if(c->PipelineLimit==2)return STATUS_SUCCESS;
     BOOLEAN diagnostic=c->PipelineLimit>=6&&c->PipelineLimit<=12;
     BOOLEAN frameMode=c->PipelineLimit>=7&&c->PipelineLimit<=11;
-    BOOLEAN packed=c->PipelineLimit==12;
+    BOOLEAN packed=c->PipelineLimit==12,dual=!diagnostic||packed;
+    BOOLEAN pdaf=c->PipelineLimit==13;
+    ULONG height=pdaf?QCAM_PDAF_HEIGHT:QCAM_HEIGHT;
     if(c->PipelineLimit!=3&&!diagnostic&&!(CamRead(c->Base[CamCpas],0xf0)&1)) {
         c->Diag.Step=146;c->Diag.Region=CamCpas;c->Diag.Offset=0xf0;
         c->Diag.Mask=1;c->Diag.Expected=1;c->Diag.Observed=CamRead(c->Base[CamCpas],0xf0);
@@ -229,7 +381,7 @@ NTSTATUS CamCaptureStart(CAM *c,const QCAM_CAPTURE_OPTIONS *o) {
         return STATUS_DEVICE_NOT_READY;
     }
     if(diagnostic&&!CamDiagnosticDmaReady(c))return STATUS_DEVICE_NOT_READY;
-    if(frameMode&&(c->Trace.Csid[14]&0xffffff)!=((0x2bu<<16)|QCAM_STRIDE))return STATUS_DEVICE_CONFIGURATION_ERROR;
+    if(frameMode&&(c->Trace.Csid[14]&0xffff)!=QCAM_STRIDE)return STATUS_DEVICE_CONFIGURATION_ERROR;
     if(diagnostic) {
         c->Trace.TfeTopCount=0;RtlZeroMemory(c->Trace.TfeTop,sizeof(c->Trace.TfeTop));
         c->Trace.NocFillReads=0;RtlZeroMemory(c->Trace.NocFillPeak,sizeof(c->Trace.NocFillPeak));
@@ -249,7 +401,7 @@ NTSTATUS CamCaptureStart(CAM *c,const QCAM_CAPTURE_OPTIONS *o) {
     CamWrite(s,0x88,0);CamWrite(s,0x98,0);CamWrite(s,0xa8,0);CamWrite(s,0xb8,0);CamWrite(s,0xc8,0);CamWrite(s,0x118,0);
     CamWrite(s,0x8c,MAXULONG);CamWrite(s,0x9c,MAXULONG);CamWrite(s,0xac,MAXULONG);
     CamWrite(s,0xbc,MAXULONG);CamWrite(s,0xcc,MAXULONG);CamWrite(s,0x11c,MAXULONG);CamWrite(s,0x14,1);
-    CamWrite(s,0x400,0x01602102);CamWrite(s,0x404,0x41);
+    CamWrite(s,0x400,0x01602102);CamWrite(s,0x404,0x2445);
     CamWrite(s,0x408,0x02b002b5);
     if(c->PipelineLimit==3) {
         CamWrite(s,0xe04,0);CamWrite(s,0xe00,CamRead(s,0xe00)&~0x80000000u);
@@ -258,19 +410,19 @@ NTSTATUS CamCaptureStart(CAM *c,const QCAM_CAPTURE_OPTIONS *o) {
         if(NT_SUCCESS(status))c->Info.Stage=9;
         return status;
     }
-    CamWrite(s,0xe0c,0);CamWrite(s,0xe10,frameMode||packed?0x8011:0x1811);CamWrite(s,0xe14,0);
+    CamWrite(s,0xe0c,0);CamWrite(s,0xe10,frameMode||dual?0x8011:0x1811);CamWrite(s,0xe14,0);
     CamWrite(s,0xe48,0);CamWrite(s,0xe4c,1);CamWrite(s,0xe50,1);CamWrite(s,0xe54,0);
-    CamWrite(s,0xe58,(QCAM_WIDTH-1)<<16);CamWrite(s,0xe5c,(QCAM_HEIGHT-1)<<16);
+    CamWrite(s,0xe58,(QCAM_WIDTH-1)<<16);CamWrite(s,0xe5c,(height-1)<<16);
     CamWrite(s,0xe60,0);CamWrite(s,0xe64,0);CamWrite(s,0xe68,0);CamWrite(s,0xe6c,0);
-    CamWrite(s,0xe88,3);CamWrite(s,0xe8c,(QCAM_HEIGHT<<16)|QCAM_WIDTH);
-    CamWrite(s,0xe00,0x802b2260);
+    CamWrite(s,0xe88,3);CamWrite(s,0xe8c,(height<<16)|QCAM_WIDTH);
+    CamWrite(s,0xe00,pdaf?0x81b02260:0x802b2260);
     CamWrite(t,0x80,0);CamWrite(t,0x818,0);CamWrite(t,0x81c,0);
     CamWrite(t,0x84,MAXULONG);CamWrite(t,0x7c,1);CamWrite(t,0x820,MAXULONG);CamWrite(t,0x824,MAXULONG);CamWrite(t,0x830,1);
-    CamWrite(t,0x818,0x10000);
-    CamWrite(t,0x808,0x7ffffff);CamWrite(t,0x924,0);CamWrite(t,0x858,0x1026);
-    CamWrite(t,0x240c,frameMode?0xffff:(QCAM_HEIGHT<<16)|(packed?QCAM_STRIDE/16:QCAM_WIDTH));
+    CamWrite(s,0xa8,0x10000);
+    CamWrite(t,0x808,0x7ffffff);CamWrite(t,0x924,0);CamWrite(t,0x858,0x1036);
+    CamWrite(t,0x240c,frameMode?0xffff:(height<<16)|(dual?QCAM_STRIDE/16:QCAM_WIDTH));
     CamWrite(t,0x2410,0);CamWrite(t,0x2414,frameMode?0xffff:QCAM_STRIDE);
-    CamWrite(t,0x2418,frameMode||packed?0:12);CamWrite(t,0x2408,diagnostic?0:CamDmaImageAddress(QCAM_FRAME_BYTES));CamWrite(t,0x2428,0);
+    CamWrite(t,0x2418,frameMode||dual?0:12);CamWrite(t,0x2408,0);CamWrite(t,0x2428,0);
     CamWrite(t,0x247c,11<<8);
     CamWrite(t,0x2430,0);CamWrite(t,0x2434,1);CamWrite(t,0x2438,0);CamWrite(t,0x243c,1);
     CamWrite(t,0x2460,!frameMode||c->PipelineLimit>=9?1:0);
@@ -283,6 +435,32 @@ NTSTATUS CamCaptureStart(CAM *c,const QCAM_CAPTURE_OPTIONS *o) {
         CamWrite(t,0x2400,0x10001);
     }
     CamWrite(t,0x2404,CamDmaImageAddress(c->FrameAddress.QuadPart));CamWrite(t,0x2400,frameMode?0x10001:1);
+    if(dual) {
+        const ULONG csid[]={0xe0c,0xe10,0xe14,0xe48,0xe4c,0xe50,0xe54,0xe58,0xe5c,0xe60,0xe64,0xe68,0xe6c,0xe88,0xe8c,0xe00};
+        const ULONG writer[]={0x2408,0x240c,0x2410,0x2414,0x2418,0x2428,0x2430,0x2434,0x2438,0x243c,0x2460,0x2464,0x2468,0x2470,0x2478,0x247c};
+        for(ULONG i=0;i<RTL_NUMBER_OF(csid);i++)CamWrite(s,csid[i]+0x200,CamRead(s,csid[i]));
+        CamWrite(s,0x1010,CamRead(s,0x1010)&~1u);
+        for(ULONG i=0;i<RTL_NUMBER_OF(writer);i++)CamWrite(t,writer[i]+0x100,CamRead(t,writer[i]));
+        CamWrite(t,0x2504,CamDmaImageAddress(c->FrameAddress.QuadPart+QCAM_FRAME_BYTES*2+256));
+        CamWrite(t,0x2500,1);CamWrite(s,0xa8,0x30000);
+        CamWrite(s,0x128,0);CamWrite(s,0x12c,MAXULONG);CamWrite(s,0x14,1);
+    }
+    if(c->PdafEnabled) {
+        const ULONG csid[]={0x0c,0x10,0x14,0x48,0x4c,0x50,0x54,0x58,0x5c,0x60,0x64,0x68,0x6c,0x88,0x8c};
+        const ULONG writer[]={0x08,0x0c,0x10,0x14,0x18,0x28,0x30,0x34,0x38,0x3c,0x60,0x64,0x68,0x70,0x78,0x7c};
+        for(ULONG n=0;n<2;n++) {
+            ULONG path=0x1200+n*0x200,wm=0x2600+n*0x100;
+            for(ULONG i=0;i<RTL_NUMBER_OF(csid);i++)if(csid[i]!=0x14||!n)CamWrite(s,path+csid[i],CamRead(s,0x1000+csid[i]));
+            CamWrite(s,path+0x5c,(QCAM_PDAF_HEIGHT-1)<<16);
+            CamWrite(s,path+0x8c,(QCAM_PDAF_HEIGHT<<16)|QCAM_WIDTH);CamWrite(s,path,0x81b02260);
+            for(ULONG i=0;i<RTL_NUMBER_OF(writer);i++)CamWrite(t,wm+writer[i],CamRead(t,0x2500+writer[i]));
+            CamWrite(t,wm+0x0c,(QCAM_PDAF_HEIGHT<<16)|(QCAM_STRIDE/16));
+            CamWrite(t,wm+4,CamDmaImageAddress(c->PdafAddress.QuadPart+(n?QCAM_PDAF_BYTES*2+256:0)));
+            CamWrite(t,wm,1);
+            CamWrite(s,0x138+n*0x10,0);CamWrite(s,0x13c+n*0x10,MAXULONG);
+        }
+        CamWrite(s,0xa8,0xf0000);CamWrite(s,0x14,1);
+    }
     if(c->PipelineLimit>=10&&c->PipelineLimit<=11)for(ULONG i=0;i<4;i++)c->Trace.TfePrime[0][i]=CamRead(t,0x2490+i*4);
     c->DmaActive=TRUE;
     ULONGLONG captureState[8]={c->PipelineLimit,c->FrameAddress.QuadPart,
@@ -290,7 +468,9 @@ NTSTATUS CamCaptureStart(CAM *c,const QCAM_CAPTURE_OPTIONS *o) {
         CamRead(c->Base[CamCpas],0xf8),c->StaticQosReady};
     status=CamScmAudit(c,20,captureState,STATUS_SUCCESS);if(!NT_SUCCESS(status))return status;
     CamWrite(s,0x28,0x11);CamWrite(s,0xe04,1);
-    CamCsidCommit(s,0x100);
+    if(dual)CamWrite(s,0x1004,1);
+    if(c->PdafEnabled){CamWrite(s,0x1204,1);CamWrite(s,0x1404,1);}
+    CamCsidCommit(s,c->PdafEnabled?0xf00:dual?0x300:0x100);
     if(c->PipelineLimit>=10&&c->PipelineLimit<=11) {
         CamDelay(1);
         for(ULONG i=0;i<4;i++)c->Trace.TfePrime[1][i]=CamRead(t,0x2490+i*4);
@@ -304,10 +484,73 @@ NTSTATUS CamCaptureStart(CAM *c,const QCAM_CAPTURE_OPTIONS *o) {
     return status;
 }
 
+static NTSTATUS PdafReady(CAM *c) {
+    if(!c->PdafEnabled||c->PdafPending)return STATUS_SUCCESS;
+    PUCHAR s=c->Base[CamCsid],t=c->Base[CamTfe];
+    if((CamRead(s,0x134)|CamRead(s,0x144))&CAM_RDI_FATAL_IRQ)return STATUS_DATA_ERROR;
+    ULONGLONG sof=CamRead64(s,0x12a0),eof=CamRead64(s,0x12b0);
+    if(!CamRdiPairReady(c->Info.TfeBusIrq,0xc0000,sof,CamRead64(s,0x14a0),eof,CamRead64(s,0x14b0),c->PdafStamp))return STATUS_SUCCESS;
+    ULONG address=CamRead(t,0x2690),slot;
+    if(address==CamDmaImageAddress(c->PdafAddress.QuadPart))slot=0;
+    else if(address==CamDmaImageAddress(c->PdafAddress.QuadPart+QCAM_PDAF_BYTES))slot=1;
+    else return STATUS_DATA_ERROR;
+    if(CamRead(t,0x2790)!=CamDmaImageAddress(c->PdafAddress.QuadPart+(slot+2)*QCAM_PDAF_BYTES+256))return STATUS_DATA_ERROR;
+    c->PdafCompletedId=CamRead(s,0x1304);c->PdafCompletedSlot=slot;c->PdafCompletedSof=sof;c->PdafCompletedEof=eof;c->PdafStamp=eof;
+    CamWrite(s,0x13c,8);CamWrite(s,0x14c,8);CamWrite(s,0xac,0xc0000);CamWrite(s,0x14,1);c->Info.TfeBusIrq&=~0xc0000u;
+    c->PdafSlot=slot^1;
+    CamWrite(t,0x2604,CamDmaImageAddress(c->PdafAddress.QuadPart+c->PdafSlot*QCAM_PDAF_BYTES));
+    CamWrite(t,0x2704,CamDmaImageAddress(c->PdafAddress.QuadPart+(c->PdafSlot+2)*QCAM_PDAF_BYTES+256));
+    CamCsidCommit(s,0xc00);c->PdafPending=TRUE;return STATUS_SUCCESS;
+}
+
+NTSTATUS CamPdafFrame(CAM *c) {
+    NTSTATUS status=PdafReady(c);if(!NT_SUCCESS(status)||!c->PdafPending)return status;
+    PUCHAR source=(PUCHAR)c->Pdaf+c->PdafCompletedSlot*QCAM_PDAF_BYTES;
+    c->PdafSource=source;c->PdafCopied=FALSE;c->PdafFocusCopied=FALSE;
+    c->PdafInfo.Size=sizeof(c->PdafInfo);c->PdafInfo.Abi=QCAM_ABI;
+    c->PdafInfo.Width=QCAM_WIDTH;c->PdafInfo.Height=QCAM_PDAF_HEIGHT;c->PdafInfo.Stride=QCAM_STRIDE;
+    c->PdafInfo.FrameBytes=QCAM_PDAF_BYTES;c->PdafInfo.Sequence++;c->PdafInfo.FrameId=c->PdafCompletedId;
+    c->PdafInfo.Sof=c->PdafCompletedSof;c->PdafInfo.Eof=c->PdafCompletedEof;c->PdafPending=FALSE;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS CamPdafPrepare(CAM *c) {
+    if(!c->PdafSource||!c->PdafInfo.FrameBytes)return STATUS_DEVICE_NOT_READY;
+    if(c->PdafCopied||c->PdafFocusCopied)return STATUS_SUCCESS;
+    if(c->FocusRoi.Flags) {
+        PUCHAR source=c->PdafSource+c->FocusRoiY*QCAM_STRIDE;
+        CamDmaInvalidate(source,QCAM_STRIDE,QCAM_STRIDE*8,20,0);
+        CamDmaInvalidate(source+QCAM_PDAF_BYTES*2+256,QCAM_STRIDE,QCAM_STRIDE*8,20,256);
+        CamPdafGatherRows(c->PdafSource,c->PdafLatest,c->FocusRoiY);c->PdafFocusCopied=TRUE;return STATUS_SUCCESS;
+    }
+    ULONG begin=c->FocusWindowValid?c->FocusWindow/3:0,end=c->FocusWindowValid?begin+1:3;
+    for(ULONG group=begin;group<end;group++) {
+        PUCHAR source=c->PdafSource+(112+group*192)*QCAM_STRIDE;
+        CamDmaInvalidate(source,QCAM_STRIDE,QCAM_STRIDE*8,20,0);
+        CamDmaInvalidate(source+QCAM_PDAF_BYTES*2+256,QCAM_STRIDE,QCAM_STRIDE*8,20,256);
+        CamPdafGather(c->PdafSource,c->PdafLatest,group);
+    }
+    c->PdafFocusCopied=TRUE;return STATUS_SUCCESS;
+}
+
+NTSTATUS CamPdafCopy(CAM *c) {
+    if(!c->PdafSource||!c->PdafInfo.FrameBytes)return STATUS_DEVICE_NOT_READY;
+    if(c->PdafCopied)return STATUS_SUCCESS;
+    CamDmaInvalidate(c->PdafSource,QCAM_PDAF_BYTES,QCAM_PDAF_BYTES,1,0);
+    CamDmaInvalidate(c->PdafSource+QCAM_PDAF_BYTES*2+256,QCAM_PDAF_BYTES,QCAM_PDAF_BYTES,1,256);
+    PUCHAR destination=c->PdafLatest;
+    for(ULONG x=0;x<QCAM_PDAF_BYTES;x+=512) {
+        RtlCopyMemory(destination+x,c->PdafSource+x,256);
+        RtlCopyMemory(destination+x+256,c->PdafSource+QCAM_PDAF_BYTES*2+512+x,256);
+    }
+    c->PdafCopied=TRUE;return STATUS_SUCCESS;
+}
+
 BOOLEAN CamCapturePoll(CAM *c,NTSTATUS *status) {
     CamSnapshot(c);
     if(c->PipelineLimit>=6&&c->PipelineLimit<=12) {
         RawTbu(c,c->Trace.RawTbuAfter);
+        for(ULONG i=0;i<4;i++)c->Trace.SmmuGlobalAfter[i]=CamRead(c->Base[CamSmmu],i?0x4c+i*4:0x48);
         for(ULONG n=0;n<2;n++)for(ULONG i=0;i<2;i++)c->Trace.RawOutstandingSeen[n][i]|=c->Trace.RawTbuAfter[n][i+2];
         c->Trace.NocFillReads++;
         for(ULONG i=0;i<RTL_NUMBER_OF(CamNocFillRegs);i++) {
@@ -325,9 +568,29 @@ BOOLEAN CamCapturePoll(CAM *c,NTSTATUS *status) {
         RtlCopyMemory(c->Diag.Resource,"tfe-wm",7);
         *status=STATUS_DATA_ERROR;return TRUE;
     }
+    NTSTATUS pdafStatus=PdafReady(c);if(!NT_SUCCESS(pdafStatus)){*status=pdafStatus;return TRUE;}
     ULONG rdiIrq=CamRead(c->Base[CamCsid],0x114);
     if(rdiIrq&CAM_RDI_FATAL_IRQ){*status=STATUS_DATA_ERROR;return TRUE;}
     if(CamRdiFrameComplete(c->Info.Packets,rdiIrq,c->Info.TfeBusIrq)) {
+        if(!c->PipelineLimit||c->PipelineLimit>=12) {
+            if(CamRead(c->Base[CamCsid],0x124)&CAM_RDI_FATAL_IRQ){*status=STATUS_DATA_ERROR;return TRUE;}
+            if((c->Info.TfeBusIrq&0x30000)!=0x30000||CamRead64(c->Base[CamCsid],0x10b0)!=CamRead64(c->Base[CamCsid],0xeb0))return FALSE;
+        }
+        ULONGLONG eof=CamRead64(c->Base[CamCsid],0xeb0),sof=CamRead64(c->Base[CamCsid],0xea0);
+        ULONG stamp=(ULONG)eof;
+        if(c->StreamFile&&stamp==c->FrameStamp)return FALSE;
+        if(c->StreamFile&&sof>eof)return FALSE;
+        if(c->StreamFile) {
+            ULONG dropped=0;
+            if(c->FrameTime.Sequence&&sof>c->FrameTime.Sof) {
+                ULONGLONG elapsed=sof-c->FrameTime.Sof,period=QCAM_SENSOR_CLOCK/60;
+                if(elapsed>period*3/2)dropped=(ULONG)((elapsed+period/2)/period-1);
+            }
+            c->FrameTime.Size=sizeof(c->FrameTime);c->FrameTime.Abi=QCAM_ABI;c->FrameTime.ClockHz=QCAM_SENSOR_CLOCK;
+            c->FrameTime.Sequence++;c->FrameTime.Dropped+=dropped;c->FrameTime.Sof=sof;c->FrameTime.Eof=eof;
+            ULONGLONG qpc;c->FrameTime.Captured=KeQueryInterruptTimePrecise(&qpc);
+        }
+        c->FrameStamp=stamp;
         *status=STATUS_SUCCESS;
         return TRUE;
     }
@@ -361,17 +624,33 @@ NTSTATUS CamCaptureStop(CAM *c) {
         CamDelay(100000);
         PUCHAR s=c->Base[CamCsid],t=c->Base[CamTfe];
         CamWrite(s,0xe04,0);CamWrite(s,0xe00,CamRead(s,0xe00)&~0x80000000u);
+        if(!c->PipelineLimit||c->PipelineLimit>=12){CamWrite(s,0x1004,0);CamWrite(s,0x1000,CamRead(s,0x1000)&~0x80000000u);}
+        if(c->PdafEnabled)for(ULONG i=0;i<2;i++) {
+            ULONG path=0x1200+i*0x200;CamWrite(s,path+4,0);CamWrite(s,path,CamRead(s,path)&~0x80000000u);
+        }
         if(c->DmaActive) {
+            if(c->PdafEnabled){CamWrite(t,0x2600,0);CamWrite(t,0x2700,0);}
             CamWrite(t,0x2400,0);
+            if(!c->PipelineLimit||c->PipelineLimit>=12)CamWrite(t,0x2500,0);
             NTSTATUS disabled=CamWait(t,0x2400,1,0,50000);
+            if(NT_SUCCESS(disabled)&&(!c->PipelineLimit||c->PipelineLimit>=12))disabled=CamWait(t,0x2500,1,0,50000);
+            for(ULONG i=0;i<2&&c->PdafEnabled&&NT_SUCCESS(disabled);i++)disabled=CamWait(t,0x2600+i*0x100,1,0,50000);
             if(!NT_SUCCESS(disabled)){c->Faulted=TRUE;return disabled;}
         }
         CamWrite(c->Base[CamPhy],0x1014,0);c->PhyOn=FALSE;
         NTSTATUS idle=CamWait(s,0xe74,1,1,50000);
+        if(NT_SUCCESS(idle)&&(!c->PipelineLimit||c->PipelineLimit>=12))idle=CamWait(s,0x1074,1,1,50000);
+        for(ULONG i=0;i<2&&c->PdafEnabled&&NT_SUCCESS(idle);i++)idle=CamWait(s,0x1274+i*0x200,1,1,50000);
         if(!NT_SUCCESS(idle))idle=ResetCsid(c);
         if(!NT_SUCCESS(idle)){c->Faulted=TRUE;return idle;}
         idle=CamBusOff(c);if(!NT_SUCCESS(idle))return idle;
-        KeFlushIoBuffers(c->FrameMdl,TRUE,TRUE);
+        for(ULONG i=0;i<RTL_NUMBER_OF(c->FrameMdl);i++)KeFlushIoBuffers(c->FrameMdl[i],TRUE,TRUE);KeMemoryBarrier();
+        for(ULONG i=0;i<RTL_NUMBER_OF(c->PdafMdl);i++)if(c->PdafMdl[i])KeFlushIoBuffers(c->PdafMdl[i],TRUE,TRUE);KeMemoryBarrier();
+        RtlZeroMemory(c->Trace.FrameWrittenBlocks,sizeof(c->Trace.FrameWrittenBlocks));
+        for(ULONG offset=0;offset<QCAM_FRAME_BYTES;offset+=256) {
+            ULONG blockValue=*(volatile ULONG *)((PUCHAR)c->Frame+offset);
+            if(blockValue!=0xa5a5a5a5)c->Trace.FrameWrittenBlocks[((c->FrameAddress.QuadPart+offset)>>8)&1]++;
+        }
         RtlCopyMemory(c->Trace.FrameWords,c->Frame,sizeof(c->Trace.FrameWords));
         c->Trace.FrameSampleCount=0;c->Trace.FrameNonzeroSamples=0;
         for(ULONG offset=0;offset+sizeof(ULONG)<=QCAM_FRAME_BYTES;offset+=4096) {
@@ -387,11 +666,12 @@ NTSTATUS CamCaptureStop(CAM *c) {
         for(ULONG i=0;i<RTL_NUMBER_OF(CamNocFillRegs);i++)c->Trace.NocFillStopped[i]=CamRead(c->Base[CamNoc],CamNocFillRegs[i]);
         if(c->DmaActive&&!NT_SUCCESS(c->Trace.RawDrainStatus)){c->Faulted=TRUE;return c->Trace.RawDrainStatus;}
         c->DmaActive=FALSE;c->RxActive=FALSE;c->Configured=FALSE;
-        KeFlushIoBuffers(c->FrameMdl,TRUE,TRUE);
+        KeMemoryBarrier();
         RtlCopyMemory(c->Trace.FrameWords,c->Frame,sizeof(c->Trace.FrameWords));
     }
     if(c->PhyOn){CamWrite(c->Base[CamPhy],0x1014,0);c->PhyOn=FALSE;}
     NTSTATUS bus=CamBusOff(c);if(!NT_SUCCESS(bus))return bus;
+    NTSTATUS unmapped=FrameUnmap(c);if(!NT_SUCCESS(unmapped))return unmapped;
     if(c->FrameRouteOwned) {
         PLATFORM_LOCK_GUARD guard={0};NTSTATUS locked=PlatformLockAcquire(&guard,TRUE);
         if(locked!=STATUS_SUCCESS)return locked;
@@ -399,5 +679,6 @@ NTSTATUS CamCaptureStop(CAM *c) {
         NTSTATUS released=PlatformLockRelease(&guard);if(!NT_SUCCESS(restored))return restored;
         if(!NT_SUCCESS(released))return released;
     }
+    if(NT_SUCCESS(status)){c->StreamFile=NULL;c->PdafEnabled=FALSE;c->PdafPending=FALSE;c->PdafInfo.FrameBytes=0;c->PdafSource=NULL;}
     return status;
 }

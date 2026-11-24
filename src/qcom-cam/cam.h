@@ -2,6 +2,8 @@
 #include <ntddk.h>
 #include <wdf.h>
 #include "uapi.h"
+#include "pdaf.h"
+#include "video/raw-row.h"
 
 enum { CamGcc,CamCc,CamMclk,CamCci,CamPhy,CamCsid,CamTfe,CamCpas,CamNoc,CamSmmu,CamTlmm,CamSpmi,CamOwners,CamObserve,CamChannels,CamRsc,CamDb,CamCrm,CamCdm,CamHfTbu,CamSfTbu,CamMnoc,CamRpmh,CamRegionCount };
 typedef struct { ULONG Address,Value,Delay; } CAM_REG;
@@ -32,6 +34,45 @@ typedef struct {
     BOOLEAN ScmWaitqKnown,ScmFastWaitq;
     BOOLEAN ScmIoKnown,ScmIoAvailable,ScmNocReadable;
     BOOLEAN ReceiverVerified;
+    WDFFILEOBJECT StreamFile;
+    BOOLEAN LensReady;
+    ULONG FocusPosition,FocusTarget,FocusFlags,FocusWait;
+    LONG FocusStatus;
+    CAM_PDAF_CAL FocusCalibration;
+    CAM_PDAF_RESULT FocusResult;
+    LONG FocusWorkspace[2520];
+    USHORT VideoWorkspace[6144];
+    USHORT VideoWorkerWorkspace[6144];
+    UCHAR VideoColors[3][1024];
+    ULONG VideoGains[3];
+    ULONG VideoZoom,VideoRows[768];
+    CAM_RAW_BLOCK VideoBlocks[128];
+    HANDLE VideoThread;
+    KEVENT VideoReady,VideoDone;
+    BOOLEAN VideoStopping;
+    const UCHAR *VideoSource;
+    PUCHAR VideoOutput;
+    ULONG FocusSequence,FocusStable,FocusMisses,FocusSamples;
+    BOOLEAN FocusComplete,FocusWindowValid;
+    ULONG FocusWindow;
+    QCAM_ROI_OPTIONS FocusRoi;
+    ULONG FocusRoiX,FocusRoiY;
+    BOOLEAN FlashAvailable,FlashOwned;
+    ULONG FlashMode,FlashPower,FlashTimeout;
+    ULONGLONG FlashDeadline;
+    UCHAR FlashSaved[10];
+    ULONG FrameSlot,FrameStamp;
+    QCAM_FRAME_TIME FrameTime;
+    BOOLEAN PdafEnabled;
+    ULONG PdafSlot,PdafCompletedSlot,PdafCompletedId;
+    ULONGLONG PdafStamp,PdafCompletedSof,PdafCompletedEof;
+    BOOLEAN PdafPending;
+    PVOID PdafAllocation,Pdaf,PdafLatest;
+    PHYSICAL_ADDRESS PdafAddress;
+    PMDL PdafMdl[4];
+    QCAM_PDAF_FRAME PdafInfo;
+    PUCHAR PdafSource;
+    BOOLEAN PdafCopied,PdafFocusCopied;
     BOOLEAN FrameRouteOwned;
     ULONG FrameRoute[4];
     PUCHAR ResetRead,ResetWrite;
@@ -45,8 +86,13 @@ typedef struct {
     WDFDMAENABLER DmaEnabler;
     WDFCOMMONBUFFER FrameBuffer;
     BOOLEAN FrameContiguous;
+    BOOLEAN FrameMapped;
+    ULONG FrameMapBank;
+    PVOID FrameTables;
+    PHYSICAL_ADDRESS FrameTableAddress;
     PVOID Frame;
-    PMDL FrameMdl;
+    PVOID FrameAllocation;
+    PMDL FrameMdl[4];
     PHYSICAL_ADDRESS FrameAddress;
     WDFCOMMONBUFFER CommandBuffer;
     PVOID Command;
@@ -67,6 +113,10 @@ NTSTATUS CamSave(CAM *c,PUCHAR base,ULONG offset,ULONG value);
 NTSTATUS CamPowerOn(CAM *c);
 NTSTATUS CamPowerOff(CAM *c);
 NTSTATUS CamReset(CAM *c,BOOLEAN high);
+NTSTATUS CamPmic(CAM *c,ULONG ppid,UCHAR reg,UCHAR *value,BOOLEAN write);
+NTSTATUS CamFlashSet(CAM *c,const QCAM_FLASH_OPTIONS *options);
+NTSTATUS CamFlashStop(CAM *c);
+VOID CamFlashFrame(CAM *c);
 NTSTATUS CamCciInit(CAM *c);
 NTSTATUS CamCciRead(CAM *c,UCHAR slave,USHORT address,PUCHAR buffer,ULONG bytes);
 NTSTATUS CamCciWrite(CAM *c,UCHAR slave,USHORT address,const UCHAR *buffer,ULONG bytes);
@@ -110,3 +160,16 @@ NTSTATUS CamFrameTranslate(CAM *c);
 NTSTATUS CamFrameRoutePrepare(CAM *c);
 NTSTATUS CamCdmPrepare(CAM *c,ULONG limit);
 NTSTATUS CamCdmAbort(CAM *c);
+
+NTSTATUS CamCciReadByte(CAM *c,UCHAR slave,UCHAR address,PUCHAR buffer,ULONG bytes);
+NTSTATUS CamCciWriteByte(CAM *c,UCHAR slave,UCHAR address,const UCHAR *buffer,ULONG bytes);
+
+NTSTATUS CamFocusInit(CAM *c);
+NTSTATUS CamFocusStop(CAM *c);
+NTSTATUS CamFocusSet(CAM *c,const QCAM_FOCUS_OPTIONS *options);
+VOID CamFocusFrame(CAM *c);
+ULONG CamFocusState(CAM *c);
+NTSTATUS CamPdafFrame(CAM *c);
+NTSTATUS CamPdafPrepare(CAM *c);
+NTSTATUS CamPdafCopy(CAM *c);
+VOID CamDmaInvalidate(PVOID base,ULONG span,ULONG step,ULONG count,ULONG offset);

@@ -40,7 +40,7 @@ static inline ULONG SmSustainableLevel(ULONG domain,ULONG band) {
 }
 static inline ULONG SmDemand(ULONG domain,ULONG current,ULONG busy,ULONG ceiling,ULONG sweet,int holdRaised) {
     if(current>ceiling)return ceiling;
-    ULONG target=busy<=2?0:busy>=63?current+2:
+    ULONG target=busy<=DVFS_IDLE_PERCENT?0:busy>=63?current+2:
         SmChooseLevel(domain,SmFrequencyKhz[domain][current]*busy/63,SmFrequencyKhz[domain][sweet]);
     if(holdRaised && target<current)target=current;
     return min(target,sweet);

@@ -58,7 +58,7 @@ NTSTATUS GpuPower(GPU *gpu,BOOLEAN enable);
 NTSTATUS GpuDb(GPU *gpu,PCSTR name,PULONG address,PULONG auxiliary,PULONG length);
 NTSTATUS GpuArc(GPU *gpu,PCSTR primary,PCSTR secondary,ULONG level,PULONG vote);
 NTSTATUS GpuRscWrite(GPU *gpu,ULONG address,ULONG value);
-NTSTATUS GpuFirmware(PCWSTR name,PUCHAR *data,PULONG size);
+NTSTATUS GpuFirmware(HANDLE directory,PCWSTR name,ULONG maximum,PUCHAR *data,PULONG size);
 NTSTATUS GpuStart(GPU *gpu);
 VOID GpuStop(GPU *gpu);
 NTSTATUS GpuSubmit(GPU *gpu,GPU_BO *bo,ULONG offset,ULONG words);

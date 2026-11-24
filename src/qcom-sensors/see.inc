@@ -103,7 +103,8 @@ static BOOLEAN SeeMeasurement(
             SIZE_T bytes = (SIZE_T)(data.End - data.At);
             if (format == 1 && bytes == 64) {
                 RtlCopyMemory(m->Bits, data.At + 36, 4);
-                m->Count = 1;
+                RtlCopyMemory(m->Bits + 1, data.At, 4);
+                m->Count = 2;
             } else if (format != 1 && bytes && !(bytes & 3) && bytes / 4 <= 6 - m->Count) {
                 RtlCopyMemory(m->Bits + m->Count, data.At, bytes);
                 m->Count += (ULONG)bytes / 4;

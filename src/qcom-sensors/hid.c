@@ -174,7 +174,7 @@ static VOID Poll(WDFTIMER timer) {
             }
             if (!(Quaternion(kind) && report.Value[4] != s->Report.Value[4]) &&
                 (kind == QcomLight
-                        ? difference * 10000 <
+                        ? report.Value[1] == s->Report.Value[1] && difference * 10000 <
                               max((ULONGLONG)s->Report.Value[0] * s->Feature.Sensitivity, 1ULL)
                         : difference <
                               (kind == QcomSimpleOrientation ? 1u : max(s->Feature.Sensitivity, 1u))))

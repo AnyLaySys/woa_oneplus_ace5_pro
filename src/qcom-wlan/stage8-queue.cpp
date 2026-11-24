@@ -39,10 +39,6 @@ static void S8Notify(NETPACKETQUEUE Handle,BOOLEAN Enabled)
 {
     auto Q=S8GetQueue(Handle);auto S=Q->S;KIRQL Irql;bool Ready;
     KeAcquireSpinLock(&S->Lock,&Irql);Q->Armed=Enabled;
-    /* hold OS RX delivery back until the association-result
-     * indication is out; EAPOL delivered before that is discarded on hardware
-     * (2026-11-01 evidence) and stalls the four-way handshake. Frames are kept
-     * and released by WcnStage8RxReady. */
     Ready=Enabled&&Q->Running&&(Q->Rx?(S->AssocIndicated&&S->RxHead!=S->RxTail):(((S->TxHead+1)%S8_TX_FRAMES)!=S->TxTail));
     if(Ready){Q->Armed=FALSE;}
     KeReleaseSpinLock(&S->Lock,Irql);
@@ -70,8 +66,7 @@ static void S8Advance(NETPACKETQUEUE Handle)
             auto Data=&S->Rx[S->RxTail];
             RtlZeroMemory(B,sizeof(*B));B->FragmentIndex=F->BeginIndex;B->FragmentCount=1;B->Layout.Layer2Type=NetPacketLayer2TypeIeee80211;B->Layout.Layer2HeaderLength=32;
             if(!Va||Frag->Capacity<Data->Length){B->Ignore=1;Frag->ValidLength=0;}
-            else{RtlCopyMemory(Va,Data->Bytes,Data->Length);Frag->Offset=0;Frag->ValidLength=Data->Length;
-                 }
+            else{RtlCopyMemory(Va,Data->Bytes,Data->Length);Frag->Offset=0;Frag->ValidLength=Data->Length;}
 
             RtlSecureZeroMemory(Data,sizeof(*Data));S->RxTail=(S->RxTail+1)%S8_RX_FRAMES;
             F->BeginIndex=NetRingIncrementIndex(F,F->BeginIndex);
@@ -89,12 +84,10 @@ static void S8Advance(NETPACKETQUEUE Handle)
                 if(!Va||Off>Frag->Capacity||Len>Frag->Capacity-Off||Len>1532-Size){Bad=true;break;}
                 RtlCopyMemory(Data->Bytes+Size,(UCHAR*)Va+Off,Len);Size+=Len;Index=NetRingIncrementIndex(F,Index);
             }
-            if(!Bad&&Native){Size=S8NativeTx(Data->Bytes,Size,S->J->Ap.Bssid,S->Mac,S->HotspotRole);if(!Size){Bad=true;}}
-            if(!Bad&&Size>1514){Bad=true;}
-            if(!Bad&&Size<14){Bad=true;}
+            if(!Bad&&Native)Size=S8NativeTx(Data->Bytes,Size,S->J->Ap.Bssid,S->Mac,S->HotspotRole);
+            Bad=Bad||Size<14||Size>1514;
 
-            if(!Bad){Data->Length=Size;S->TxHead=Next;
-                }
+            if(!Bad){Data->Length=Size;S->TxHead=Next;}
             else{B->Ignore=1;RtlSecureZeroMemory(Data,sizeof(*Data));}
             // Fragments belong to this packet even if its payload was rejected.
             if(B->FragmentIndex<F->NumberOfElements&&B->FragmentCount<=F->NumberOfElements)F->BeginIndex=NetRingAdvanceIndex(F,B->FragmentIndex,B->FragmentCount);
@@ -106,9 +99,8 @@ static void S8Advance(NETPACKETQUEUE Handle)
 static NTSTATUS S8CreateQueue(NETADAPTER A,void *Init,bool Rx)
 {
     auto S=S8GetAdapter(A)->S;WDF_OBJECT_ATTRIBUTES Attr;WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr,S8_QUEUE);Attr.EvtCleanupCallback=S8QueueCleanup;
-    NETPACKETQUEUE Queue;NTSTATUS St;
-    if(Rx){NET_PACKET_QUEUE_CONFIG C;NET_PACKET_QUEUE_CONFIG_INIT(&C,S8Advance,S8Notify,S8Cancel);C.EvtStart=S8Start;C.EvtStop=S8Stop;St=NetRxQueueCreate((NETRXQUEUE_INIT*)Init,&Attr,&C,&Queue);}
-    else{NET_PACKET_QUEUE_CONFIG C;NET_PACKET_QUEUE_CONFIG_INIT(&C,S8Advance,S8Notify,S8Cancel);C.EvtStart=S8Start;C.EvtStop=S8Stop;St=NetTxQueueCreate((NETTXQUEUE_INIT*)Init,&Attr,&C,&Queue);}
+    NETPACKETQUEUE Queue;NET_PACKET_QUEUE_CONFIG C;NET_PACKET_QUEUE_CONFIG_INIT(&C,S8Advance,S8Notify,S8Cancel);C.EvtStart=S8Start;C.EvtStop=S8Stop;
+    NTSTATUS St=Rx?NetRxQueueCreate((NETRXQUEUE_INIT*)Init,&Attr,&C,&Queue):NetTxQueueCreate((NETTXQUEUE_INIT*)Init,&Attr,&C,&Queue);
     if(!NT_SUCCESS(St))return St;
     auto Q=S8GetQueue(Queue);Q->S=S;Q->Rx=Rx;Q->Rings=Rx?NetRxQueueGetRingCollection(Queue):NetTxQueueGetRingCollection(Queue);
     NET_EXTENSION_QUERY Query;NET_EXTENSION_QUERY_INIT(&Query,NET_FRAGMENT_EXTENSION_VIRTUAL_ADDRESS_NAME,NET_FRAGMENT_EXTENSION_VIRTUAL_ADDRESS_VERSION_1,NetExtensionTypeFragment);
@@ -119,15 +111,17 @@ static NTSTATUS S8CreateQueue(NETADAPTER A,void *Init,bool Rx)
 }
 NTSTATUS S8CreateTx(NETADAPTER A,NETTXQUEUE_INIT *I){return S8CreateQueue(A,I,false);}
 NTSTATUS S8CreateRx(NETADAPTER A,NETRXQUEUE_INIT *I){return S8CreateQueue(A,I,true);}
+extern "C" BOOLEAN WcnStage8RxBlocked(PWCN_DEVICE D,ULONG Vdev)
+{
+    if(Vdev==2&&WcnBalanceRxUsesPrimary(D)&&WcnStage8RxBlocked(D,0))return TRUE;
+    auto S=(S8*)(Vdev==0?D->Stage8:Vdev==1?D->RoleStage8:Vdev==2?D->SecondaryStage8:nullptr);
+    if(!S)return FALSE;KIRQL Irql;KeAcquireSpinLock(&S->Lock,&Irql);
+    BOOLEAN Blocked=!S->Stopped&&!S->Resetting&&!S->Fatal&&S->AssocIndicated&&((S->RxHead+1)%S8_RX_FRAMES)==S->RxTail;
+    KeReleaseSpinLock(&S->Lock,Irql);return Blocked;
+}
 extern "C" VOID WcnStage8Ethernet(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *F,ULONG N)
 {
-    /* EAPOL must reach Windows as soon as the MLME association is
-     * confirmed; the WDI association-result indication can lag the AP's M1 by
-     * hundreds of ms (hardware evidence 2026-11-01), which used to drop M1 and
-     * stall the four-way handshake. Data still requires authorization below.
-     * the frame is queued but not announced to the OS before the
-     * association-result indication is out (WcnStage8RxReady releases it). */
-    if(!WcnTdlsTunnel(D,J,F,N))S8ReceiveEthernet(S8Station(D,J),F,N);
+    if(!WcnBalanceRx(D,J,F,N)&&!WcnTdlsTunnel(D,J,F,N))S8ReceiveEthernet(S8Station(D,J),F,N);
 }
 extern "C" VOID WcnStage8DirectEthernet(PWCN_DEVICE D,PWCN_JOIN J,const UCHAR *F,ULONG N)
 {if(!WcnTdlsTunnel(D,J,F,N))S8ReceiveEthernet(S8Station(D,J),F,N,true);}
@@ -150,8 +144,7 @@ void S8ReceiveEthernet(S8 *S,const UCHAR *F,ULONG N,bool Direct)
 
         if(!P->Length){KeReleaseSpinLock(&S->Lock,Irql);return;}S->RxHead=Next;
         if(S->RxQueue){auto Q=S8GetQueue(S->RxQueue);
-            if(Q->Running&&Q->Armed&&S->AssocIndicated){Q->Armed=FALSE;Notify=S->RxQueue;WdfObjectReference(Notify);}
-            }
+            if(Q->Running&&Q->Armed&&S->AssocIndicated){Q->Armed=FALSE;Notify=S->RxQueue;WdfObjectReference(Notify);}}
     }
     KeReleaseSpinLock(&S->Lock,Irql);
     if(Notify){NetRxQueueNotifyMoreReceivedPacketsAvailable(Notify);WdfObjectDereference(Notify);}
@@ -184,7 +177,9 @@ void S8QueuesService(S8 *S)
                 }
             KeReleaseSpinLock(&S->Lock,Irql);RtlSecureZeroMemory(&Copy,sizeof(Copy));continue;
         }
-        NTSTATUS St=S->HotspotRole?WcnHotspotTx(S->D,Copy.Bytes,Copy.Length,Eapol):WcnStage7Tx(S->D,S->J,Copy.Bytes,Copy.Length,Eapol);
+        auto Target=S->HotspotRole||Eapol?S->J:WcnBalanceTx(S->D,S->J,Copy.Bytes,Copy.Length);
+        NTSTATUS St=S->HotspotRole?WcnHotspotTx(S->D,Copy.Bytes,Copy.Length,Eapol):Target?WcnStage7Tx(S->D,Target,Copy.Bytes,Copy.Length,Eapol):STATUS_SUCCESS;
+        if(Target!=S->J&&St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St))St=STATUS_SUCCESS;
 
         RtlSecureZeroMemory(&Copy,sizeof(Copy));if(St==STATUS_DEVICE_BUSY)break;
         if(NT_SUCCESS(St))Submitted=true;

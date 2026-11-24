@@ -33,15 +33,15 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <Inf>
-      <DateStamp>11/20/2026</DateStamp>
-      <TimeStamp>26.11.20.64</TimeStamp>
+      <DateStamp>11/23/2026</DateStamp>
+      <TimeStamp>26.11.23.6</TimeStamp>
     </Inf>
     <ClCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);POOL_NX_OPTIN=1</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..;$(DDK_INC_PATH)wlan\2.0</AdditionalIncludeDirectories>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
-    <Link><Profile>false</Profile><GenerateDebugInformation>false</GenerateDebugInformation><AdditionalDependencies>%(AdditionalDependencies);Cng.lib;$(DDK_LIB_PATH)wlan\2.0\WificxTLVGenParse.lib</AdditionalDependencies></Link>
+    <Link><Profile>false</Profile><GenerateDebugInformation>false</GenerateDebugInformation><AdditionalDependencies>%(AdditionalDependencies);Cng.lib;Fwpkclnt.lib;Netio.lib;$(DDK_LIB_PATH)wlan\2.0\WificxTLVGenParse.lib</AdditionalDependencies></Link>
     <DriverSign>
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
     </DriverSign>
@@ -49,6 +49,7 @@
   <ItemGroup>
     <ClCompile Include="..\driver.c" />
     <ClCompile Include="..\stage8.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
+    <ClCompile Include="..\balance.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
     <ClCompile Include="..\sae.cpp"><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>false</ExceptionHandling><RuntimeTypeInfo>false</RuntimeTypeInfo></ClCompile>
     <ClCompile Include="..\tdls.c" />
     <ClCompile Include="..\tdls-crypto.c" />
@@ -80,6 +81,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\wcn7861.h" />
+    <ClInclude Include="..\balance-packet.h" />
     <ClInclude Include="..\version.h" />
     <ClInclude Include="..\sae-wire.h" />
     <ClInclude Include="..\owe-policy.h" />

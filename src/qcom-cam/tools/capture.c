@@ -18,8 +18,8 @@ static BOOL Info(HANDLE device) {
 }
 
 int wmain(int argc,wchar_t **argv) {
-    if(argc<2){fwprintf(stderr,L"Usage: qcom_cam_capture info | diag | trace | routes | scm | scm-io | probe [LIMIT] | pipeline LIMIT | capture FILE.raw [DATARATE [SETTLE]] | exposure LINES GAIN\n");return 2;}
-    HANDLE device=CreateFileW(L"\\\\.\\qcom-cam",GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    if(argc<2){fwprintf(stderr,L"Usage: qcom_cam_capture info | diag | trace | routes | scm | scm-io | probe [LIMIT] | pipeline LIMIT | capture FILE.raw [DATARATE [SETTLE]] | stream-pdaf PREFIX COUNT | exposure LINES GAIN\n");return 2;}
+    HANDLE device=CreateFileW(L"\\\\.\\qcom-cam",GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
     if(device==INVALID_HANDLE_VALUE){fprintf(stderr,"Open failed: %lu\n",GetLastError());return 1;}
     BOOL ok=FALSE;DWORD bytes=0,error=ERROR_INVALID_PARAMETER;
     if(!wcscmp(argv[1],L"info")&&argc==2)ok=Info(device);
@@ -133,6 +133,11 @@ int wmain(int argc,wchar_t **argv) {
         if(ok) {
             static const ULONG cpas[]={0,4,8,0xdc,0xec,0xf0,0xf4,0xf8};
             printf("trace step=%lu\n",t.Step);
+            printf("pdaf address=%llx sequence=%lu bytes=%lu sof=%llu eof=%llu\n",t.PdafAddress,t.PdafInfo.Sequence,t.PdafInfo.FrameBytes,t.PdafInfo.Sof,t.PdafInfo.Eof);
+            for(ULONG n=0;n<2;n++) {
+                printf("pdaf rdi%lu:",n+2);for(ULONG i=0;i<8;i++)printf(" %08lx",t.PdafCsid[n][i]);puts("");
+                printf("pdaf wm%lu:",n+25);for(ULONG i=0;i<4;i++)printf(" %08lx",t.PdafWriter[n][i]);puts("");
+            }
             printf("debug XO original=%08lx requested=%08lx observed=%08lx\n",t.DebugXo[0],t.DebugXo[1],t.DebugXo[2]);
             printf("firmware checkpoint seq=%lu write_status=%08lx\n",t.ScmAuditSequence,(ULONG)t.ScmAuditStatus);
             printf("noc RT error logger control=%08lx\n",t.NocMainControl);
@@ -148,6 +153,12 @@ int wmain(int argc,wchar_t **argv) {
             for(ULONG i=0;i<sizeof(CamClockTraceRegs)/sizeof(CamClockTraceRegs[0]);i++)printf("clock[%lx]=%08lx\n",CamClockTraceRegs[i],t.Clocks[i]);
             printf("smmu id0=%08lx id1=%08lx id2=%08lx\n",t.Smmu[0],t.Smmu[1],t.Smmu[2]);
             printf("frame dma=%llx physical=%llx\n",t.FrameAddress,t.FramePhysicalAddress);
+            printf("frame cpu=%llx par=%llx attr=%02llx\n",t.FrameCpuAddress,t.FrameCpuPar,t.FrameCpuPar>>56);
+            printf("frame written blocks bit8=0:%lu bit8=1:%lu\n",t.FrameWrittenBlocks[0],t.FrameWrittenBlocks[1]);
+            printf("frame map bank=%lu tables=%llx par=%llx\n",t.FrameMapBank,t.FrameTableAddress,t.FrameMapPar);
+            printf("smmu global fault before=%08lx/%08lx/%08lx/%08lx after=%08lx/%08lx/%08lx/%08lx\n",
+                t.SmmuGlobalBefore[0],t.SmmuGlobalBefore[1],t.SmmuGlobalBefore[2],t.SmmuGlobalBefore[3],
+                t.SmmuGlobalAfter[0],t.SmmuGlobalAfter[1],t.SmmuGlobalAfter[2],t.SmmuGlobalAfter[3]);
             printf("smmu global=%08lx slots=%lu banks=%lu camera_slot=%lu translated=%lu cbar=%08lx sctlr=%08lx control=%08lx\n",
                 t.SmmuState[0],t.SmmuState[1],t.SmmuState[2],t.SmmuState[3],t.SmmuState[4],t.SmmuState[5],t.SmmuState[6],t.SmmuState[7]);
             printf("sensor stream=%lu counter=%lu\n",t.SensorStream,t.SensorCounter);
@@ -257,25 +268,89 @@ int wmain(int argc,wchar_t **argv) {
             QCAM_EXPOSURE_OPTIONS options={sizeof(options),QCAM_ABI,lines,gain};
             ok=DeviceIoControl(device,QCAM_EXPOSURE,&options,sizeof(options),NULL,0,&bytes,NULL);error=GetLastError();
         }
-    } else if((!wcscmp(argv[1],L"capture")||!wcscmp(argv[1],L"capture-packed")||!wcscmp(argv[1],L"capture-diag")||!wcscmp(argv[1],L"capture-frame")||!wcscmp(argv[1],L"capture-auto")||!wcscmp(argv[1],L"capture-prefetch")||!wcscmp(argv[1],L"capture-context")||!wcscmp(argv[1],L"capture-primed")||!wcscmp(argv[1],L"dump-frame"))&&argc>=3&&argc<=5) {
+    } else if((!wcscmp(argv[1],L"stream")||!wcscmp(argv[1],L"stream-pdaf"))&&argc==4) {
+        BOOL parallel=!wcscmp(argv[1],L"stream-pdaf");
+        ULONG count=wcstoul(argv[3],NULL,10);if(!count||count>300)goto done;
+        UCHAR *image=VirtualAlloc(NULL,QCAM_VIDEO_BYTES,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+        if(!image){error=GetLastError();goto done;}
+        ULONG pdafBytes=sizeof(QCAM_PDAF_FRAME)+QCAM_PDAF_BYTES,pdafCount=0,pdafSequence=0;
+        UCHAR *pdaf=parallel?VirtualAlloc(NULL,pdafBytes,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE):NULL;
+        if(parallel&&!pdaf){error=GetLastError();VirtualFree(image,0,MEM_RELEASE);goto done;}
+        QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,5000,0,4980000000ULL};
+        ok=DeviceIoControl(device,QCAM_STREAM_START,&options,sizeof(options),NULL,0,&bytes,NULL);error=GetLastError();
+        ULONGLONG started=GetTickCount64();ULONG captured=0;
+        for(ULONG i=0;ok&&i<count;i++) {
+            ok=DeviceIoControl(device,QCAM_STREAM_NV12,NULL,0,image,QCAM_VIDEO_BYTES,&bytes,NULL);error=GetLastError();
+            if(!ok)break;if(bytes!=QCAM_VIDEO_BYTES){ok=FALSE;error=ERROR_INVALID_DATA;break;}captured++;
+            ULONG hash=2166136261u;for(ULONG p=0;p<bytes;p+=64)hash=(hash^image[p])*16777619u;
+            printf("frame=%lu ms=%llu bytes=%lu hash=%08lx",i,GetTickCount64()-started,bytes,hash);
+            if(parallel) {
+                DWORD received=0;
+                if(DeviceIoControl(device,QCAM_STREAM_PDAF,NULL,0,pdaf,pdafBytes,&received,NULL)) {
+                    QCAM_PDAF_FRAME *f=(QCAM_PDAF_FRAME *)pdaf;
+                    if(received!=pdafBytes||f->Size!=sizeof(*f)||f->Abi!=QCAM_ABI||f->Width!=QCAM_WIDTH||f->Height!=QCAM_PDAF_HEIGHT||f->Stride!=QCAM_STRIDE||f->FrameBytes!=QCAM_PDAF_BYTES||f->Sof>f->Eof){ok=FALSE;error=ERROR_INVALID_DATA;break;}
+                    if(f->Sequence!=pdafSequence){pdafCount++;pdafSequence=f->Sequence;}
+                    ULONG pdafHash=2166136261u;
+                    for(ULONG p=sizeof(*f);p<received;p+=64)pdafHash=(pdafHash^pdaf[p])*16777619u;
+                    printf(" pdaf_seq=%lu sof=%llu eof=%llu pdaf_hash=%08lx",f->Sequence,f->Sof,f->Eof,pdafHash);
+                } else if(GetLastError()!=ERROR_NOT_READY){ok=FALSE;error=GetLastError();break;}
+            }
+            puts("");fflush(stdout);
+        }
+        printf("stream %lu frames in %llu ms\n",captured,GetTickCount64()-started);Info(device);
+        if(parallel) {
+            printf("pdaf fresh_frames=%lu latest_sequence=%lu\n",pdafCount,pdafSequence);
+            QCAM_FOCUS_OPTIONS focus={0};DWORD focusBytes=0;
+            if(DeviceIoControl(device,QCAM_FOCUS,NULL,0,&focus,sizeof(focus),&focusBytes,NULL))printf("focus position=%lu mode=%lu state=%lu\n",focus.Position,focus.Flags,focus.State);
+            QCAM_TRACE trace={0};DWORD received=0;
+            if(DeviceIoControl(device,QCAM_TRACE_QUERY,NULL,0,&trace,sizeof(trace),&received,NULL)) {
+                printf("frame average_us:");for(ULONG t=0;t<6;t++)printf(" %llu",trace.FrameTimingCount?trace.FrameTimings[t]/trace.FrameTimingCount:0);puts("");
+                printf("focus phase=%ld defocus=%ld confidence=%lu window=%lu\n",trace.FocusPhase,trace.FocusDefocus,trace.FocusConfidence,trace.FocusWindow);
+                for(ULONG n=0;n<2;n++) {
+                printf("pdaf rdi%lu:",n+2);for(ULONG p=0;p<8;p++)printf(" %08lx",trace.PdafCsid[n][p]);puts("");
+                printf("pdaf wm%lu:",n+25);for(ULONG p=0;p<4;p++)printf(" %08lx",trace.PdafWriter[n][p]);puts("");
+                }
+            }
+        }
+        if(ok&&parallel&&!pdafCount){ok=FALSE;error=ERROR_NOT_READY;}
+        if(ok) {
+            wchar_t imagePath[1024],pdafPath[1024];
+            if(parallel){_snwprintf_s(imagePath,1024,_TRUNCATE,L"%s.nv12",argv[2]);_snwprintf_s(pdafPath,1024,_TRUNCATE,L"%s.pdaf",argv[2]);}
+            HANDLE file=CreateFileW(parallel?imagePath:argv[2],GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
+            if(file==INVALID_HANDLE_VALUE){ok=FALSE;error=GetLastError();}
+            else {DWORD written=0;ok=WriteFile(file,image,QCAM_VIDEO_BYTES,&written,NULL)&&written==QCAM_VIDEO_BYTES;error=GetLastError();CloseHandle(file);}
+            if(ok&&parallel) {
+                HANDLE pdafFile=CreateFileW(pdafPath,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
+                if(pdafFile==INVALID_HANDLE_VALUE){ok=FALSE;error=GetLastError();}
+                else {DWORD written=0;ok=WriteFile(pdafFile,pdaf,pdafBytes,&written,NULL)&&written==pdafBytes;error=GetLastError();CloseHandle(pdafFile);}
+            }
+        }
+        if(!DeviceIoControl(device,QCAM_STREAM_STOP,NULL,0,NULL,0,&bytes,NULL)&&ok){ok=FALSE;error=GetLastError();}
+        VirtualFree(image,0,MEM_RELEASE);
+        if(pdaf)VirtualFree(pdaf,0,MEM_RELEASE);
+    } else if((!wcscmp(argv[1],L"capture")||!wcscmp(argv[1],L"capture-pdaf")||!wcscmp(argv[1],L"capture-packed")||!wcscmp(argv[1],L"capture-diag")||!wcscmp(argv[1],L"capture-frame")||!wcscmp(argv[1],L"capture-auto")||!wcscmp(argv[1],L"capture-prefetch")||!wcscmp(argv[1],L"capture-context")||!wcscmp(argv[1],L"capture-primed")||!wcscmp(argv[1],L"dump-frame")||!wcscmp(argv[1],L"dump-arena"))&&argc>=3&&argc<=5) {
         BOOLEAN context=!wcscmp(argv[1],L"capture-context"),primed=!wcscmp(argv[1],L"capture-primed"),prefetch=!wcscmp(argv[1],L"capture-prefetch"),automatic=!wcscmp(argv[1],L"capture-auto"),frameMode=!wcscmp(argv[1],L"capture-frame");
         BOOLEAN packed=!wcscmp(argv[1],L"capture-packed");
-        BOOLEAN diagnostic=!wcscmp(argv[1],L"capture-diag")||frameMode||automatic||prefetch||primed||context||packed,dump=!wcscmp(argv[1],L"dump-frame");
-        QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,diagnostic?1000:15000,0,4980000000ULL};
+        BOOLEAN pdaf=!wcscmp(argv[1],L"capture-pdaf");
+        BOOLEAN arena=!wcscmp(argv[1],L"dump-arena");
+        BOOLEAN diagnostic=!wcscmp(argv[1],L"capture-diag")||frameMode||automatic||prefetch||primed||context||packed,dump=!wcscmp(argv[1],L"dump-frame")||arena;
+        ULONG rawBytes=arena?QCAM_ARENA_BYTES:QCAM_FRAME_BYTES;
+        QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,diagnostic||pdaf?1000:15000,0,4980000000ULL};
         wchar_t *end=NULL;
         if(argc>3){options.DataRate=_wcstoui64(argv[3],&end,0);if(*end)goto done;}
         if(argc>4){options.SettleCount=wcstoul(argv[4],&end,0);if(*end)goto done;}
-        UCHAR *raw=VirtualAlloc(NULL,QCAM_FRAME_BYTES,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+        UCHAR *raw=VirtualAlloc(NULL,rawBytes,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
         if(!raw){error=GetLastError();goto done;}
         printf(dump?"Reading stopped frame buffer\n":"Starting RAW10 capture, timeout=%lu ms\n",options.TimeoutMs);fflush(stdout);
-        ok=DeviceIoControl(device,dump?QCAM_FRAME_DIAGNOSTIC:packed?QCAM_CAPTURE_PACKED_DIAGNOSTIC:context?QCAM_CAPTURE_CONTEXT_DIAGNOSTIC:primed?QCAM_CAPTURE_PRIMED_DIAGNOSTIC:prefetch?QCAM_CAPTURE_PREFETCH_DIAGNOSTIC:automatic?QCAM_CAPTURE_AUTO_DIAGNOSTIC:frameMode?QCAM_CAPTURE_FRAME_DIAGNOSTIC:diagnostic?QCAM_CAPTURE_DIAGNOSTIC:QCAM_CAPTURE,dump?NULL:&options,dump?0:sizeof(options),raw,QCAM_FRAME_BYTES,&bytes,NULL);
+        ok=DeviceIoControl(device,arena?QCAM_ARENA_DIAGNOSTIC:dump?QCAM_FRAME_DIAGNOSTIC:pdaf?QCAM_CAPTURE_PDAF:packed?QCAM_CAPTURE_PACKED_DIAGNOSTIC:context?QCAM_CAPTURE_CONTEXT_DIAGNOSTIC:primed?QCAM_CAPTURE_PRIMED_DIAGNOSTIC:prefetch?QCAM_CAPTURE_PREFETCH_DIAGNOSTIC:automatic?QCAM_CAPTURE_AUTO_DIAGNOSTIC:frameMode?QCAM_CAPTURE_FRAME_DIAGNOSTIC:diagnostic?QCAM_CAPTURE_DIAGNOSTIC:QCAM_CAPTURE,dump?NULL:&options,dump?0:sizeof(options),raw,rawBytes,&bytes,NULL);
         error=GetLastError();Info(device);
-        if(ok&&bytes!=QCAM_FRAME_BYTES){ok=FALSE;error=ERROR_INVALID_DATA;}
+        ULONG expectedBytes=pdaf?QCAM_PDAF_BYTES:rawBytes;
+        if(ok&&bytes!=expectedBytes){ok=FALSE;error=ERROR_INVALID_DATA;}
         if(ok) {
             HANDLE file=CreateFileW(argv[2],GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
             if(file==INVALID_HANDLE_VALUE){ok=FALSE;error=GetLastError();}
             else {
-                DWORD written=0;ok=WriteFile(file,raw,QCAM_FRAME_BYTES,&written,NULL)&&written==QCAM_FRAME_BYTES;
+                DWORD written=0;ok=WriteFile(file,raw,expectedBytes,&written,NULL)&&written==expectedBytes;
                 if(!ok)error=GetLastError();else printf(dump?"Saved %lu bytes of diagnostic buffer data\n":"Saved %lu bytes of RGGB RAW10\n",written);
                 CloseHandle(file);
             }

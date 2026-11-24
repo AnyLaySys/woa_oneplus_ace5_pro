@@ -1,5 +1,6 @@
 #pragma once
 #define DVFS_SAMPLE_100NS 90000
+#define DVFS_IDLE_PERCENT 9
 
 static inline ULONG DvfsCoolingBand(ULONG band,int temperature) {
     if(temperature>=1080)return 2;
@@ -19,7 +20,7 @@ static inline BOOLEAN DvfsHold(ULONGLONG now,ULONGLONG raised,int pending,ULONGL
     return raised && now-raised<900000 && (pending || (last && now-last<=1800000));
 }
 static inline ULONG DvfsDelayDown(ULONG target,ULONG current,ULONG busy,ULONG ceiling,ULONG *samples) {
-    if(target<current && busy>2 && current<=ceiling) {
+    if(target<current && busy>DVFS_IDLE_PERCENT && current<=ceiling) {
         if(++*samples<10)return current;
         if(target+1<current)target=current-1;
     }

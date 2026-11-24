@@ -111,7 +111,7 @@ adsp_dtb.mdt=1,ADSP
 
 Include=ks.inf,wdmaudio.inf
 
-Needs=KS.Registration,WDMAUDIO.Registration
+Needs=KS.Registration,WDMAUDIO.Registration,mssysfx.CopyFilesAndRegister
 
 CopyFiles=Sia.Files,Sia.Adsp
 
@@ -272,8 +272,12 @@ HKR,,FriendlyName,,%DeviceName%
 
 [Sia.Topology]
 
+DelReg=Sia.FxReset
+
 AddReg=Sia.TopologyRegistry
 
+[Sia.FxReset]
+HKR,FX\0
 
 
 [Sia.TopologyRegistry]
@@ -286,14 +290,21 @@ HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_SPEAKER%
 
 HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,1
 
+HKR,EP\0,%PKEY_AudioEndpoint_FullRangeSpeakers%,0x00010001,0
+
 HKR,EP\0,%PKEY_AudioEndpoint_Default_VolumeInDb%,0x00010001,0xFFE20000
 
 HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x00010001,1
 
-HKR,EP\0,%PKEY_AudioEndpoint_Disable_SysFx%,0x00010001,1
+HKR,EP\0,%PKEY_AudioEndpoint_Disable_SysFx%,0x00010001,0
 
 HKR,EP\0,%PKEY_AudioEngine_OEMFormat%,0x00000001,fe,ff,02,00,80,bb,00,00,00,65,04,00,06,00,18,00,16,00,18,00,03,00,00,00,01,00,00,00,00,00,10,00,80,00,00,aa,00,38,9b,71
 
+HKR,FX\0,%PKEY_FX_Association%,,%KSNODETYPE_SPEAKER%
+HKR,FX\0,%PKEY_FX_FriendlyName%,,"Microsoft Audio Home Theater Effects"
+HKR,FX\0,%PKEY_FX_PreMixEffectClsid%,,"{62DC1A93-AE24-464C-A43E-452F824C4250}"
+HKR,FX\0,%PKEY_FX_PostMixEffectClsid%,,"{637C490D-EEE3-4C0A-973F-371958802DA2}"
+HKR,FX\0,%PKEY_FX_UserInterfaceClsid%,,"{5860E1C5-F95C-4A7A-8EC8-8AEF24F379A1}"
 
 
 [Strings]
@@ -305,9 +316,9 @@ Provider="AnyLaySys"
 
 Manufacturer="Qualcomm"
 
-DiskName="AnyLaySys Audio Driver"
+DiskName="Qualcomm SM8750 Audio Driver"
 
-DeviceName="Qualcomm ADSP Audio"
+DeviceName="Qualcomm SM8750 Audio"
 
 KSCATEGORY_AUDIO="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
 
@@ -323,6 +334,8 @@ Proxy.CLSID="{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
 
 PKEY_AudioEndpoint_FormFactor="{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},0"
 
+PKEY_AudioEndpoint_FullRangeSpeakers="{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},6"
+
 PKEY_AudioEndpoint_Association="{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},2"
 
 PKEY_AudioEndpoint_Supports_EventDriven_Mode="{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},7"
@@ -332,4 +345,10 @@ PKEY_AudioEndpoint_Disable_SysFx="{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},5"
 PKEY_AudioEndpoint_Default_VolumeInDb="{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},9"
 
 PKEY_AudioEngine_OEMFormat="{F19F064D-082C-4E27-BC73-6882A1BB8E4C},3"
+
+PKEY_FX_Association="{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},0"
+PKEY_FX_PreMixEffectClsid="{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},1"
+PKEY_FX_PostMixEffectClsid="{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},2"
+PKEY_FX_UserInterfaceClsid="{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},3"
+PKEY_FX_FriendlyName="{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},4"
 

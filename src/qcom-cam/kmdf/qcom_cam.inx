@@ -51,6 +51,6 @@ qcom_cam_check.exe
 [Strings]
 ProviderString="AnyLaySys"
 ManufacturerString="Qualcomm"
-DeviceDesc="Qualcomm SM8750 Camera Controller (Sony IMX906)"
-ServiceDesc="Qualcomm Camera Driver"
+DeviceDesc="Qualcomm SM8750 Camera Controller"
+ServiceDesc="Qualcomm SM8750 Camera Controller Driver"
 DiskDesc="AnyLaySys Camera Driver"

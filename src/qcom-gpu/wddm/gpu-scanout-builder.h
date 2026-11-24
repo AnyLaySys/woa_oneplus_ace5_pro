@@ -16,14 +16,16 @@ static inline unsigned A830BuildGpuCopy(unsigned *commands,unsigned capacity,
     if(srcNeed>sourceBytes || dstNeed>destinationBytes ||
        source+srcNeed<source || destination+dstNeed<destination ||
        (source<destination+dstNeed && destination<source+srcNeed))return 0;
-    unsigned words=height*6u+8u;if(capacity<words)return 0;
+    unsigned rows=sourcePitch==destinationPitch && srcNeed/4<=0xffffffffu?1u:height;
+    unsigned dwords=rows==1u?(unsigned)(srcNeed/4):width;
+    unsigned words=rows*6u+8u;if(capacity<words)return 0;
     unsigned at=0;
     commands[at++]=A830CopyPacket(0x17,1);commands[at++]=1; /* BR only */
     commands[at++]=A830CopyPacket(0x26,0); /* GPU-side WFI, no host wait */
-    for(unsigned y=0;y<height;y++) {
+    for(unsigned y=0;y<rows;y++) {
         unsigned long long src=source+(unsigned long long)y*sourcePitch;
         unsigned long long dst=destination+(unsigned long long)y*destinationPitch;
-        commands[at++]=A830CopyPacket(0x75,5);commands[at++]=width;
+        commands[at++]=A830CopyPacket(0x75,5);commands[at++]=dwords;
         commands[at++]=(unsigned)src;commands[at++]=(unsigned)(src>>32);
         commands[at++]=(unsigned)dst;commands[at++]=(unsigned)(dst>>32);
     }

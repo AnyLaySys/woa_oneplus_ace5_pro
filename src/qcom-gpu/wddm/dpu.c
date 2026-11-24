@@ -2,9 +2,6 @@
 #include "dpu.h"
 #include "dpu-completion.h"
 
-/* SM8750 DPU12: Linux dpu_12_0_sm8750.h, dpu_hw_sspp.c,
- * dpu_hw_ctl.c and dpu_hw_intf.c. No DSI/DSC/clock programming is performed.
- */
 #define DPU_REGISTER_BYTES 0x90000u
 static ULONGLONG PreciseTime(VOID) {
     ULONGLONG qpc;
@@ -22,7 +19,7 @@ static NTSTATUS WaitBranch(PUCHAR mapping,ULONG offset,PULONG observed) {
     do {
         ULONG value=READ_REGISTER_ULONG((PULONG)(mapping+offset));*observed=value;
         if(value==MAXULONG)return STATUS_IO_DEVICE_ERROR;
-        /* Linux clk_branch2_check_halt: CLK_OFF clear OR NoC FSM ON. */
+
         if((value&1) && (!(value&0x80000000u) || ((value>>28)&7u)==2))return STATUS_SUCCESS;
         KeStallExecutionProcessor(10);
     } while(KeQueryInterruptTime()<end);
@@ -36,7 +33,7 @@ static NTSTATUS RestoreAhb(A830_ADAPTER *a) {
     ULONG value=READ_REGISTER_ULONG((PULONG)(mapping+0xb0));
     if(value==MAXULONG){MmUnmapIoSpace(mapping,PAGE_SIZE);return STATUS_IO_DEVICE_ERROR;}
     if(Platform.AddedAhb&1) {
-        /* Release only our added SW enable, preserving all firmware fields. */
+
         WRITE_REGISTER_ULONG((PULONG)(mapping+0xb0),value&~1u);KeMemoryBarrier();
         value=READ_REGISTER_ULONG((PULONG)(mapping+0xb0));
         if(value==MAXULONG || (value&1)){MmUnmapIoSpace(mapping,PAGE_SIZE);return STATUS_IO_DEVICE_ERROR;}
@@ -163,7 +160,7 @@ static const DPU_PIPE_DESCRIPTION PipeDescriptions[]={
     {0x28000,1u<<24,1u<<2},{0x2a000,1u<<25,1u<<3},
     {0x2c000,1u<<13,1u<<4},{0x2e000,1u<<14,1u<<5}
 };
-typedef struct { ULONG Base,OriginalAddress,OriginalStride,Offset; } DPU_PIPE;
+typedef struct { ULONG Base,OriginalAddress,OriginalStride,Offset,OriginalFormat,OriginalUnpack,OriginalColor[11],Format;BOOLEAN Hdr; } DPU_PIPE;
 typedef struct { ULONG Base,Mask; } DPU_CTL;
 typedef struct {
     A830_ADAPTER *Adapter;
@@ -172,38 +169,56 @@ typedef struct {
     PEX_TIMER Timer;
     DPU_PIPE Pipes[10];ULONG PipeCount;
     DPU_CTL Ctls[6];ULONG CtlCount;
-    ULONG Intf,Frame,AutoRefresh;
-    ULONG SmmuEntry,SmmuOriginal;BOOLEAN SmmuChanged;
+    ULONG Intf,AutoRefresh;
     BOOLEAN Restored;
     volatile LONG Stopping,Enabled,Vsync;
     volatile LONG64 Queued,Applied;
     ULONGLONG PendingAddress;
-    ULONG PendingPitch;
+    ULONG PendingPitch,PendingFormat;BOOLEAN PendingHdr;
     volatile LONG64 OwnershipSequence;
     volatile LONG64 PendingPhysical,ActivePhysical;
     volatile LONG64 TransactionPhysical;
     LONG64 TransactionSequence;
-    ULONGLONG TransactionAddress,TransactionDeadline;
-    ULONG TransactionPitch,TransactionFrame,TransactionState,TransactionSync,TransactionAuto,PpMask;
+    ULONGLONG TransactionAddress;
+    ULONG TransactionPitch,TransactionFrame,TransactionState,TransactionSync,TransactionAuto,PpMask,TransactionFormat;
+    BOOLEAN TransactionHdr;
     BOOLEAN TransactionGated;
     volatile LONG Kick;
     volatile LONG WakeNeeded;
-    ULONG TeCounter,TxFrame;
-    ULONG PendingFrame,PendingFence;
-    ULONGLONG LastEdge,Period,PollBegin;
+    ULONG Line;
+    ULONGLONG LastEdge,LastSample,EdgeError,Period,TimerLate,PollBegin,PollDue,LineTime,TransactionWait;
 } A830_DPU;
-VOID A830DpuWork(A830_ADAPTER *a) {
-    KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);A830_DPU *d=a->Dpu;
-    if(d && d->Enabled && !d->Stopping && d->Timer &&
-        (InterlockedExchange(&d->Kick,0) || ReadAcquire64(&d->Queued)>ReadAcquire64(&d->Applied)))
-        ExSetTimer(d->Timer,-2000,0,NULL);
-    KeReleaseSpinLock(&a->QueueLock,old);
+static BOOLEAN AdvanceTransaction(PVOID context);
+static VOID SampleEdge(A830_DPU *d,ULONGLONG now) {
+    if(d->LastEdge) {
+        ULONGLONG elapsed=now-d->LastEdge;
+        if(elapsed>=d->Period*16 && elapsed<=d->Period*128) {
+            ULONGLONG frames=(elapsed+d->Period/2)/d->Period;
+            d->Period=(d->Period*3+elapsed/frames)/4;
+        }
+    }
+    d->LastEdge=now;
 }
-/* Preserve the inherited rates, PLLs, power domain and interconnect votes.
- * Linux msm_mdss_enable requires clocks before the first MDSS read. Only
- * retain branch enables on a domain that firmware already powered; bringing
- * up an off domain would also require RPMh/ICC and is deliberately rejected.
- */
+static VOID SetPoll(A830_DPU *d,ULONGLONG due) {
+    if(d->Stopping || !d->Enabled || d->TransactionState==4 || !d->Timer)return;
+    if(d->PollDue && d->PollDue<=due)return;
+    ULONGLONG now=PreciseTime();d->PollDue=due;
+    ExSetTimer(d->Timer,due>now?-(LONGLONG)(due-now):-1,0,NULL);
+}
+VOID A830DpuWork(A830_ADAPTER *a) {
+    BOOLEAN wake=FALSE;KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);A830_DPU *d=a->Dpu;
+    if(d && d->Enabled && !d->Stopping && d->TransactionState!=4 && InterlockedExchange(&d->Kick,0)) {
+        BOOLEAN result=FALSE;
+        NTSTATUS status=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,AdvanceTransaction,d,0,&result);
+        if(!NT_SUCCESS(status))InterlockedExchange(&a->Failed,status);
+        if(d->Vsync || d->TransactionState || ReadAcquire64(&d->Queued)>ReadAcquire64(&d->Applied))
+            SetPoll(d,PreciseTime()+2000);
+    }
+    if(d)wake=InterlockedExchange(&d->WakeNeeded,0)!=0;
+    KeReleaseSpinLock(&a->QueueLock,old);
+    if(wake)KeSetEvent(&a->Wake,IO_NO_INCREMENT,FALSE);
+}
+
 static NTSTATUS Clocks(A830_DPU *d) {
     PHYSICAL_ADDRESS p;p.QuadPart=0x100000;
     d->Gcc=MmMapIoSpaceEx(p,0x30000,PAGE_READWRITE|PAGE_NOCACHE);
@@ -270,7 +285,7 @@ static ULONG TxFrame(A830_DPU *d) {return Read(d,d->Intf+0xac);}
 static VOID Flush(A830_DPU *d) {
     KeMemoryBarrier();
     for(ULONG i=0;i<d->CtlCount;i++)Write(d,d->Ctls[i].Base+0x18,d->Ctls[i].Mask);
-    /* Command mode without inherited autorefresh requires a CTL kickoff. */
+
     if(!d->AutoRefresh)for(ULONG i=0;i<d->CtlCount;i++)Write(d,d->Ctls[i].Base+0x1c,1);
 }
 static BOOLEAN FlushComplete(A830_DPU *d) {
@@ -279,7 +294,7 @@ static BOOLEAN FlushComplete(A830_DPU *d) {
 }
 static VOID RestoreTransaction(A830_DPU *d) {
     if(!d->TransactionGated)return;
-    /* Restore only the exact configuration held by this transaction. */
+
     Write(d,d->Intf+0x2b4,d->TransactionAuto);
     Write(d,d->Intf+0x288,d->TransactionSync);KeMemoryBarrier();
     d->TransactionGated=FALSE;
@@ -290,7 +305,6 @@ static VOID CompleteTransaction(A830_DPU *d) {
     InterlockedExchange64(&d->ActivePhysical,ReadAcquire64(&d->TransactionPhysical));
     InterlockedExchange64(&d->Applied,d->TransactionSequence);
 
-
     InterlockedExchange64(&d->TransactionPhysical,0);d->TransactionState=0;
     InterlockedIncrement64(&d->OwnershipSequence);
 
@@ -300,43 +314,41 @@ static VOID FailTransaction(A830_DPU *d,NTSTATUS status) {
     RestoreTransaction(d);d->TransactionState=4;
     InterlockedExchange(&d->Adapter->Failed,status);InterlockedExchange(&d->WakeNeeded,1);
 }
-/* Short display-interrupt-lock sections only. The timer provides all waits;
- * an Address callback never waits or writes a live SSPP source register. */
+
 static BOOLEAN AdvanceTransaction(PVOID context) {
     A830_DPU *d=context;
     if(d->Stopping || !d->Enabled || d->TransactionState==4)return TRUE;
-    ULONGLONG now=PreciseTime();
-    if(d->TransactionState==1 && now>=d->TransactionDeadline) {
-        FailTransaction(d,STATUS_IO_TIMEOUT);
-        return TRUE;
-    }
     if(!d->TransactionState) {
         LONG64 sequence=ReadAcquire64(&d->Queued);
-        if((sequence&1) || sequence<=ReadAcquire64(&d->Applied) ||
-           A830FenceAfter(d->PendingFence,d->Adapter->Completed[0]))return TRUE;
+        if((sequence&1) || sequence<=ReadAcquire64(&d->Applied))return TRUE;
         InterlockedIncrement64(&d->OwnershipSequence);
         d->TransactionSequence=sequence;d->TransactionAddress=d->PendingAddress;
-        d->TransactionPitch=d->PendingPitch;d->TransactionFrame=d->PendingFrame;
+        d->TransactionPitch=d->PendingPitch;
+        d->TransactionFormat=d->PendingFormat;d->TransactionHdr=d->PendingHdr;
         InterlockedExchange64(&d->TransactionPhysical,ReadAcquire64(&d->PendingPhysical));
         InterlockedIncrement64(&d->OwnershipSequence);
         d->TransactionSync=Read(d,d->Intf+0x288);d->TransactionAuto=Read(d,d->Intf+0x2b4);
-        d->TransactionDeadline=now+500000;d->TransactionGated=TRUE;
-        /* Qualcomm prepare_commit: prevent a subsequent automatic kickoff,
-           then allow an already running pixel transfer to finish. */
+        d->TransactionGated=TRUE;
+
         Write(d,d->Intf+0x288,d->TransactionSync&~(1u<<20));
         Write(d,d->Intf+0x2b4,d->TransactionAuto&~(1u<<31));KeMemoryBarrier();
         if((Read(d,d->Intf+0x288)&(1u<<20)) || (Read(d,d->Intf+0x2b4)&(1u<<31))) {
             FailTransaction(d,STATUS_IO_DEVICE_ERROR);return TRUE;
         }
-        d->TransactionState=1;
+        d->TransactionState=1;d->LineTime=0;
 
     }
     ULONG line=Read(d,d->Intf+0x2b0)&0xffffu;
     BOOLEAN active=line>0 && line<d->Adapter->DisplayInfo.Height;
+    ULONGLONG now=PreciseTime();d->TransactionWait=2000;
+    if(active && d->LineTime && line>d->Line && now-d->LineTime<=d->Period) {
+        ULONGLONG remaining=(d->Adapter->DisplayInfo.Height-line)*(now-d->LineTime)/(line-d->Line);
+        d->TransactionWait=remaining>4000?min(remaining/2,d->Period/8):1000;
+    }
+    d->Line=line;d->LineTime=active?now:0;
     if(d->TransactionState==1) {
         if(active)return TRUE;
-        /* Both events are cleared only after old PPTX has drained. No old
-           latched 4f/100 may be mistaken for completion of this commit. */
+
         Write(d,d->Intf+0x808,1);Write(d,0x18,d->PpMask);KeMemoryBarrier();
         if((Read(d,d->Intf+0x804)&1) || (Read(d,0x14)&d->PpMask)) {
             FailTransaction(d,STATUS_IO_DEVICE_ERROR);return TRUE;
@@ -348,23 +360,34 @@ static BOOLEAN AdvanceTransaction(PVOID context) {
             ULONG row=p->Offset/d->Adapter->DisplayInfo.Pitch,column=p->Offset%d->Adapter->DisplayInfo.Pitch;
             Write(d,p->Base+0x14,(ULONG)physical+row*d->TransactionPitch+column);
             Write(d,p->Base+0x24,(p->OriginalStride&0xffff0000u)|d->TransactionPitch);
+            if(p->Format!=d->TransactionFormat) {
+                ULONG format=d->TransactionFormat,source=0x236ffu,unpack=0x03020001u;
+                if(format==D3DDDIFMT_A2R10G10B10 || format==D3DDDIFMT_A2B10G10R10)source|=0x4000u;
+                if(format==D3DDDIFMT_A8B8G8R8 || format==D3DDDIFMT_A2B10G10R10)unpack=0x03010002u;
+                if(format==(ULONG)d->Adapter->DisplayInfo.ColorFormat){source=p->OriginalFormat;unpack=p->OriginalUnpack;}
+                Write(d,p->Base+0x30,source);Write(d,p->Base+0x34,unpack);p->Format=format;
+            }
+            if(p->Hdr!=d->TransactionHdr) {
+                static const ULONG matrix[]={0xb4843d60u,0x0000abdcu,0x3c4dac2eu,0x0000a15fu,0xa50419c8u,
+                    0x00003c11u,0x3c000000u,0x3c000000u,0x3c000000u,0x3c000000u};
+                for(ULONG j=0;j<RTL_NUMBER_OF(matrix);j++)Write(d,p->Base+0x704+j*4,
+                    d->TransactionHdr?matrix[j]:p->OriginalColor[j+1]);
+                Write(d,p->Base+0x700,d->TransactionHdr?0x300456u:p->OriginalColor[0]);p->Hdr=d->TransactionHdr;
+            }
         }
-        /* Do not issue CTL_START: the exact inherited autorefresh and TE
-           configuration below supplies the kickoff after this atomic flush. */
+
         KeMemoryBarrier();
         for(ULONG i=0;i<d->CtlCount;i++)Write(d,d->Ctls[i].Base+0x18,d->Ctls[i].Mask);
-        d->TransactionFrame=TxFrame(d);RestoreTransaction(d);d->TransactionState=2;
+        d->TransactionFrame=TxFrame(d);RestoreTransaction(d);d->TransactionState=2;d->LineTime=0;
 
         return TRUE;
     }
-    ULONG event=Read(d,d->Intf+0x804),done=Read(d,0x14)&d->PpMask;
+    if(active)return TRUE;
+    ULONG event=Read(d,d->Intf+0x804);if(!(event&1u))return TRUE;
+    ULONG done=Read(d,0x14)&d->PpMask;if(!done)return TRUE;
     if(d->TransactionState==2 && A830DpuCommitComplete(d->TransactionFrame,
         TxFrame(d),active,event,done,FlushComplete(d))) {
         CompleteTransaction(d);
-    } else if(d->TransactionState==2 && now>=d->TransactionDeadline) {
-        /* A late timer must inspect the latched evidence before declaring
-           timeout. Do not discard PPdone while waiting for another sample. */
-        FailTransaction(d,STATUS_IO_TIMEOUT);
     }
     return TRUE;
 }
@@ -380,52 +403,56 @@ static BOOLEAN Notify(PVOID context) {
 }
 static VOID Poll(PEX_TIMER timer,PVOID context) {
     A830_DPU *d=context;UNREFERENCED_PARAMETER(timer);
-    if(d->Stopping || !d->Enabled)return;
-    BOOLEAN advanced=FALSE;
-    NTSTATUS transaction=d->Adapter->Dxgk.DxgkCbSynchronizeExecution(d->Adapter->Dxgk.DeviceHandle,AdvanceTransaction,d,0,&advanced);
-    if(!NT_SUCCESS(transaction))InterlockedExchange(&d->Adapter->Failed,transaction);
-    if(InterlockedExchange(&d->WakeNeeded,0))KeSetEvent(&d->Adapter->Wake,IO_NO_INCREMENT,FALSE);
-    ULONGLONG now=PreciseTime();d->TxFrame=TxFrame(d);ULONG frame=d->TeCounter;
-    {
-        if(Read(d,d->Intf+0x804)&8) {
-            Write(d,d->Intf+0x808,8);d->TeCounter++;
-        }
-        frame=d->TeCounter;
+    KIRQL old;KeAcquireSpinLock(&d->Adapter->QueueLock,&old);
+    ULONGLONG due=d->PollDue;d->PollDue=0;
+    KeReleaseSpinLock(&d->Adapter->QueueLock,old);
+    if(d->Stopping || !d->Enabled || d->TransactionState==4)return;
+    ULONGLONG now=PreciseTime(),late=due && now>due?now-due:0;
+    d->TimerLate=max(min(late,d->Period/4),d->TimerLate-d->TimerLate/32);
+    if(d->TransactionState || ReadAcquire64(&d->Queued)>ReadAcquire64(&d->Applied)) {
+        BOOLEAN advanced=FALSE;
+        NTSTATUS transaction=d->Adapter->Dxgk.DxgkCbSynchronizeExecution(d->Adapter->Dxgk.DeviceHandle,AdvanceTransaction,d,0,&advanced);
+        if(!NT_SUCCESS(transaction))InterlockedExchange(&d->Adapter->Failed,transaction);
     }
-    if(frame!=d->Frame) {
-        ULONG delta=(frame-d->Frame)&0xffffu;
-        ULONG edgeDelta=delta<0x8000?delta:0;
-
-        if(d->LastEdge && delta && delta<8) {
-            ULONGLONG period=(now-d->LastEdge)/delta;
-            if(period>=60000 && period<=400000)d->Period=(d->Period*3+period)/4;
+    if(InterlockedExchange(&d->WakeNeeded,0))KeSetEvent(&d->Adapter->Wake,IO_NO_INCREMENT,FALSE);
+    if(d->TransactionState==4)return;
+    now=PreciseTime();ULONGLONG gap=d->LastSample?now-d->LastSample:0;d->LastSample=now;
+    BOOLEAN edge=(Read(d,d->Intf+0x804)&8)!=0;
+    if(edge) {
+        Write(d,d->Intf+0x808,8);
+        if(gap>d->Period*3/2)d->LastEdge=0;
+        else if(gap && gap<=d->Period/4) {
+            SampleEdge(d,now-gap/2);d->EdgeError=gap/2;
         }
-        d->LastEdge=now;d->Frame=frame;
-        if(d->Vsync && edgeDelta) {
+        else if(!d->LastEdge)d->LastEdge=now;
+        d->PollBegin=now;
+        if(d->Vsync) {
             BOOLEAN result=FALSE;
             NTSTATUS status=d->Adapter->Dxgk.DxgkCbSynchronizeExecution(
                 d->Adapter->Dxgk.DeviceHandle,Notify,d,0,&result);
             if(!NT_SUCCESS(status))InterlockedExchange(&d->Adapter->Failed,status);
         }
     }
-    /* Sleep until shortly before the next hardware edge. Only the narrow
-       edge window is polled at 200 us; no fabricated VSync is ever emitted. */
-    now=PreciseTime();ULONGLONG wait=2000;
-    if(d->LastEdge && now<d->LastEdge+d->Period && d->LastEdge+d->Period-now>10000)
-        wait=d->LastEdge+d->Period-now-10000;
+
+    now=PreciseTime();ULONGLONG wait=d->LastEdge?1000:2000;
+    if(d->LastEdge) {
+        ULONGLONG elapsed=edge?now-d->LastEdge:d->PollBegin-d->LastEdge+d->Period/2;
+        ULONGLONG next=d->LastEdge+(elapsed/d->Period+1)*d->Period;
+        ULONGLONG lead=d->EdgeError+(d->TimerLate<2000?2000-d->TimerLate:0);
+        if(next>now)wait=next-now>lead?next-now-lead:1000;
+    }
     if((!d->Vsync && d->Applied==InterlockedCompareExchange64(&d->Queued,0,0)) ||
-       (d->LastEdge && now-d->LastEdge>d->Period*2) ||
-       (!d->LastEdge && now-d->PollBegin>d->Period*2))wait=100000;
-    if(d->TransactionState || ReadAcquire64(&d->Queued)>ReadAcquire64(&d->Applied))wait=2000;
-    if(d->TransactionState==4 || (!d->TransactionState && A830FenceAfter(d->PendingFence,d->Adapter->Completed[0])))wait=100000;
+       now-d->PollBegin>d->Period*2)wait=100000;
+    else if(d->LastEdge && now-d->LastEdge>d->Period*32)wait=min(wait,2000);
+    if(d->TransactionState)wait=min(wait,d->TransactionWait);
+    else if(ReadAcquire64(&d->Queued)>ReadAcquire64(&d->Applied))wait=min(wait,2000);
     if(!d->Vsync && !d->TransactionState && ReadAcquire64(&d->Queued)<=ReadAcquire64(&d->Applied))return;
-    if(!d->Stopping)ExSetTimer(d->Timer,-(LONGLONG)wait,0,NULL);
+    KeAcquireSpinLock(&d->Adapter->QueueLock,&old);SetPoll(d,now+wait);
+    KeReleaseSpinLock(&d->Adapter->QueueLock,old);
 }
 static NTSTATUS Translation(A830_DPU *d) {
     if(!TranslationProved(d->Adapter))return STATUS_NOT_SUPPORTED;
-    /* Revalidate only the explicitly probed MDSS entries. A mask of 2 is
-       the Linux DT's two MDSS stream IDs (0x800/0x802), not another device.
-       No S2CR or context-bank register is ever modified here. */
+
     for(ULONG i=0;i<2;i++) {
         ULONG slot=Platform.Slots[i];if(slot>=128)return STATUS_NOT_SUPPORTED;
         ULONG smr=READ_REGISTER_ULONG((PULONG)(d->Smmu+0x800+slot*4));
@@ -440,31 +467,18 @@ static NTSTATUS Translation(A830_DPU *d) {
             if(sctlr!=Platform.Sctlr[i] || cbar!=Platform.Cbar[i])return STATUS_DEVICE_CONFIGURATION_ERROR;
         }
     }
-    d->SmmuEntry=Platform.Slots[0];d->SmmuOriginal=Platform.S2cr[0];return STATUS_SUCCESS;
+    return STATUS_SUCCESS;
 }
-NTSTATUS A830DpuInitialize(PVOID context) {
-    A830_ADAPTER *a=context;
-    NTSTATUS status=PreparePlatform(a);
-    if(NT_SUCCESS(status))status=QcomGpuScanoutReserveStaging(a);
-    if(NT_SUCCESS(status))status=A830DpuStart(a);
-    if(!NT_SUCCESS(status)) {
-        NTSTATUS restored=RestoreAhb(a);
-        if(!NT_SUCCESS(restored))status=restored;
-    }
-    return status;
-}
-NTSTATUS A830DpuStart(PVOID context) {
-    A830_ADAPTER *a=context;
+static NTSTATUS Start(A830_ADAPTER *a) {
 
     if(a->Dpu)return STATUS_NOT_SUPPORTED;
     if(!TranslationProved(a))return STATUS_DEVICE_NOT_READY;
     if(!QcomGpuScanoutStagingReady(a))return STATUS_NOT_SUPPORTED;
     A830_DPU *d=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*d),GPU_TAG);
     if(!d)return STATUS_INSUFFICIENT_RESOURCES;
-    d->Adapter=a;d->Period=166667;a->Dpu=d;
+    d->Adapter=a;d->Period=83333;d->EdgeError=10000;a->Dpu=d;
     NTSTATUS status=Clocks(d);if(!NT_SUCCESS(status))goto failed;
-    /* Access to global apps_smmu requires its own platform verification.
-       MDSS clocks do not establish TCU register accessibility. */
+
     if(!TranslationProved(a)){status=STATUS_NOT_SUPPORTED;goto failed;}
     PHYSICAL_ADDRESS p;p.QuadPart=0xae01000;
     d->Registers=MmMapIoSpaceEx(p,DPU_REGISTER_BYTES,PAGE_READWRITE|PAGE_NOCACHE);
@@ -481,6 +495,9 @@ NTSTATUS A830DpuStart(PVOID context) {
         if((Read(d,base+0x30)&0xc0000000u) || Read(d,base+0x170)){status=STATUS_NOT_SUPPORTED;goto failed;}
         DPU_PIPE *pipe=d->Pipes+d->PipeCount++;
         pipe->Base=base;pipe->OriginalAddress=address;pipe->OriginalStride=stride;
+        pipe->OriginalFormat=Read(d,base+0x30);pipe->OriginalUnpack=Read(d,base+0x34);
+        pipe->Format=a->DisplayInfo.ColorFormat;
+        for(ULONG j=0;j<RTL_NUMBER_OF(pipe->OriginalColor);j++)pipe->OriginalColor[j]=Read(d,base+0x700+j*4);
         pipe->Offset=(ULONG)((ULONGLONG)address-firmware);
         active|=PipeDescriptions[i].Active;flush|=PipeDescriptions[i].Flush;
     }
@@ -495,8 +512,7 @@ NTSTATUS A830DpuStart(PVOID context) {
     }
     if(!d->CtlCount || !intfs){status=STATUS_NOT_SUPPORTED;goto failed;}
     ULONG mixers=0;for(ULONG i=0;i<d->CtlCount;i++)mixers|=Read(d,d->Ctls[i].Base+0x130);
-    /* This inherited split/merged DSI0 topology uses master PP0. PP1 does
-       not generate done (confirmed 0x100 status), even with two VIG pipes. */
+
     if(!(mixers&1) || (mixers&~3u)){status=STATUS_NOT_SUPPORTED;goto failed;}
     d->PpMask=1u<<8;
     for(ULONG i=0;i<4;i++)if(intfs&(1u<<i)) {
@@ -509,38 +525,48 @@ NTSTATUS A830DpuStart(PVOID context) {
         (Read(d,d->Intf+0x288)&0x180000u)!=0x180000u) {
         status=STATUS_DEVICE_NOT_READY;goto failed;
     }
-    /* Verify that the selected hardware counter is alive before replacing
-       the old software-vblank producer. A silent rdptr counter must never
-       disable the desktop's only progress source. */
-    ULONG initial=TxFrame(d);
+
+    Write(d,0x10,Read(d,0x10)&~d->PpMask);Write(d,d->Intf+0x800,Read(d,d->Intf+0x800)&~9u);
+    ULONG initial=TxFrame(d),frame=initial;
     ULONGLONG deadline=PreciseTime()+500000;
     LARGE_INTEGER pause;pause.QuadPart=-10000;
     do {
-        KeDelayExecutionThread(KernelMode,FALSE,&pause);d->Frame=TxFrame(d);
-    } while(d->Frame==initial && PreciseTime()<deadline);
-    if(d->Frame==initial){status=STATUS_IO_TIMEOUT;goto failed;}
+        KeDelayExecutionThread(KernelMode,FALSE,&pause);frame=TxFrame(d);
+    } while(frame==initial && PreciseTime()<deadline);
+    if(frame==initial){status=STATUS_IO_TIMEOUT;goto failed;}
     {
-        /* Prove a freshly acknowledged input TE event can recur. Do not use
-           the inherited permanently-latched bit as a clock sample. */
+
         Write(d,d->Intf+0x808,8);ULONG edges=0;
         deadline=PreciseTime()+500000;
         do {
             KeDelayExecutionThread(KernelMode,FALSE,&pause);
-            if(Read(d,d->Intf+0x804)&8){Write(d,d->Intf+0x808,8);edges++;}
+            if(Read(d,d->Intf+0x804)&8) {
+                Write(d,d->Intf+0x808,8);d->LastEdge=PreciseTime();edges++;
+            }
         }while(edges<2 && PreciseTime()<deadline);
         if(edges<2){status=STATUS_IO_TIMEOUT;goto failed;}
-        d->Frame=0;d->TeCounter=0;
     }
-    d->TxFrame=TxFrame(d);
     d->Timer=ExAllocateTimer(Poll,d,EX_TIMER_HIGH_RESOLUTION);
     if(!d->Timer){status=STATUS_INSUFFICIENT_RESOURCES;goto failed;}
-    d->Vsync=InterlockedCompareExchange(&a->VsyncEnabled,0,0);d->PollBegin=PreciseTime();
-    /* Transfer the explicit probe's added branch vote to this backend.
-       Backend failure/stop then releases the same enable exactly once. */
+    d->Vsync=InterlockedCompareExchange(&a->VsyncEnabled,0,0);d->PollBegin=d->LastSample=PreciseTime();
+
     d->ClockAdded|=Platform.AddedAhb<<1;Platform.AddedAhb=0;
-    InterlockedExchange(&d->Enabled,1);ExSetTimer(d->Timer,-10000,0,NULL);
+    KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);
+    InterlockedExchange(&d->Enabled,1);SetPoll(d,PreciseTime()+10000);
+    KeReleaseSpinLock(&a->QueueLock,old);
     return STATUS_SUCCESS;
 failed:A830DpuStop(a);return status;
+}
+NTSTATUS A830DpuInitialize(PVOID context) {
+    A830_ADAPTER *a=context;
+    NTSTATUS status=PreparePlatform(a);
+    if(NT_SUCCESS(status))status=QcomGpuScanoutReserveStaging(a);
+    if(NT_SUCCESS(status))status=Start(a);
+    if(!NT_SUCCESS(status)) {
+        NTSTATUS restored=RestoreAhb(a);
+        if(!NT_SUCCESS(restored))status=restored;
+    }
+    return status;
 }
 BOOLEAN A830DpuEnabled(PVOID context) {
     A830_ADAPTER *a=context;
@@ -563,31 +589,30 @@ BOOLEAN A830DpuReferences(PVOID context,ULONGLONG physical) {
     }
     KeReleaseSpinLock(&a->QueueLock,old);return referenced;
 }
-NTSTATUS A830DpuQueue(PVOID context,ULONGLONG physical,ULONG pitch,ULONGLONG address) {
+NTSTATUS A830DpuQueue(PVOID context,ULONGLONG physical,ULONG pitch,ULONGLONG address,ULONG format,BOOLEAN hdr) {
     A830_DPU *d=((A830_ADAPTER *)context)->Dpu;
     if(!d || !d->Enabled || d->Stopping || d->TransactionState==4)return STATUS_DEVICE_NOT_READY;
-    if(!physical || physical>MAXULONG || pitch<d->Adapter->DisplayInfo.Width*4 || pitch>0xffffu ||
+    if(!A830ScanoutFormat(format) || !physical || physical>MAXULONG || pitch<d->Adapter->DisplayInfo.Width*4 || pitch>0xffffu ||
        (ULONGLONG)pitch*d->Adapter->DisplayInfo.Height>MAXULONG-physical)return STATUS_INVALID_PARAMETER;
-    /* The display callback is serialized by dxgkrnl. Publish odd before any
-       register or metadata write, so the timer never acknowledges a mixture
-       of the preceding sequence and the new frame's address. */
+
     InterlockedIncrement64(&d->OwnershipSequence);InterlockedIncrement64(&d->Queued);
     d->PendingAddress=address;d->PendingPitch=pitch;InterlockedExchange64(&d->PendingPhysical,(LONG64)physical);
-    d->PendingFrame=d->TxFrame;d->PendingFence=d->Adapter->LastSubmitted[0];KeMemoryBarrier();
+    d->PendingFormat=format;d->PendingHdr=hdr;KeMemoryBarrier();
     InterlockedIncrement64(&d->Queued);InterlockedIncrement64(&d->OwnershipSequence);
     InterlockedExchange(&d->Kick,1);A830WakeDisplay(d->Adapter);return STATUS_SUCCESS;
 }
 VOID A830DpuEnableVsync(PVOID context,BOOLEAN enabled) {
     A830_ADAPTER *a=context;
     if(KeGetCurrentIrql()>DISPATCH_LEVEL) {
-        /* Display DIRQL callers already hold dxgkrnl's interrupt lock. */
-        A830_DPU *d=a->Dpu;if(d && !d->Stopping)InterlockedExchange(&d->Vsync,enabled);
+
+        A830_DPU *d=a->Dpu;
+        if(d && !d->Stopping && InterlockedExchange(&d->Vsync,enabled)!=enabled && enabled)
+            InterlockedExchange(&d->Kick,1);
         return;
     }
     KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);A830_DPU *d=a->Dpu;
     if(d && !d->Stopping) {
-        InterlockedExchange(&d->Vsync,enabled);
-        if(enabled && d->Timer)ExSetTimer(d->Timer,-10000,0,NULL);
+        if(InterlockedExchange(&d->Vsync,enabled)!=enabled && enabled)SetPoll(d,PreciseTime()+10000);
     }
     KeReleaseSpinLock(&a->QueueLock,old);
 }
@@ -598,6 +623,9 @@ VOID A830DpuRestoreRegisters(PVOID context) {
     for(ULONG i=0;i<d->PipeCount;i++) {
         Write(d,d->Pipes[i].Base+0x14,d->Pipes[i].OriginalAddress);
         Write(d,d->Pipes[i].Base+0x24,d->Pipes[i].OriginalStride);
+        Write(d,d->Pipes[i].Base+0x30,d->Pipes[i].OriginalFormat);Write(d,d->Pipes[i].Base+0x34,d->Pipes[i].OriginalUnpack);
+        for(ULONG j=1;j<RTL_NUMBER_OF(d->Pipes[i].OriginalColor);j++)Write(d,d->Pipes[i].Base+0x700+j*4,d->Pipes[i].OriginalColor[j]);
+        Write(d,d->Pipes[i].Base+0x700,d->Pipes[i].OriginalColor[0]);
     }
     Flush(d);
 }
@@ -611,8 +639,7 @@ static BOOLEAN StopAccess(PVOID context) {
 }
 static NTSTATUS SynchronizeStop(A830_ADAPTER *a,A830_DPU *d,BOOLEAN retire) {
     DPU_STOP_ACCESS access={a,d,retire};BOOLEAN result=FALSE;
-    /* Same order as scheduler IssueJob: QueueLock -> display interrupt lock.
-       The DIRQL callback performs no wait, event signal or lock acquisition. */
+
     KIRQL old;KeAcquireSpinLock(&a->QueueLock,&old);
     NTSTATUS status=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,StopAccess,&access,0,&result);
     KeReleaseSpinLock(&a->QueueLock,old);
@@ -625,14 +652,12 @@ NTSTATUS A830DpuStop(PVOID context) {
     RestoreTransaction(d);
     if(d->Enabled && !d->Restored) {
         A830DpuRestoreRegisters(a);
-        /* Returning POST ownership must not free the active BO before the
-           firmware address has actually latched. Stop is passive and bounded. */
+
         ULONG frame=TxFrame(d);ULONGLONG end=KeQueryInterruptTime()+1000000;
         LARGE_INTEGER delay;delay.QuadPart=-10000;
         while(KeQueryInterruptTime()<end && (TxFrame(d)==frame || !FlushComplete(d)))
             KeDelayExecutionThread(KernelMode,FALSE,&delay);
-        /* Keep mappings and both references alive if hardware never latches.
-           The caller must preserve the pool/segment and fail device stop. */
+
         if(TxFrame(d)==frame || !FlushComplete(d))return STATUS_IO_TIMEOUT;
         d->Restored=TRUE;
     }

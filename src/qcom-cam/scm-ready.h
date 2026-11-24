@@ -9,7 +9,7 @@ static BOOLEAN CamScmDiagnosticReady(CAM *c) {
         ULONG state=CamRead(c->Base[CamCrm],0x220+i*4);
         if(!(state&0x20000000u)||!(state&0x3fff))return FALSE;
     }
-    const ULONG domains[]={0,6,7};
+    const ULONG domains[]={2,6,7};
     for(ULONG i=0;i<RTL_NUMBER_OF(domains);i++)
         for(ULONG state=0;state<3;state++)
             if(!(CamRead(c->Base[CamCrm],0x11c+domains[i]*0x20+state*4)&7))return FALSE;

@@ -2,7 +2,7 @@
 
 static BOOLEAN CamDmaStopped(PUCHAR cpas,PUCHAR csid,PUCHAR tfe,PUCHAR hf,PUCHAR sf) {
     if((CamRead(cpas,0xf0)|CamRead(cpas,0xf8))&1)return FALSE;
-    if((CamRead(tfe,0x2400)&1)||CamRead(csid,0xe04))return FALSE;
+    if(((CamRead(tfe,0x2400)|CamRead(tfe,0x2500)|CamRead(tfe,0x2600)|CamRead(tfe,0x2700))&1)||CamRead(csid,0xe04)||CamRead(csid,0x1004)||CamRead(csid,0x1204)||CamRead(csid,0x1404))return FALSE;
     return !CamRead64(hf,0xc10)&&!CamRead64(hf,0xc20)&&!CamRead64(sf,0xc10)&&!CamRead64(sf,0xc20);
 }
 
