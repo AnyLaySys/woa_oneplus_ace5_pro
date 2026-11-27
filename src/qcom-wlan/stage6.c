@@ -102,11 +102,10 @@ static BOOLEAN S6ChannelAdd (PWCN_DEVICE Dev, ULONG Frequency)
     BOOLEAN Matched = FALSE;
     PWCN_SCAN_RULE Rule;
     if (Scan->ChannelCount >= WCN_SCAN_MAX_CHANNELS) return FALSE;
-    /* Intersect the firmware domain with ath12k's conservative world ranges.
-     * 20 MHz channel edges must fit. No 6 GHz or channel14 in this version. */
-    if (Frequency < 2500) { Start = 2402; End = 2482; MaxPower = 20; }
-    else if (Frequency >= 5150 && Frequency <= 5350) { Start = 5140; End = 5360; MaxPower = 30; }
-    else if (Frequency >= 5725 && Frequency <= 5850) { Start = 5715; End = 5860; MaxPower = 30; }
+    /* 20 MHz channel edges must fit. No 6 GHz or channel14 in this version. */
+    if (Frequency < 2500) { Start = 2402; End = 2482; MaxPower = 25; }
+    else if (Frequency >= 5150 && Frequency <= 5350) { Start = 5140; End = 5360; MaxPower = 25; }
+    else if (Frequency >= 5725 && Frequency <= 5850) { Start = 5715; End = 5860; MaxPower = 33; }
     else return FALSE;
     if (Frequency < Start + 10 || Frequency + 10 > End) return FALSE;
     for (Index = Frequency < 2500 ? 0 : Scan->Rules2g;

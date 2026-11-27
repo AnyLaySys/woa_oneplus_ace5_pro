@@ -1,5 +1,3 @@
-#include "..\ti-batt\power.h"
-
 static VOID SiaUsbOpen(PSIA_LINK L)
 {
     const CHAR Name[]="PMIC_RTR_ADSP_APPS";
@@ -93,9 +91,13 @@ static VOID SiaUsbPoll(PSIA_LINK L)
     if(!U->Acked||!U->Rcid||!U->Count)return;
     if(QchSharedPoll(L,Now))return;
     if(U->Otg.Stop==3)OtgShutdown(&U->Otg,Now);
+    if(!L->Charge.Bridge && !L->Charge.Closing){
+        if(U->Otg.Phase==OtgFailed && U->Otg.Stop==2 && Now-U->Otg.Last>=3000)OtgShutdown(&U->Otg,Now);
+        if(U->Otg.Phase==OtgDone)RtlZeroMemory(&U->Otg,sizeof(U->Otg));
+    }
     if(U->Otg.Phase==OtgIdle)OtgStart(&U->Otg,Now);
     OTG_REQUEST R;
-    if(!OtgNext(&U->Otg,Now,U->BatteryUntil&&Now<=U->BatteryUntil,&R))return;
+    if(!OtgNext(&U->Otg,Now,&R))return;
     ULONG I;for(I=0;I<U->Count&&!(U->Free[I]&&U->Size[I]>=24);I++);
     if(I==U->Count)return;
     ULONG M[]={GLINK_CMD_TX_DATA|(SIA_USB_LCID<<16),U->Iid[I],24,0,32778,1,R.Write?0x33u:0x32u,0,R.Property,R.Value};

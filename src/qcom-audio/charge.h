@@ -1,7 +1,8 @@
 #pragma once
 #include "charge-api.h"
 #define QCH_UFCS_CAP_COUNT 7u
-enum {ChargeNone,ChargeStop,ChargeAcquire,ChargeRelease,ChargeStart,ChargeNormal,ChargeKey};
+enum {QchBypassExit=6,QchBypassReady,QchBypassSupply};
+enum {ChargeNone,ChargeStop,ChargeAcquire,ChargeRelease,ChargeStart,ChargeNormal,ChargeKey,ChargeBypass};
 
 typedef struct {
     ULONG Attempts,Hold,Active,Normal;
@@ -26,13 +27,15 @@ typedef struct _QCH_LINK {
     ULONGLONG Last,SampleTimeMs,ExitAt;
     QCH_UFCS_CAPS Caps;
     ULONG AdapterType,SourceLo;
-    ULONG Normal,UsbLimitUa,InputState,InputError,InputResult,CableOrientation;
-    ULONGLONG InputAt,InputDeadline,CableAt;
+    ULONG BypassMa;
+    ULONGLONG BypassSampleTime;
+    ULONG Normal,UsbLimitUa,BypassState,BypassError,BypassResult,CableOrientation;
+    ULONGLONG InputAt,BypassDeadline,CableAt;
     ULONG OffCheck,PdoRequests,VoocEnable;
     ULONG AuthVerified,AuthResult,AuthReplyValid;
     ULONG CpError,CpPrepared,CpActive,CpTouched,CpOffVerified;
     ULONG CellValid,Cell1Mv,Cell2Mv,BatteryStatus,GaugeCvMv,GaugeCcMa;
-    ULONG LoadCv,LoadStopReason;
+    ULONG LoadStopReason;
     ULONG LoadFvUv,LoadFvLimitMv,LoadReqMv,LoadReqMa,LoadMos,LoadReturn,LoadQuery,LoadBuckOff;
     ULONG LoadFccUa,LoadFccMaxUa;
     ULONGLONG LoadStartAt,LoadAt,LoadNextAt,LoadFvAt,LoadFccAt,LoadFccMaxAt;
@@ -46,15 +49,18 @@ static __inline BOOLEAN QchBatteryFresh(const QCH_LINK *C,ULONGLONG Now)
 {
     return C->BatteryValid && C->CellValid && C->SampleTimeMs && C->SampleTimeMs<=Now && Now-C->SampleTimeMs<=6000;
 }
+static __inline BOOLEAN QchSupplySafe(const QCH_LINK *C,ULONGLONG Now)
+{
+    return QchBatteryFresh(C,Now) && C->PackVoltage<9200 && C->Cell1Mv<4600 && C->Cell2Mv<4600 && !(C->BatteryStatus&0x900f);
+}
 #define QCH_FAST_POLL(C) ((C)->Bridge==2 && ((C)->Running || (C)->OffMask || (C)->Phase==90))
 #ifdef __cplusplus
 extern "C" {
 #endif
 BOOLEAN QchTakeAuth(UCHAR *Key);
 BOOLEAN QchAuthAvailable(VOID);
+BOOLEAN QchThermalHeld(VOID);
 VOID QchDiscardAuth(VOID);
-BOOLEAN QchInputSaved(VOID);
-NTSTATUS QchInputSave(BOOLEAN Suspended);
 BOOLEAN QchLoadAuth(VOID);
 VOID QchPublish(const QCH_LINK *C);
 BOOLEAN QchBatteryGuard(QCH_LINK *C);

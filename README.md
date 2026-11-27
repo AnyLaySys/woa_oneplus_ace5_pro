@@ -1,261 +1,170 @@
 # Windows for OnePlus Ace 5 Pro
 
-`woa_oneplus_ace5_pro` 是 OnePlus Ace 5 Pro / PKR110（设备代号 `hummer`，Qualcomm SM8750）的 **Windows on ARM 设备适配工程**，包含设备驱动、运行固件、配置，以及统一构建和部署入口。
+`woa_oneplus_ace5_pro` 是 OnePlus Ace 5 Pro / PKR110（设备代号 `hummer`，Qualcomm SM8750）的 Windows on ARM 适配工程，包含设备驱动、运行固件及统一构建、部署入口。
 
-**目前所有设备工作正常**，包括触控、音频、Wi-Fi、蓝牙、电池电量、充电、USB Host/OTG、GPU 桌面显示和 CPU 调频。
+Windows 驱动配合 `uefi_oneplus_ace5_pro` 的 UEFI/ACPI 使用；Linux 适配由 `linux_oneplus_ace5_pro` 维护。
 
-Windows 驱动配合本设备的 UEFI/ACPI 使用。Linux 适配由 `linux_oneplus_ace5_pro` 维护，UEFI 由 `uefi_oneplus_ace5_pro` 维护。
+## 适配状态
+
+| 🟢原生屏幕 | 🟢多指触控 | 🟡指纹识别 |
+| --- | --- | --- |
+| 🟢物理按键 | 🟢GPU驱动 | 🟢无线网络 |
+| 🟢蓝牙连接 | 🟢近场通信 | 🟢OTG连接 |
+| 🟢音频输出 | 🟢音频输入 | 🟢振动反馈 |
+| 🟢电量显示 | 🟢快速充电 | 🟢CPU调频 |
+| 🟢GPU调频 | 🟢红外遥控 | 🟢三轴加速 |
+| 🟢三轴陀螺 | 🟢三轴磁场 | 🟢重力向量 |
+| 🟢线性加速 | 🟢屏幕朝向 | 🟢磁北航向 |
+| 🟢相对姿态 | 🟢绝对姿态 | 🟢地磁姿态 |
+| 🟢霍尔感应 | 🟢接近感应 | 🟢光照感应 |
+| 🟢色温感应 | | |
+
+## 驱动组件
+
+| 组件 | 硬件与功能 |
+| --- | --- |
+| `syna-touch` | Synaptics S3910 多点触控 |
+| `qcom-audio` | Qualcomm ADSP 音频、SIA9177 功放、WCD9395 编解码器、普通及 UFCS 充电、USB 2.0 Host/OTG |
+| `qcom-wlan` | Qualcomm WCN7861 Wi-Fi |
+| `qcom-bt` | Qualcomm WCN7861 蓝牙、配对、键鼠、A2DP、LE 与 GATT |
+| `ti-batt` | Texas Instruments BQ28Z610 双电芯电量计、电池电量显示 |
+| `qcom-cpupwr` | SM8750 CPU 调频、温控及休眠 |
+| `qcom-keys` | 物理按键、PMIH010x 振动、AKM AK09970 三段拨键 |
+| `qcom-sensors` | 环境光、色温、自动旋转、加速度、陀螺仪、磁场、姿态、计步、活动状态、接近检测及霍尔传感器 |
+| `nxp-nfc` | NXP SN220T NFC 读卡接口 |
+| `jiiov-fp` | Jiiov JV0301 WBDI 指纹设备接口 |
+| `qcom-ir` | 红外发射及 Samsung M5 电源遥控 App |
+| `qcom-cam` | Sony IMX906 主摄控制与 AVStream 视频接口 |
+| `qcom-npu` | Qualcomm Hexagon NPU 的 CDSP、FastRPC、Windows MCDM 调度、ONNX Runtime 执行提供程序与 GGML 聊天后端 |
+| `qcom-gpu` / `mesa` | Adreno 830 硬件桌面、D3D10/11、D3D12、OpenGL 与 Vulkan，GPU 调频及温控 |
+
+触控按下、长按及物理按键提供振动反馈，音量到达上下限时提供双振反馈。三段拨键上档静音并关闭振动，中档恢复声音并关闭振动，下档恢复声音和振动。
 
 ## 目录
 
 | 路径 | 内容 |
 | --- | --- |
-| `src/syna-touch` | Synaptics S3910 触控驱动及上游许可证 |
-| `src/qcom-audio` | Qualcomm ADSP 音频、SIA9177 功放及 PMIC 充电、USB 电源管理 |
-| `src/qcom-wlan` | Qualcomm WCN7861 Wi-Fi 驱动 |
-| `src/qcom-bt` | Qualcomm WCN7861 UART HCI 蓝牙驱动 |
-| `src/ti-batt` | Texas Instruments BQ28Z610 电量计（hub I2C）剩余电量显示驱动 |
-| `src/qcom-charge` | 随音频包部署的充电与 USB 角色管理服务 |
-| `src/qcom-cpupwr` | SM8750 原生 CPU 调频驱动 |
-| `src/qcom-keys` | Qualcomm 物理按键及 PMIH010x 振动控制 |
-| `src/qcom-sensors/hall.inc` | AKM AK09970 霍尔磁场采样和三段拨键判定，复用按键及传感器包 |
-| `src/nxp-nfc` | NXP SN220T NFC 读卡驱动，硬件通信待验证 |
-| `src/jiiov-fp` | Jiiov JV0301 TA 初始化及白圈采图已通过，Windows Hello 尚未完成 |
-| `src/qcom-ir` | Qualcomm SPI／GPI DMA 红外发射驱动，已实机验证 |
-| `src/qcom-ir/app` | 独立 Samsung M5 电源遥控 App，已实机验证 |
-| `src/qcom-cam` | Qualcomm SM8750 / Sony IMX906 主摄控制器及 AVStream 视频接口，实机采集待验证 |
-| `src/qcom-gpu` | Adreno 830 Windows 硬件执行驱动 |
-| `src/mesa/umd` | D3D DDI → Vulkan / Turnip 用户态后端 |
-| `fw/gpu` | Adreno 830 GMU、SQE、AQE 固件及来源、许可 |
-| `fw/adsp` | 随音频驱动包安装、由 UEFI 预加载的 ADSP 主固件与 DTB 数据集 |
-| `fw/sia9177` | 音频运行数据 replay.bin |
-| `fw/wcd9395` | 音频编解码器运行数据 replay.bin |
-| `fw/wcn7861` | 网络初始化所需的七个固件/配置文件 |
-| `fw/wcn7861-bt` | 蓝牙外围控制器、TMEL、主蓝牙的五个原始固件/NVM 文件 |
-| `AnyLaySys.cer` | 项目共用的公开测试签名证书 |
-| `build.cmd` | 驱动构建、签名及固件复制的统一入口 |
-| `out/drv` | 最终签名的驱动包及其运行载荷 |
-| `out/<目标>` | 编译中间文件和 WDK 打包暂存 |
-| `out/mesa` | Mesa、vkd3d 源码及 GPU 用户态编译缓存 |
+| `src/<组件>` | 设备驱动源码 |
+| `src/mesa` | GPU 用户态后端、Mesa 补丁及运行库安装脚本 |
+| `src/qcom-ir/app` | 红外遥控 App |
+| `src/qcom-npu/ollama` | Ollama 官方前端与 NPU 后端适配 |
+| `fw` | 运行固件、配置及来源记录 |
+| `AnyLaySys.cer` | 公开测试签名证书 |
+| `build.cmd` | 构建、签名及固件部署入口 |
+| `out/drv` | 签名驱动包及运行载荷 |
+| `out/app` | 应用程序产物 |
 
-`fw` 保存设备运行所需的固件和配置；`out` 保存可重新生成的构建产物，已由 `.gitignore` 排除。
+编译中间文件位于 `out/<组件>/ARM64/Release`，GPU 源码和编译缓存位于 `out/mesa`。`out` 已由 `.gitignore` 排除，可重新生成。
 
-## 构建环境
+## 构建
 
-构建使用以下环境：
+在 Windows 上准备以下环境：
 
 - Visual Studio 18 Insiders：`C:\Program Files\Microsoft Visual Studio\18\Insiders`。
-- WDK：`10.0.26100.0`，包含对应的内核驱动工具集、ARM64 编译环境、SignTool 和 Inf2Cat。
-- GPU 用户态交叉编译：WSL `Ubuntu-26.10`；`WOA_WSL_DISTRO` 可指定已配置工具链的其他发行版。
-- 签名证书：默认使用 `AnyLaySys` 代码签名证书，指纹为 `FF7908A360512CF12E08C0BD99625830C1EA4E6D`；`WOA_SIGN_CERT` 可覆盖默认指纹。证书及对应私钥位于当前用户的 My 证书存储中。
+- WDK `10.0.26100.0`：包含 ARM64 工具链、SignTool 和 Inf2Cat。
+- GPU 交叉编译：已配置工具链的 WSL `Ubuntu-26.10`，可用 `WOA_WSL_DISTRO` 指定其他发行版。
+- 签名证书：默认使用当前用户 My 证书存储中的 `AnyLaySys` 证书及私钥，指纹为 `FF7908A360512CF12E08C0BD99625830C1EA4E6D`，可用 `WOA_SIGN_CERT` 覆盖。
+- UFCS 认证材料：构建音频前准备 `fw/charge/credential.bin`，大小为 16 字节。
 
-在已配置上述环境的管理员终端中运行构建。目标 Windows 启用测试签名并信任当前的 `AnyLaySys.cer`。
-
-构建音频或充电服务前，在本地准备 `src/qcom-charge/credential.bin`，内容为 16 字节 UFCS 认证材料。
-
-## 编译驱动
-
-在仓库根目录运行：
-
-```cmd
-build.cmd all
-build.cmd syna-touch
-build.cmd qcom-audio
-build.cmd qcom-bt
-build.cmd qcom-wlan
-build.cmd ti-batt
-build.cmd qcom-charge
-build.cmd qcom-cpupwr
-build.cmd qcom-keys
-build.cmd nxp-nfc
-build.cmd jiiov-fp
-build.cmd qcom-ir
-build.cmd ir-remote
-build.cmd qcom-cam
-build.cmd qcom-gpu
-build.cmd --help
-```
-
-PowerShell 中对应使用 `.\build.cmd`，例如：
+在仓库根目录的管理员 PowerShell 中运行：
 
 ```powershell
+.\build.cmd all
 .\build.cmd qcom-audio
+.\build.cmd --help
 ```
 
-`build.cmd all` 依次编译所有驱动，音频构建同时编译充电服务；任一目标失败时停止。也可指定单个组件构建，统一使用 **Release / ARM64** 配置。
+`all` 编译全部驱动；单组件可指定 `qcom-sensors`、`qcom-gpu` 等目标，完整列表见 `--help`，配置统一为 **Release / ARM64**。红外遥控 App 单独运行 `.\build.cmd ir-remote`。
 
-构建产物如下：
+驱动包输出到 `out/drv/<组件>`，安装时复制完整目录。特殊产物如下：
 
-| 目标 | 输出目录 | 文件 |
-| --- | --- | --- |
-| `syna-touch` | `out/drv/syna-touch` | syna_touch.inf / syna_touch.sys / syna_touch.cat |
-| `qcom-audio` | `out/drv/qcom-audio` | sia9177.inf / sia9177.sys / sia9177.cat / charge.exe / credential.bin / ADSP（58 文件） |
-| `qcom-bt` | `out/drv/qcom-bt` | qcom_bt.inf / qcom_bt.sys / qcom_bt.cat |
-| `qcom-wlan` | `out/drv/qcom-wlan` | qcom_wlan.inf / qcom_wlan.sys / qcom_wlan.cat |
-| `ti-batt` | `out/drv/ti-batt` | ti_batt.inf / ti_batt.sys / ti_batt.cat |
-| `qcom-charge` | `out/qcom-charge/ARM64/Release/bin` | charge.exe / credential.bin |
-| `qcom-cpupwr` | `out/drv/qcom-cpupwr` | qcom_cpupwr.inf / qcom_cpupwr.sys / qcom_cpupwr.cat |
-| `qcom-keys` | `out/drv/qcom-keys` | qcom_keys.inf / qcom_keys.sys / qcom_keys.cat |
-| `nxp-nfc` | `out/drv/nxp-nfc` | nxp_nfc.inf / nxp_nfc.dll / nxp_nfc.cat |
-| `jiiov-fp` | `out/drv/jiiov-fp` | jiiov_fp.inf / jiiov_fp.sys / jiiov_fp.cat / jiiov_fp_check.exe |
-| `qcom-cam` | `out/drv/qcom-cam` | qcom_cam.inf/sys/cat、qcom_cam_video.inf/sys/cat、采集及枚举工具 |
-| `qcom-gpu` | `out/drv/qcom-gpu` | qcom_gpu.inf/sys/cat、ARM64/x64 UMD、OpenGL、Turnip、运行库及 GPU 固件 |
+| 目标 | 包内容或输出 |
+| --- | --- |
+| `qcom-audio` | 音频、充电及 USB 管理驱动，附带 `ADSP` 固件和 `credential.bin` |
+| `qcom-sensors` | HID 驱动、原生 SensorsCx 驱动及 `QcomSensors` 服务，两份 INF 均需安装 |
+| `qcom-cam` | 主摄控制器、AVStream 视频驱动，两份 INF 均需安装 |
+| `qcom-npu` | FastRPC 与 MCDM 两份驱动、ONNX Runtime 执行提供程序及 `CDSP` 固件 |
+| `qcom-gpu` | WDDM 驱动、ARM64/x64 用户态后端及固件；D3D12 运行库另存于 `out/drv/qcom-d3d12` |
+| `ir-remote` | `out/app/ir-remote` |
+| `npu` | `out/app/npu` |
+| `ollama-npu` | `out/app/ollama-npu` |
 
-编译中间文件位于 `out/<目标>/ARM64/Release`。驱动包中的 SYS 和 CAT、GPU 用户态驱动 DLL 及充电服务 EXE 均由构建脚本签名，安装时使用 `out/drv` 下的完整包。
+充电和 USB 角色管理集成在音频驱动中，`qcom-charge` 构建目标为 `qcom-audio` 的别名。修改 ADSP 通道后，依次构建 `qcom-audio` 和 `qcom-sensors`。
 
-`qcom-audio` 会自动构建 `qcom-charge`，将 `charge.exe`、`credential.bin` 和 58 个 ADSP 文件纳入音频包及 CAT。其余运行数据由 `install-fw` 复制。
+## 固件部署与安装
 
-`qcom-gpu` 构建 D3D10/11 前端、OpenGL、Turnip 和 WDDM 内核，同时生成 `out/drv/qcom-d3d12` 的 VKD3D-Proton 运行库。Mesa、着色器编译器和 VKD3D-Proton 的源码与编译缓存位于 `out/mesa`。
+目标设备使用配套 UEFI/ACPI，ARM64 Windows 启用测试签名并信任 `AnyLaySys.cer`。UEFI 启动前需能读取目标 Windows 卷。
 
-DWM 使用 D3D11 → Vulkan → Turnip；OpenGL 使用 Gallium Freedreno；D3D12 使用 VKD3D-Proton → Vulkan → Turnip。已移除未完成的原生 D3D12 前端和专用后端。
+1. 在首次启动前，将完整音频包安装到离线 Windows 镜像，使 ADSP 固件进入 DriverStore。CPU 调频驱动也在离线阶段部署。以下 `W:` 替换为目标 Windows 卷：
 
-将 `out/drv/qcom-d3d12` 完整复制到设备，在管理员 PowerShell 中运行 `install-d3d12.ps1`，即可启用 ARM64/x64 共用的 D3D12 入口。安装器保留 Microsoft 运行库用于软件适配器和必需的系统入口，运行同一脚本并加 `-Uninstall` 可恢复系统入口。硬件 D3D12 使用已注册的 Turnip ICD，避免全局枚举进入 Dozen 后递归调用 D3D12。
+   ```powershell
+   dism /Image:W:\ /Add-Driver /Driver:".\out\drv\qcom-audio\sia9177.inf"
+   dism /Image:W:\ /Add-Driver /Driver:".\out\drv\qcom-cpupwr\qcom_cpupwr.inf"
+   ```
 
-D3D11 前端声明特性级 10_0；D3D12 的 12_0/12_1 能力由 VKD3D-Proton 与 Turnip 提供。接口与像素验证不等同于完整游戏兼容性验证。
+2. 复制运行数据，首次配置时填写本机原厂蓝牙地址：
 
-### 名称与版本
+   ```powershell
+   .\build.cmd install-fw -WindowsDirectory "W:\Windows" -BluetoothAddress "XX:XX:XX:XX:XX:XX"
+   ```
 
-源码组件目录采用“厂商－驱动类别”，使用 WLAN、BT、NFC、GPU、CPU、PWR、BATT 等常见缩写；touch、audio、sensors 保留明确的名称。芯片型号记录在硬件 ID、设备描述、固件分组和文档中。
+   `-WhatIf` 预览复制计划，`-Force` 覆盖已有文件。后续更新可省略蓝牙地址，沿用目标上已有的有效 `address.bin`。
 
-驱动提供商和文件公司为 `AnyLaySys`；硬件制造商按对应设备填写 Synaptics、Qualcomm、NXP、Texas Instruments 等。
+3. 将完整 `out/drv` 目录复制到设备，在目标手机的管理员 PowerShell 中安装：
 
-版本采用 `yy.M.d.revision`：
+   ```powershell
+   pnputil /add-driver ".\out\drv\*.inf" /subdirs /install
+   ```
 
-- 触控、音频、蓝牙和电量计默认按构建日期生成；`S3910VersionDate` / `S3910Revision`、`SiaVersionDate` / `SiaRevision`、`QcbVersionDate` / `QcbRevision`、`QbtVersionDate` / `QbtRevision` 可覆盖相应日期和修订号。
-- 网络版本为 `26.11.7.62`，版本头、INF 和工程中的 StampInf 日期、版本保持同步。
+   根设备首次安装时需创建对应实例：CPU 调频为 `ROOT\QCOM_CPUPWR`，传感器为 `ROOT\QCOMALS`、`ROOT\QCOMSENSORNATIVE` 和 `ROOT\AKMHALL`。传感器运行依赖音频驱动及随包安装的 `QcomSensors` 服务。
 
-## 复制固件和运行数据
+4. NPU 首次部署使用配套 UEFI 和 `linux_oneplus_ace5_pro/build.py -nr` 生成的 `boot.img`。将 `src/qcom-npu/deploy.ps1` 一并复制到设备，在管理员 PowerShell 中运行：
 
-固件按组件存放，部署位置如下：
+   ```powershell
+   .\src\qcom-npu\deploy.ps1 -Package .\out\drv\qcom-npu
+   ```
 
-| 输入 | 目标位置 | 当前数量 |
-| --- | --- | --- |
-| `fw/adsp` | 音频包内 `ADSP`；安装后为 `%SystemRoot%/System32/DriverStore/FileRepository/sia9177.inf_arm64_<系统生成标识>/ADSP` | 58 文件 |
-| `fw/sia9177/replay.bin` | 目标 Windows 目录下 `System32/drivers/sia9177/replay.bin` | 1 文件 |
-| `fw/wcd9395/replay.bin` | 目标 Windows 目录下 `System32/drivers/wcd9395/replay.bin` | 1 文件 |
-| `fw/wcn7861` | 目标 Windows 目录下 `System32/drivers/wcn7861` | 7 文件 |
-| `fw/wcn7861-bt` | 目标 Windows 目录下 `System32/drivers/wcn7861-bt` | 5 固件/NVM 文件，另配 address.bin |
-| `fw/gpu` | 目标 Windows 目录下 `System32/drivers/qcom-gpu` | 3 固件 |
-| `fw/gpu/gen80000_zap.mbn` | 随 GPU 驱动包安装到 `DriverStore/FileRepository/qcom_gpu.inf_arm64_<系统生成标识>`，由配套 UEFI 认证加载 | 1 固件 |
+   `build.cmd qcom-npu` 编译 FastRPC 驱动、MCDM 计算驱动、原生 ONNX Runtime 执行提供程序和固定 b12359 版本的 GGML Hexagon 后端，并自动获取和校验 V79 DSP 运行库。`deploy.ps1` 安装两个驱动并创建或更新唯一的计算设备；固件、运行库、`qcom_npu_ep.dll` 和 `GGML/qcom_npu_ggml.dll` 全部由 DriverStore 管理。
 
-ADSP 随音频驱动包安装到 DriverStore。UEFI 在 Windows 启动前选择 `DriverVer` 最高且包含完整 MDT/DTB 的音频包，加载同一 ADSP 目录中的固件分段。目标 Windows 卷需在启动前可供 UEFI 读取。音频 replay 数据由 Windows 驱动读取。
+   ARM64 ONNX Runtime 1.24+ 程序可通过 `RegisterExecutionProviderLibrary` 注册 `qcom_npu_ep.dll`，选择 `QcomHtpExecutionProvider`。`src/qcom-npu/ep/client.h` 提供自动定位 DriverStore、注册和选择设备的辅助函数：
 
-其余固件和运行数据通过 `install-fw` 复制。首次配置时填写目标设备的原厂蓝牙地址；例中的 `W:` 替换为实际 ARM64 Windows 目标：
+   ```cpp
+   Ort::Env environment(ORT_LOGGING_LEVEL_WARNING, "my-app");
+   const OrtEpDevice* device = qcom_npu::Register(environment);
+   Ort::SessionOptions options;
+   qcom_npu::Attach(environment, options, device);
+   Ort::Session session(environment, L"model.onnx", options);
+   ```
 
-```powershell
-.\build.cmd install-fw -WindowsDirectory "W:\Windows" -BluetoothAddress "XX:XX:XX:XX:XX:XX"
-```
+   原始 ONNX 支持静态 FP32、最多四维的 Add/Sub/Mul/Div、Relu/Sigmoid/Tanh/Exp/Sqrt/Abs/Neg、Softmax、二维 MatMul、部分 Conv/MaxPool 和常量形状 Reshape。支持的节点由 Hexagon 执行，其他节点可由 ONNX Runtime 的 CPU 提供程序执行；`Attach` 的第四个参数设为 `true` 可禁止 CPU 回退。也保留一个静态 FP16 输入和输出的预编译 HTP `EPContext` 接口。
 
-添加 `-WhatIf` 可预览复制计划；覆盖已有目标文件时添加 `-Force`。目标 Windows 目录须已存在，脚本会检查 ARM64 架构。
+   驱动构建同时生成签名的 `qcom_npu_ep.msix`。部署脚本在当前交互用户下注册 Windows ML 执行提供程序扩展，支持使用新 Windows ML 提供程序目录的应用发现设备。DirectML 的 Direct3D 12 用户态驱动接口尚未实现；自带旧版、不同架构或私有运行时的软件仍需适配。
 
-蓝牙地址转换为六字节小端 `address.bin`，保存在 `System32/drivers/wcn7861-bt`。未传入 `-BluetoothAddress` 时，使用目标上已有的有效地址文件。
+   `build.cmd ollama-npu` 构建并签名 Ollama 0.40.18 的 Windows ARM64 本地适配版，完整产物位于 `out/app/ollama-npu`，适配源位于 `src/qcom-npu/ollama`。构建自动获取并校验 Go 与交叉编译器，设备无需 SDK。该包包含相同版本官方源码编译的 ARM64 图形前端，保留官方界面、模型管理、命令行和 HTTP 接口。
 
-## 在完整 Windows 中使用
+   复制完整产物到设备，运行 `install.ps1` 安装到 `%LOCALAPPDATA%/Programs/Ollama`，加入用户 PATH 并由官方前端管理后台服务与登录启动。桌面“Ollama”打开图形对话界面。使用正常的 `ollama pull`、`ollama run` 下载和运行模型，无需在下载时指定 NPU；`ollama ps` 显示模型的 CPU/NPU 分配，`ollama stop` 释放模型。第三方客户端可使用 `http://127.0.0.1:11434` 或 OpenAI 兼容地址 `http://127.0.0.1:11434/v1`。
 
-1. 准备配套的 UEFI/ACPI，并配置目标 Windows 的测试签名和证书信任。
-2. 将完整音频包通过 DISM 安装到目标 ARM64 Windows 镜像，使 ADSP 随包进入 DriverStore。CPU 调频驱动的离线安装步骤见 对应 CPU 驱动包。
-3. 在首次启动驱动前，用 `install-fw` 部署上述运行数据和本机蓝牙地址。
-4. 在目标手机的 ARM64 Windows 管理员终端中安装完整驱动包，例如：
+   Ollama 从已安装驱动自动定位 Hexagon 后端并刷新旧的自有路径。默认要求模型前向计算的全部算子由 V79 HTP/HMX/HVX 执行；不支持的算子会报错，禁止静默回退到 CPU。输入嵌入也放在 NPU，分词、采样和程序控制仍使用 CPU。默认使用 sustained_high_performance 功耗模式、上下文 2048、批次 128、两个驻留模型和每模型一个推理请求，保留显式设置。模型大小、量化格式和上下文缓存仍影响能否完整加载；默认严格检查由 `GGML_NPU_REQUIRE_FULL_OFFLOAD=1` 控制。官方安装包更新会替换本地适配后端，升级后需重新构建并安装本仓库版本。
 
-```powershell
-pnputil /add-driver ".\out\drv\syna-touch\syna_touch.inf" /install
-pnputil /add-driver ".\out\drv\qcom-audio\sia9177.inf" /install
-pnputil /add-driver ".\out\drv\qcom-bt\qcom_bt.inf" /install
-pnputil /add-driver ".\out\drv\qcom-wlan\qcom_wlan.inf" /install
-pnputil /add-driver ".\out\drv\ti-batt\ti_batt.inf" /install
-pnputil /add-driver ".\out\drv\qcom-gpu\qcom_gpu.inf" /install
-```
+   驱动为新进程注册机器级 `GGML_BACKEND_PATH`，指向 DriverStore 的 Hexagon 后端，保留用户已有的第三方路径。兼容动态后端 ABI 3 的 ARM64 GGML 程序可通过标准 `ggml_backend_load_all()` 枚举 `HTP0: Qualcomm Hexagon V79 NPU`；封装的私有后端、x64 程序或不同 ABI 仍需适配。
+
+   MCDM 将实际推理提交给 Windows 调度，依据 DSP 完成通知累计执行时间。模型、KV 缓存和计算缓冲区登记为已有系统内存，完成驻留后再提交，避免另外分配后备副本，供 Windows 按进程和适配器统计真实共享占用。任务管理器的 2 MiB 专用段是驱动预留的调度内存，模型使用共享系统内存。配套 UEFI 暴露完整 SMMU 资源后，模型缓冲区使用物理地址 4 GiB 以上的非连续内存，预算取该范围 Windows 可见内存并预留 1 GiB；低地址内存留给固件通信。V79 的 32 位虚拟地址通过约 1.75 GiB 的映射窗口复用，可处理总占用超过 4 GiB 的模型；单个张量连同保护页仍须不超过 512 MiB。驱动最多接入八个独立推理进程，共用全局内存预算。MCDM 为各进程管理独立虚拟地址空间并按时间片共享执行引擎，RPC 回复、缓冲区和 DSP 保护域按进程隔离；未执行的任务在抢占后重新提交，退出一个进程会释放其资源。驱动在执行前恢复所需映射，并回收空闲缓冲区的映射以复用窗口。多个模型能否同时驻留仍取决于可用内存。同步 RPC 使用高精度休眠等待，页表采用批量写入；静态缓冲区默认按 256 MiB 分组以减少映射往返。设置用户环境变量 `GGML_HEXAGON_POWER_MODE=balanced` 可切换平衡模式，重启 Ollama 后生效。
 
 5. 重启设备。
 
-## 指纹
+固件由驱动包安装或由 `install-fw` 复制，位置如下：
 
-Ace 5 Pro 的 Jiiov JV0301 TA 初始化命令 `0x7d0` 已在实机返回 `0`，白圈照明下的按压采图也已返回 `CaptureResult=0`。当前驱动 `26.11.24.28` 已通过 `sui@192.168.3.157` 部署为 `oem824.inf`，设备 `ROOT\DEVGEN\JIIOV_FP` 状态 OK；已核对实际运行的服务文件为 28 版，SHA256 为 `8cc40ece1a5889e9ac1bc6c48d0e9fb65fe362cb723f08480e01d4fa4a6d9197`。27 版驱动包及初始化、白圈采图成果保留。Windows Hello 录入、模板保存和匹配仍未完成。
+| 输入 | 安装位置 |
+| --- | --- |
+| `fw/adsp`、`fw/charge/credential.bin` | 音频包的 DriverStore 目录，ADSP 由 UEFI 预加载 |
+| `fw/cdsp` | NPU 包的 DriverStore 目录，由 UEFI 认证加载 |
+| `fw/gpu/gen80000_zap.mbn`、`fw/gpu/vpu35_4v.mbn` | GPU 包的 DriverStore 目录 |
+| `fw/gpu` 的 GMU/SQE/AQE 固件 | Windows 目录下 `System32/drivers/qcom-gpu` |
+| `fw/sia9177`、`fw/wcd9395` | Windows 目录下 `System32/drivers` 的同名目录 |
+| `fw/wcn7861`、`fw/wcn7861-bt` | Windows 目录下 `System32/drivers` 的同名目录，蓝牙地址存为 `address.bin` |
 
-本机项目号为 `24811`，使用 GPIO78 复位、L14B 3.008 V 供电。原厂 SPI 为 QUP1 SE2（`0xA88000`、GPIO40–43、25 MHz），使用 GPI DMA。驱动先从原厂区域加载 `uff_spi`，配置传感器供电和时钟，再以原厂 op2 卸载 SPI TA，随后加载本机 `uff_jv`。命令共享对象为 64 KiB，覆盖 `0xf000 + 命令长度`；命令头 `+0x1c` 提供日志区长度。TA 文本和 SCM 日志分别保存在 `C:\Windows\Temp\jiiov-fp-ta.log`、`jiiov-fp-tee.log`，日志 I/O 状态独立于 TA 返回值。
-
-原 `0x13ba` 的根因是 OTP 缓存持久化失败。TA 的传感器寄存器初始化成功后，`gpFileIO_Write_File` 返回 `0xf0100003`（TEE 存储不可用）；原厂 `tee_write` 还要求保存同名 `.normal` 副本。驱动现通过 UID87（`CRegisterListenerCBO`）、op0、counts `0x201` 注册两种文件服务：GPFILE listener `0x7000` 使用 128 KiB 共享区，普通 FILE listener **10** 使用 32 KiB 共享区。`0x4000` 是 Secure UI，不是普通文件服务。文件使用实际 Windows I/O，映射到 `C:\Windows\System32\jiiov-fp\persist`，目录由驱动创建。路径和长度均检查，未知操作返回错误；TA 提供的加密文件字节保持原样。
-
-实机验证覆盖了缓存不存在和缓存已存在两条初始化路径。先备份 Windows 侧测试缓存，TA 从传感器读取 OTP 并生成 381 字节加密文件及 329 字节 `.normal` 副本，`ta-init` 返回成功；重载 TA 后，缓存 stat、读取、解密及算法初始化均成功，`InitResult=00000000`、`TeeStatus=00000000`、`Cleanup=00000000`、`Pinned=0`、`LiveObjects=0`。新读取的 329 字节 OTP 与从原厂 persist 只读提取的 `jv_opt_data.bin.normal` 逐字节一致。没有修改原厂 TA 或 Android 分区。
-
-在 `C:\DESIGN\WoA` 执行 `build.cmd jiiov-fp` 可生成签名的 ARM64 KMDF 驱动及诊断工具。将驱动包和 `src\jiiov-fp\tools\deploy.ps1` 复制到目标机后，管理员 PowerShell 可运行 `deploy.ps1 -PackagePath <驱动包目录>`。此脚本会核对 PnP 版本、服务实际指向的 DriverStore 文件和 SHA256；Windows 更新 INF 后偶尔保留旧服务路径，脚本会禁用指纹设备、更新服务指向并重新启用，同时保留旧路径用于恢复。
-
-目标机初始化验证命令：
-
-```powershell
-C:\Drivers\jiiov-fp-26.11.24.27\jiiov_fp_check.exe ta-init C:\Drivers\jiiov-fp-26.11.24.27\uff_spi.elf C:\Drivers\jiiov-fp-26.11.24.27\uff_jv.elf
-```
-
-`ta-init` 只执行完整 TA 初始化并释放资源；`capture <uff_spi.elf> <uff_jv.elf>` 继续发送 `0x7d4`，保留真实采图结果。`InitResult=ffffffff` 表示本次未执行 INIT。`jv-config <uff_jv.elf>` 通过原厂 `0x835` GET_TA_CONFIG 验证项目 `24811`、传感器 `G_OPTICAL_JV0301`、图标尺寸 `195`、位置 `260`、类型 `optical` 和亮度策略 `hbm`；请求长度为 `0x240`，配置 ID 在 `+0x30`、所需长度在 `+0x238`、结果在 `+0x38`，`hbm` 按内部请求读取 4 字节。
-
-初始化末尾，原厂 TA 执行 `JV0301SetPowerMode(2)` 并关闭 SPI。采图流程现先通过 `0x7d7` ENROLL_DOWN 唤醒至模式 8，再发送 `0x7d4`。无照明时已能读取 42,507 字节图像包，但曝光检查返回内部错误 114、业务错误 `0x13ed`。24 版实机按压白圈后，同一采图路径返回 `0`，中心均值 `2867`、`image_exp=0`、采图耗时约 `307ms`，清理成功且无保留对象。测试屏幕为 1264×2780，白圈直径 195，中心约 (632,2520)。`tools/capture-lit.ps1` 在交互桌面提供按压触发的测试，默认要求竖屏并恢复亮度；旋转坐标提供实验选项；只通过正常桌面图像及可用的 Windows 调光接口照明，尚未实现面板 HBM 联动。
-
-`sample-feature <uff_spi.elf> <uff_jv.elf>` 执行原厂验证算法启动 `0x7dc`、验证唤醒 `0x7dd`（160 字节）、采图、特征命令 `0x7d3` 和取消 `0x7e3`（48 字节）。26 版竖屏按压 5 次采图均返回 `0`，原厂算法日志 `retExtract=0`、`mgResult.status=0`、内部 `100 → ANC 300`。此前探针在特征附加返回字段 `+0x58` 放置 `ffffffff`，但原厂成功分支不会改写该字段，导致驱动误判失败。27 版遵循原厂零初始化，并分别报告必需命令返回 `FeatureCommandResult`、可选事件 `FeatureResult/FeatureValue`；未调用的诊断字段仍为 `ffffffff`，共享头 `+8` 继续使用完成哨兵，缺失响应不能判成功。命令成功仅证明算法调用完成，不能作为有效模板或指纹匹配成功的证据。
-
-27 版增加绑定客户端句柄的 `JFP_SESSION_BEGIN/SAMPLE/END/STATUS`，初始化后的 TA 和算法会话可跨采样请求复用，其他句柄的采样、结束和初始化请求返回忙；客户端关闭句柄时取消并清理，设备释放时也执行清理。`session-init <uff_spi.elf> <uff_jv.elf>` 实机验证初始化、句柄隔离和关闭自动清理均通过；`session-feature` 在同一会话内连续执行两轮验证唤醒、采图、特征命令，再取消并释放，实机 `Samples=2`、`CancelResult=0`、`Cleanup=0`、`Pinned=0`、`LiveObjects=0`。本轮无测试照明的质量日志 `img_eval_qty=0`，即使命令返回 `0` 也不能视为有效指纹。`tools/capture-lit.ps1 -ExtractFeature -ReuseSession` 的竖屏按压实测已完成 3 轮、6 张图，采图和特征命令全部返回 `0`；最新两张中心均值 `3123/3141`、`image_exp=0`、`img_eval_qty=46`，但 `mask_ratio=0`、`feature_size=4`，尚未证明生成可用于匹配的有效特征。UAPI 版本为 6。
-
-这些接口目前不录入模板、不产生认证结果，也尚未接入 WBF 的异步取消采图、engine/storage adapter 和授权录入。`spi-service` 有界探针已确认 UID16 底层 SPI 服务拒绝 Windows 客户端（对象错误 `0x0b`，发生在打开传感器之前）；原厂 SDK 图像导出函数没有接入该 TA 外层命令表。原厂 `0x7d6` 录入入口会校验预录入 challenge、HMAC 和超时，Windows Hello 录入需解决合法授权与模板映射，不能把诊断命令成功直接作为身份验证。
-
-TA 仍报告未加载 `jv_normalized_calibration.bin`；此前只读检查的原厂 `/data` 和 `/fingerprint` 中没有找到该文件，校准状态和匹配能力仍需实机验证。不能单凭 `mask_ratio=0`、`feature_size=4` 判定特征无效：本地 Ace 5 原厂 Android 参考日志也输出相同字段，随后实际匹配分数 `0.706650`、`is_accepted=1`，Android 收到认证成功回调。该对照来自 Ace 5，尚不能证明本机 Ace 5 Pro 的采样可匹配，但纠正了此前把这两个字段作为失败判据的推断。
-
-2026-11-24 切回本机 Android 后，ADB 确认原厂 HAL 二进制与此前提取的文件 SHA256 一致；指纹服务存在、没有已录入模板、没有永久或临时锁定。用户在原厂设置中实际尝试录入，界面立即显示“再试一次”；HAL 日志明确为 `invalid cali data`、录入返回 `12013`（`0x2eed`），HMAC 密钥已就绪。核对原厂代码可见，该错误由 `getFactoryCaliState()` 检查 `vendor.fingerprint.cali` 触发；root 下实读该属性为 `0`，`/mnt/vendor/persist/fingerprint/fingerprint_cali.bin` 缺失。失败发生在原厂校准状态检查，尚未进入此次录入的 TA 采图；这不证明传感器损坏，也不能把 root 当作已证实的唯一原因。没有找到可恢复的本机校准文件，按用户要求暂时搁置指纹适配，待恢复并验证原厂校准后继续。已退出录入测试并恢复普通 HAL 日志级别，没有生成模板或认证结果。
-
-用户随后恢复 WoA 验证，28 版新增 `enroll-preflight` 有界诊断（UAPI 7）。Windows 持久化目录仍缺失归一化校准文件，实机 INIT 和 `0x7d5` PRE_ENROLL 均返回 `0`，命令 `+0x78` 生成非零 challenge。未提供授权的 `0x7d6` 请求准确返回 `0x69`（`invalid challenge for token:0`），取消、POST_ENROLL 和资源清理全部为 `0`，没有采样或保存模板。原厂代码确认 INIT 在校准加载失败后记录状态并继续；因此不能把恢复 Android 校准当成继续 WoA 适配的已证实前提。该负向测试尚未通过授权校验，不能证明后续录入和匹配不需要校准。详细证据见 `/home/fuck/fingerprint-ace5pro-20261124/calibration-validation/README.md`。
-
-原厂 Binder 动态日志请求附带的 TA 命令 `5000` 返回 `104`，对应此 TA 未实现该命令，不能当作初始化或采图失败的证据。28 版 WBDI 缓冲区、请求和采图不可用行为回归通过，`WinBioEnumBiometricUnits` 返回 Units=0；持续会话初始化、句柄隔离和关闭清理也通过。驱动不会在启动时自动执行这些诊断。
-
-主机验证入口 `python3 src/jiiov-fp/tests/run.py` 使用 ASan/UBSan，覆盖 JV0301 协议、QTEE 服务与回调边界、完整初始化与独立 INIT 路径、资源释放，以及 GP/普通文件 ABI、加密字节保留、路径和长度边界、EOF 和文件句柄清理。
-
-## GPU 与 CPU
-
-GPU 原生桌面路径为 DWM / D3D DDI → Vulkan 后端 → Turnip → WDDM → Qualcomm Adreno 830。DWM 硬件绘制、翻转和窗口拖动正常。设备名称为 `Qualcomm Adreno 830`，构建入口为 `build.cmd qcom-gpu`。下载、版本与工具链配置、编译和签名逻辑统一保存在 [build.cmd](build.cmd)，运行时生成的脚本和配置位于 `out/mesa`，最终驱动包位于 `out/drv/qcom-gpu`。`src/mesa` 仅保存驱动源码和 Mesa 源码补丁。
-
-D3D 前端按图像和缓冲的读写依赖同步，复用 framebuffer、描述符及实际绑定状态；共享纹理直接导入 GPU 图像，相同存储和区域的空拷贝直接跳过。
-
-DWM 的正常呈现只接受硬件翻转，扫描输出使用 DPU 直接扫描或 GPU 复制扫描。已删除内核 Present/Blt 的 CPU 像素复制、CPU 扫描输出、CPU 帧缓冲映射及系统应急写屏回调；硬件扫描路径初始化失败时返回错误。CPU 资源上传、分页和命令数据复制仍用于内存管理。
-
-Turnip 的 Win32 Vulkan 呈现通过共享 WDDM 纹理接入原生 D3D11 / DXGI 翻转交换链，再交给 DWM 合成。原生后缓冲的资源标识在交换链创建时通过一次 1×1 像素 GPU 读取获取，逐帧直接使用缓存的资源标识。Vulkan 渲染图像池与 DXGI 双后缓冲分开管理，支持游戏请求三张或更多 Vulkan 图像；原生交换链始终使用两份已导入的共享线性 allocation。渲染结果在 GPU 上复制到呈现缓冲，渲染与缓冲复用通过 WDDM fence 排序；此路径不再逐行复制像素到 CPU 位图或使用 GDI 上屏。OpenGL 的 WGL 呈现仍使用原有路径。
-
-GPU 按负载选择原厂档位，每 20 ms 采样，正常最低 342 MHz；工作积压时加速提频，持续活动时短暂保持已提升的频率。温控读取有效 GPU TSENS 通道的最高温度：87°C 限至 734 MHz，99°C 限至 160 MHz，降到 81°C 退出紧急档，降到 78°C 解除温度限频。温度不可读时使用最低档，温控与额外频率上限优先于负载和固定频率请求。调频与提交队列分开同步。显示提交注册 MPO1/2/3 主平面回调，仅报告一个 RGB 主平面。
-
-GPU 固定显存池为 64 MB。共享显存容量按 Windows 可见内存预算计算，并受剩余 GPU 地址空间约束，当前最大为 4 GB；物理页和页记录按需映射、分配与释放。
-
-SM8750 CPU 两组核心各有原厂 16 档：六核组 384–3532.8 MHz，两核组 1017.6–4320 MHz。驱动按负载调频并支持 PSCI 保留上下文休眠。两个簇独立读取 CPU/cache TSENS：87°C 时分别限至 2400 / 2438.4 MHz，99°C 时降至最低档，81°C 退出紧急档，78°C 解除温度限频。升温和传感器失效立即收紧上限，冷却条件需持续 500 ms；Windows 请求仍约束频率上限。构建入口为 `build.cmd qcom-cpupwr`。
-
-## 蓝牙与 USB
-
-蓝牙使用独立的 GENI UART（`0x898000`、GSI 493），由 UEFI 的 `ACPI\HMRB7861` 节点提供寄存器和中断。Windows 原生蓝牙、配对、键鼠、A2DP 音乐、LE 扫描、GATT 广播和开关恢复正常。
-
-USB 2.0 Host/OTG 支持自动插拔与充电器输入切换，主控和集线器使用 Windows 原生 USBXHCI/USBHUB3，UEFI 提供 `ACPI\PNP0D10` 节点。音频包中的 ADSP/PMIC 通道与 `ALSCharge` 服务共同管理 OTG 供电和角色切换，USB 外设正常工作。
-
-## 电量与充电
-
-`ti-batt` 读取原厂配置为 BQ28Z610 的双电芯电量计，并向 Windows 提供电池电量。`qcom-audio` 提供 PMIC GLINK、普通充电和 UFCS 充电通道，`qcom-charge` 的 `ALSCharge` 服务随音频包安装并自动启动，管理充电策略和 USB 角色。
-
-UFCS 认证文件 `credential.bin` 随音频包进入 DriverStore，与 `charge.exe` 位于同一目录，由服务读取。
-
-## 传感器
-
-`qcom-sensors` 通过 Windows 标准 HID 传感器接口提供环境光、简单方向、三轴陀螺仪和三轴加速度计，复用 `qcom-audio` 的 ADSP 通道。陀螺仪单位为度/秒，加速度单位为 g（包含重力）；两者最小及默认报告间隔为 20 ms。自动旋转与三轴加速度共用一条加速度订阅：仅旋转时请求 9 Hz，三轴应用订阅时请求 50 Hz，三轴需求结束后恢复旋转频率。Windows Gyrometer 和 Accelerometer 接口已实机验证。ADSP 的融合旋转向量通过同一个 HID 姿态设备提供 Compass（磁北航向）、Inclinometer（倾角）和 OrientationSensor（四元数与旋转矩阵）三个标准接口，最小及默认报告间隔为 100 ms；三者共用一条订阅。
-
-重力、线性加速度、相对姿态和地磁姿态也通过独立 HID 集合提供。磁力计、计步、活动状态和接近检测由同包的 UMDF SensorsCx 驱动提供，复用只读的 `QcomSensorData` 入口；入口只接受传感器查询。磁场单位为 µT；计步提供真实累计总步数，步态类型为 Unknown，累计时长不提供有效测量。活动状态接入 ADSP `activity_recognition`，支持 Unknown、Stationary、Walking、Running、InVehicle、Biking，置信度为 Low；固件未提供 Idle/Fidgeting。消息中的层级状态已按本机固件的发布器与消费端核对，步行事件已实测；RMD/AMD 保留为完整分类不可用时的静止/未知回退。跑步、骑行和乘车的实际识别准确性仍待实测。标准 API 已读到三轴磁场和活动状态；手持手机前后甩动后，ADSP 与 Windows 计步接口均读到累计计数 11，确认计步变化能够上报。实际步行准确性仍待验证。新增接口仅在应用订阅时轮询，订阅结束后 ADSP 需求在 5 秒内过期。HID 与原生接口统一使用 `QcomSensorData` 的单一读取 ABI，不包含原始事件采集或厂商服务探测接口。`QcomSensors`（`qcom_sensors.exe`） 负责 ADSP 固件配置与注册初始化，是正常启动所需的服务。
-
-原生驱动的承载控制器标记为不在设备管理器普通列表显示，原有四个标准接口继续供应用使用。接近检测通过 `ProximityDetection` 布尔字段提供，实机 Windows 事件已验证 0→1→0；不提供未经测量的毫米距离。SensorExplorer 部分页面可能不更新；交叉测试可使用 SensorInfo；接近距离未提供时不以 0 毫米代替。
-
-实机没有注册 pressure 传感器，[OnePlus Ace 5 Pro 官方规格](https://www.oneplus.com/cn/ace-5-pro/specs)也未列出气压计；通用参考板的气压配置不能证明手机具备该硬件。目前不提供气压和气压高度。色温复用 `wise_rgb` 的原厂结果，通过现有环境光 HID 接口上报 Kelvin，报告分辨率为 0.01 K；实机 Windows 标准 API 已验证连续色温及照度读数。环境色尚未接入标准接口，罗盘真北航向的磁偏角仍待校正。
-
-修改 ADSP 通道后，依次运行 `build.cmd qcom-audio` 和 `build.cmd qcom-sensors`。传感器包同时生成、签名 HID 驱动和原生 SensorsCx 驱动，两份 INF 都需安装。原生接口使用 `ROOT\QCOMSENSORNATIVE`，独立霍尔项使用 `ROOT\AKMHALL`；两者复用同一份原生 INF，首次安装时需创建对应根设备实例。更新底层通道后重启设备。
-
-AKM AK09970 霍尔传感器由 `qcom-keys` 通过专用 GPIO80/81 I²C 读取，ACPI 为按键设备声明对应的两个 GPIO 页；UEFI 保持原厂 `ldob1` 1.8 V 供电。`qcom-sensors` 额外提供名为 `AKM AK09970 Hall Sensor` 的 Windows CustomSensor：CustomValue0／1／2 为真实有符号 X／Y／Z 原始计数，CustomValue3 为三段位置（0 未确认、1 上、2 中、3 下）。不把未经校准的计数标作 µT。位置按原厂 X／Y 判定并经过两次采样确认；上档静音并关闭触控／按键振动，中档恢复声音但关闭振动，下档恢复声音和振动。静音由现有 `QcomSensors`（`qcom_sensors.exe`） 调用 Core Audio 设置，不新增服务。实机已验证 AK09970 芯片识别与连续变化的真实三轴原始计数；三档声音／振动行为仍需逐档实测。各传感器源码平铺拆分，共有框架与文件对应关系见 [传感器源码说明](src/qcom-sensors/README.md)。
-
-## 触屏反馈
-
-触控及按键反馈由 `qcom-keys` 控制 PMIH010x 马达，每次播放 18 ms，使用高精度定时器，实际电压为 800 mV 和 1200 mV，振幅均为 `0xFF`。`syna-touch` 按接触 ID 分别记录每根手指：新增手指按下请求一次 800 mV 短振，在原有移动阈值内按住超过 495 ms 后请求一次 1200 mV 短振，抬起不振；移动超限或读取失败取消对应长按反馈。音量键单独按下上报一次音量按下／释放并请求一次 800 mV；按住 270 ms 后由按键驱动按 27 ms 节奏重复上报音量按下／释放，同时请求 800 mV 振动，系统音量连调与振动请求共用计时，播放和停机期间及停止后 27 ms 内的新触发忽略、不补振。电源键单独短按在抬起时请求一次 800 mV，单独按住 2.4 s 时请求一次 800 mV，之后抬起不再振。音量加／电源、音量减／电源组合成立时各请求一次 800 mV，并取消该次电源抬起反馈。`qcom-audio` 的扬声器音量和静音节点实际执行 24 位 PCM 增益处理，并通过已有内核控制设备提供当前音量上下限；音量键按住时到达相应极限播放两次 1200 mV，每次 18 ms，两次之间仍等待停止后 27 ms，随后停止重复反馈。极限模式在马达空闲后开始，开始前松开按键或离开极限会取消。触控、按键及音量协作不需要常驻用户态程序。版本沿用 `yy.M.d.revision`，日期和修订号由各驱动现有项目属性控制。
-
-## 主摄
-
-`qcom-cam` 控制高通 SM8750 相机平台，连接 Sony IMX906 主摄。当前包含主摄控制器和 AVStream 视频接口，可向 Windows 注册 IMX906 相机子设备；实机枚举和采集尚待重启完成驱动切换后验证。构建、配套 UEFI、诊断工具和运行限制见 [相机说明](src/qcom-cam/README.md)。
+D3D12 使用 VKD3D-Proton 与 Turnip。将完整 `out/drv/qcom-d3d12` 复制到设备，在管理员 PowerShell 中运行该目录的 `install-d3d12.ps1`；加 `-Uninstall` 可恢复系统入口。
 
 ## 许可
 
-触控目录保留上游 GPLv3 许可证；网络部分文件采用 BSD-3-Clause-Clear。各组件的许可证和固件来源记录随对应目录保留。
+触控目录保留上游 GPLv3 许可证，网络部分文件采用 BSD-3-Clause-Clear。各组件的许可证及固件来源记录保留在对应目录中。

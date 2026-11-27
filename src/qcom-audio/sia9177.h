@@ -79,6 +79,10 @@ typedef struct _SIA_DEVICE {
     PUCHAR Pins[5];
     PSIA_LINK Link;
     HANDLE Thread;
+    PUCHAR UsbRead,UsbWrite;
+    ULONGLONG UsbClockAt;
+    UCHAR UsbClockSaved[2];
+    BOOLEAN UsbClock;
     KEVENT WorkEvent;
     volatile LONG Stopping;
     volatile LONG Running;

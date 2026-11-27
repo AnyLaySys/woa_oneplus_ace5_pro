@@ -1,0 +1,20 @@
+LIBRARY qcom_npu_rpc
+EXPORTS
+    rpcmem_alloc
+    rpcmem_alloc2
+    rpcmem_free
+    rpcmem_to_fd
+    fastrpc_mmap
+    fastrpc_munmap
+    remote_handle64_open
+    remote_handle64_invoke
+    remote_handle64_close
+    remote_handle_control
+    remote_handle64_control
+    remote_session_control
+    dspqueue_create
+    dspqueue_export
+    dspqueue_close
+    dspqueue_write
+    dspqueue_read
+    dspqueue_read_noblock

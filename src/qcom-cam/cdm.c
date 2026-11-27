@@ -9,6 +9,11 @@
 #include "tbu-translate.h"
 #include "scm-ready.h"
 #include "scm-qos-payload.h"
+#include "isp-dmi.h"
+#include "isp-gtm-reference.h"
+#include "isp-gamma-reference.h"
+#include "dma-idle.h"
+#include "smmu-route-check.h"
 #include "../platform/lock.h"
 
 VOID CamScmOnce(ULONGLONG *registers);
@@ -163,9 +168,13 @@ static NTSTATUS AllocateCommand(CAM *c) {
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS Submit(CAM *c,BOOLEAN fetch,const CAM_ISP_GAMMA *gamma,BOOLEAN lut,const CAM_ISP_GTM *gtm);
+
 static NTSTATUS Configure(CAM *c,ULONG limit,BOOLEAN fetch) {
     if(c->CdmPending||c->DmaActive||c->RxActive||c->ScmPending||c->CrmPending)return STATUS_DEVICE_BUSY;
-    if(!c->Powered||!CamDiagnosticDmaReady(c))return STATUS_DEVICE_NOT_READY;
+    /* Command/LUT DMA does not require a running sensor receiver. All clock
+       and interconnect gates remain required; image DMA keeps its RX guard. */
+    if(!c->Powered||!CamControlDmaReady(c))return STATUS_DEVICE_NOT_READY;
     PUCHAR b=c->Base[CamCdm];
     c->Diag.Step=161;c->Diag.Region=CamCdm;c->Diag.Address=0x1860;c->Diag.Slot=MAXULONG;
     if(CamRead(b,0)!=0x20020000)return STATUS_REVISION_MISMATCH;
@@ -209,20 +218,33 @@ static NTSTATUS Configure(CAM *c,ULONG limit,BOOLEAN fetch) {
     NTSTATUS routeReleased=PlatformLockRelease(&routeGuard);
     if(!NT_SUCCESS(status))return status;
     if(!NT_SUCCESS(routeReleased))return routeReleased;
-    c->Diag.Region=CamCdm;c->Diag.Address=0xac7f000;RtlCopyMemory(c->Diag.Resource,"cam-cdm",8);
+    c->Diag.Region=CamCdm;c->Diag.Address=0xac81000;RtlCopyMemory(c->Diag.Resource,"cam-cdm",8);
     if(limit<5) {
         Snapshot(c);
         c->Diag.Step=169;return STATUS_SUCCESS;
     }
+    return Submit(c,fetch,NULL,FALSE,NULL);
+}
+
+static NTSTATUS Submit(CAM *c,BOOLEAN fetch,const CAM_ISP_GAMMA *gamma,BOOLEAN lut,const CAM_ISP_GTM *gtm) {
+    if(c->CdmPending||c->DmaActive||c->RxActive||!c->Command||!c->CommandMdl)return STATUS_DEVICE_BUSY;
+    PUCHAR b=c->Base[CamCdm];NTSTATUS status;
+    if(CamRead(b,0x1c)!=1||(CamRead(b,0x6c)&0x01ff01ff)||
+       (CamRead(b,0x70)&0x01ff01ff))return STATUS_DEVICE_BUSY;
     ULONG irqMask=CamRead(b,0x30),marker=(CamRead(b,0x80)+1)&255;
     status=CamSave(c,b,0x30,0);if(!NT_SUCCESS(status))return status;
     CamWrite(b,0x30,0);
     if(CamRead(b,0x30))return STATUS_IO_DEVICE_ERROR;
     CamWrite(b,0x34,MAXULONG);CamWrite(b,0x38,1);
     if(CamRead(b,0x44)&0x70000){CamWrite(b,0x30,irqMask);return STATUS_IO_DEVICE_ERROR;}
-    ULONG commandBytes=fetch?CAM_CDM_FETCH_BYTES:CAM_CDM_COMMAND_BYTES;
+    ULONG commandBytes=gtm?CAM_ISP_GTM_CDM_WORDS*4:gamma?(lut?CAM_ISP_GAMMA_CDM_WORDS:CAM_ISP_GAMMA_REG_WORDS)*4:
+        fetch?CAM_CDM_FETCH_BYTES:CAM_CDM_COMMAND_BYTES;
     RtlZeroMemory(c->Command,4096);
-    if(fetch)CamCdmEncodeFetch(c->Command,marker);else CamCdmEncode(c->Command,marker);
+    if(gtm) {
+        if(!CamIspGtmDmiBuildFormat(c->Command,4096,c->CommandAddress.QuadPart,CAM_CDM_TFE2_BASE,marker,gtm,c->IspFdDmi64))return STATUS_INVALID_PARAMETER;
+    } else if(gamma) {
+        if(!CamIspGammaCommandBuild(c->Command,4096,c->CommandAddress.QuadPart,CAM_CDM_TFE2_BASE,marker,gamma,lut))return STATUS_INVALID_PARAMETER;
+    } else if(fetch)CamCdmEncodeFetch(c->Command,marker);else CamCdmEncode(c->Command,marker);
     KeFlushIoBuffers(c->CommandMdl,FALSE,TRUE);
     KeMemoryBarrier();
     RtlCopyMemory(c->Trace.CommandWords,c->Command,CAM_CDM_COMMAND_BYTES);
@@ -241,7 +263,7 @@ static NTSTATUS Configure(CAM *c,ULONG limit,BOOLEAN fetch) {
         if(nextSample<RTL_NUMBER_OF(sampleUs)&&Time()-start>=(ULONGLONG)sampleUs[nextSample]*10) {
             Sample(c,1,start);nextSample++;
         }
-        if(fetch?CamCdmFetched(b,marker):CamCdmCompleted(b,marker)){status=STATUS_SUCCESS;break;}
+        if(fetch||gamma||gtm?CamCdmFetched(b,marker):CamCdmCompleted(b,marker)){status=STATUS_SUCCESS;break;}
         if(CamRead(b,0x44)&0x70000){status=STATUS_IO_DEVICE_ERROR;break;}
         CamDelay(Time()-start<10000?10:100);
     } while(Time()<deadline);
@@ -255,7 +277,7 @@ static NTSTATUS Configure(CAM *c,ULONG limit,BOOLEAN fetch) {
     if(NT_SUCCESS(status)) {
         c->CdmPending=FALSE;
         CamWrite(b,0x34,MAXULONG);CamWrite(b,0x38,1);CamWrite(b,0x30,irqMask);
-        if(!fetch)c->Trace.Csid[20]=CamRead(c->Base[CamCsid],0xe10);
+        if(!fetch&&!gamma&&!gtm)c->Trace.Csid[20]=CamRead(c->Base[CamCsid],0xe10);
     } else c->Faulted=TRUE;
     return status;
 }
@@ -272,12 +294,10 @@ NTSTATUS CamCdmTranslate(CAM *c) {
     if(slot>=128||(control&0x30000)||(c->Trace.CommandRoute[3]&1)||
        CamRead(base,0x800+slot*4)!=0x80001860||CamRead(base,0xc00+slot*4)!=control)status=STATUS_DEVICE_BUSY;
     else {
-        for(ULONG i=0;i<128;i++) {
-            ULONG smr=CamRead(base,0x800+i*4),mask=(smr>>16)&0x7fff;
-            if((smr&0x80000000u)&&((smr^0x1800)&~(mask|0x3ffu)&0x7fff)==0&&smr!=0x80001860) {
-                status=STATUS_DEVICE_BUSY;break;
-            }
-        }
+        /* Stock sf_qtb has SID range0x1800..0x1bff, and ECATS selects
+           sid&0x3ff. Other SIDs within that TBU are distinct clients, not
+           aliases of0x1860. Keep exact/masked/duplicate SID conflicts gated. */
+        if(!CamSmmuExactRoute(base,0x1860,slot,control))status=STATUS_DEVICE_BUSY;
         if(NT_SUCCESS(status)) {
             c->Diag.Step=174;c->Diag.Region=CamSfTbu;c->Diag.Address=0x17d1000;
             c->Diag.Offset=0x458;c->Diag.Mask=MAXULONG;c->Diag.Expected=(ULONG)c->CommandAddress.QuadPart;
@@ -289,6 +309,123 @@ NTSTATUS CamCdmTranslate(CAM *c) {
     }
     NTSTATUS released=PlatformLockRelease(&guard);
     return NT_SUCCESS(status)?released:status;
+}
+
+NTSTATUS CamCdmGamma(CAM *c,QCAM_ISP_GAMMA_STATE *state) {
+    if(!state)return STATUS_INVALID_PARAMETER;
+    RtlZeroMemory(state,sizeof(*state));state->Size=sizeof(*state);state->Abi=QCAM_ABI;
+    if(!c->Powered||!c->BusOn||c->DmaActive||c->RxActive||c->StreamFile||
+       !CamDmaResourcesIdle(c->Base[CamCsid],c->Base[CamTfe]))return STATUS_DEVICE_BUSY;
+    PUCHAR t=c->Base[CamTfe];
+    if(CamRead(t,0)!=0x10000000)return STATUS_REVISION_MISMATCH;
+    for(ULONG i=0;i<3;i++)state->Before[i]=CamRead(t,0x6b58+i*4);
+    if(state->Before[0]>1||state->Before[1]!=state->Before[0]||state->Before[2]>1)return STATUS_NOT_SUPPORTED;
+    /* Standby transfer test uses an explicit linear reference curve in the
+       inactive bank. Existing selected LUTs are retained and controls restored. */
+    CAM_ISP_GAMMA gamma;ULONG points[65];
+    for(ULONG i=0;i<65;i++)points[i]=min(i*16,1023u);
+    if(!CamIspGammaBuild(&gamma,points,state->Before[0]^1u))return STATUS_INVALID_PARAMETER;
+    /* Distinguish MMIO/bank access from command transport. Image DMA is off
+       throughout this probe, and the selected bank is restored before CDM. */
+    NTSTATUS status=STATUS_SUCCESS;
+    for(ULONG i=0;i<3;i++)CamWrite(t,0x6b58+i*4,gamma.Config[i]);
+    for(ULONG i=0;i<3;i++) {
+        state->CpuConfigured[i]=CamRead(t,0x6b58+i*4);
+        if(state->CpuConfigured[i]!=gamma.Config[i]) {
+            status=STATUS_IO_DEVICE_ERROR;c->Diag.Step=192;c->Diag.Region=CamTfe;
+            c->Diag.Offset=0x6b58+i*4;c->Diag.Address=0x0aca6000+c->Diag.Offset;
+            c->Diag.Expected=gamma.Config[i];c->Diag.Observed=state->CpuConfigured[i];
+        }
+    }
+    for(ULONG i=0;i<3;i++)CamWrite(t,0x6b58+i*4,state->Before[i]);
+    if(NT_SUCCESS(status))status=CamEnsureStaticQos(c);
+    if(NT_SUCCESS(status))status=CamCdmTranslate(c);
+    /* Verify only the register command before introducing DMI. A completed
+       inline IRQ cannot stand in for a successful target register write. */
+    if(NT_SUCCESS(status))status=Submit(c,FALSE,&gamma,FALSE,NULL);
+    state->RegisterStatus=(ULONG)status;
+    state->RegisterAhbAddress=CamRead(c->Base[CamCdm],0xd0);
+    state->RegisterAhbData=CamRead(c->Base[CamCdm],0xd4);
+    for(ULONG i=0;i<3;i++) {
+        state->RegisterConfigured[i]=CamRead(t,0x6b58+i*4);
+        if(NT_SUCCESS(status)&&state->RegisterConfigured[i]!=gamma.Config[i])status=STATUS_IO_DEVICE_ERROR;
+    }
+    if(NT_SUCCESS(status)) {
+        for(ULONG i=0;i<3;i++)CamWrite(t,0x6b58+i*4,state->Before[i]);
+        status=Submit(c,FALSE,&gamma,TRUE,NULL);
+    }
+    state->CdmStatus=(ULONG)status;state->CommandAddress=c->CommandAddress.QuadPart;
+    state->Marker=c->Trace.CommandMarker;
+    for(ULONG i=0;i<3;i++) {
+        state->Configured[i]=CamRead(t,0x6b58+i*4);
+        if(NT_SUCCESS(status)&&state->Configured[i]!=gamma.Config[i])status=STATUS_IO_DEVICE_ERROR;
+    }
+    state->Loaded=NT_SUCCESS(status);
+    /* Abort/drain while the camera interconnect is still on. On failed abort
+       retain command memory and the hardware ownership flags. */
+    NTSTATUS aborted=CamCdmAbort(c);
+    if(!NT_SUCCESS(aborted)){state->Status=(ULONG)aborted;return aborted;}
+    for(ULONG i=0;i<3;i++)CamWrite(t,0x6b58+i*4,state->Before[i]);
+    for(ULONG i=0;i<3;i++) {
+        state->Restored[i]=CamRead(t,0x6b58+i*4);
+        if(state->Restored[i]!=state->Before[i])status=STATUS_IO_DEVICE_ERROR;
+    }
+    if(!CamDmaResourcesIdle(c->Base[CamCsid],t))status=STATUS_DEVICE_BUSY;
+    state->Status=(ULONG)status;return status;
+}
+
+/* FD owns/restores the three controls and original active LUT selection.
+   Profile8 retains the verified standalone linear curve; combined profiles
+   use the original mode11 reference. Command memory/routes remain owned
+   through frame teardown. */
+NTSTATUS CamCdmGammaLoad(CAM *c,ULONG bank) {
+    if(!c->IspFdOwned||!c->IspFd||(c->IspFd->Profile!=8&&(c->IspFd->Profile<15||c->IspFd->Profile>32))||bank>1||
+       !c->Powered||!c->BusOn||c->DmaActive||c->RxActive||c->CdmPending||c->StreamFile||
+       !CamDmaResourcesIdle(c->Base[CamCsid],c->Base[CamTfe]))return STATUS_DEVICE_BUSY;
+    QCAM_ISP_FD_STATE *state=c->IspFd;
+    CAM_ISP_GAMMA gamma;ULONG points[65];
+    for(ULONG i=0;i<65;i++)points[i]=min(i*16,1023u);
+    if(!(state->Profile>=15?CamIspGammaNativeReference(&gamma,bank):CamIspGammaBuild(&gamma,points,bank)))return STATUS_INVALID_PARAMETER;
+    state->GammaLoaded=0;state->GammaBank=bank;
+    NTSTATUS status=CamEnsureStaticQos(c);
+    if(NT_SUCCESS(status))status=CamCdmTranslate(c);
+    if(NT_SUCCESS(status))status=Submit(c,FALSE,&gamma,TRUE,NULL);
+    state->GammaAddress=c->CommandAddress.QuadPart;state->GammaMarker=c->Trace.CommandMarker;
+    for(ULONG i=0;i<3;i++) {
+        state->GammaConfig[i]=CamRead(c->Base[CamTfe],0x6b58+i*4);
+        if(NT_SUCCESS(status)&&state->GammaConfig[i]!=gamma.Config[i])status=STATUS_IO_DEVICE_ERROR;
+    }
+    if(!NT_SUCCESS(status)) {
+        NTSTATUS aborted=CamCdmAbort(c);
+        if(!NT_SUCCESS(aborted))status=aborted;
+    }
+    state->GammaStatus=(ULONG)status;state->GammaLoaded=NT_SUCCESS(status);
+    return status;
+}
+
+NTSTATUS CamCdmGtmLoad(CAM *c,ULONG bank) {
+    if(!c->IspFdOwned||!c->IspFd||(c->IspFd->Profile<14||c->IspFd->Profile>32)||bank>1||bank!=c->IspFd->GtmBank||
+       !c->Powered||!c->BusOn||c->DmaActive||c->RxActive||c->CdmPending||c->StreamFile||
+       !CamDmaResourcesIdle(c->Base[CamCsid],c->Base[CamTfe]))return STATUS_DEVICE_BUSY;
+    QCAM_ISP_FD_STATE *state=c->IspFd;
+    CAM_ISP_GTM *gtm=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*gtm),'gIcQ');
+    if(!gtm)return STATUS_INSUFFICIENT_RESOURCES;
+    state->GtmLoaded=0;
+    NTSTATUS status=CamIspGtmNativeReference(gtm,bank)?CamEnsureStaticQos(c):STATUS_INVALID_PARAMETER;
+    if(NT_SUCCESS(status))status=CamCdmTranslate(c);
+    if(NT_SUCCESS(status))status=Submit(c,FALSE,NULL,TRUE,gtm);
+    state->GtmAddress=c->CommandAddress.QuadPart;state->GtmMarker=c->Trace.CommandMarker;
+    for(ULONG i=0;i<7;i++) {
+        state->GtmConfig[i]=CamRead(c->Base[CamTfe],0x6658+i*4);
+        if(NT_SUCCESS(status)&&state->GtmConfig[i]!=gtm->Registers[i])status=STATUS_IO_DEVICE_ERROR;
+    }
+    if(!NT_SUCCESS(status)) {
+        NTSTATUS aborted=CamCdmAbort(c);
+        if(!NT_SUCCESS(aborted))status=aborted;
+    }
+    ExFreePoolWithTag(gtm,'gIcQ');
+    state->GtmStatus=(ULONG)status;state->GtmLoaded=NT_SUCCESS(status);
+    return status;
 }
 
 NTSTATUS CamCdmAbort(CAM *c) {

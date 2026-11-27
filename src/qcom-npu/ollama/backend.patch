@@ -1,0 +1,200 @@
+--- a/api/types.go
++++ b/api/types.go
+@@ -1064,6 +1064,7 @@
+ 
+ // ProcessModelResponse is a single model description in [ProcessResponse].
+ type ProcessModelResponse struct {
++	Accelerator   string       `json:"accelerator,omitempty"`
+ 	Name          string       `json:"name"`
+ 	Model         string       `json:"model"`
+ 	Size          int64        `json:"size"`
+--- a/cmd/cmd.go
++++ b/cmd/cmd.go
+@@ -49,6 +49,7 @@
+ 	"github.com/ollama/ollama/internal/modelref"
+ 	"github.com/ollama/ollama/logutil"
+ 	"github.com/ollama/ollama/manifest"
++	"github.com/ollama/ollama/ml"
+ 	"github.com/ollama/ollama/mlxrunner"
+ 	"github.com/ollama/ollama/parser"
+ 	"github.com/ollama/ollama/progress"
+@@ -1277,6 +1278,10 @@
+ 				sizeCPU := m.Size - m.SizeVRAM
+ 				cpuPercent := math.Round(float64(sizeCPU) / float64(m.Size) * 100)
+ 				procStr = fmt.Sprintf("%d%%/%d%% CPU/GPU", int(cpuPercent), int(100-cpuPercent))
++			}
++
++			if m.Accelerator == "NPU" {
++				procStr = strings.ReplaceAll(procStr, "GPU", "NPU")
+ 			}
+ 
+ 			var until string
+@@ -2272,6 +2277,7 @@
+ }
+ 
+ func RunServer(_ *cobra.Command, _ []string) error {
++	ml.QcomNpuDefaults()
+ 	if err := initializeKeypair(); err != nil {
+ 		return err
+ 	}
+--- a/discover/llama_server.go
++++ b/discover/llama_server.go
+@@ -330,7 +330,7 @@
+ 			ComputeMinor: computeMinor,
+ 			LibraryPath:  libDirs,
+ 			GFXTarget:    gfxByIndex[deviceIndex],
+-			Integrated:   isIntegratedLlamaServerDevice(library, deviceIndex, integratedByIndex),
++			Integrated:   library == "HTP" || isIntegratedLlamaServerDevice(library, deviceIndex, integratedByIndex),
+ 		}
+ 		if hasNativeDevice {
+ 			if nativeDevice.DeviceID != "" {
+@@ -464,6 +464,8 @@
+ func inferLibrary(name, description string) string {
+ 	combined := strings.ToLower(name + " " + description)
+ 	switch {
++	case strings.HasPrefix(name, "HTP") && strings.Contains(combined, "hexagon"):
++		return "HTP"
+ 	case strings.Contains(combined, "cuda"):
+ 		return "CUDA"
+ 	case strings.Contains(combined, "rocm") || strings.Contains(combined, "hip"):
+--- a/discover/native_probe_platform.go
++++ b/discover/native_probe_platform.go
+@@ -11,6 +11,8 @@
+ 	"sort"
+ 	"strconv"
+ 	"strings"
++
++	"github.com/ollama/ollama/ml"
+ )
+ 
+ const (
+@@ -68,6 +70,10 @@
+ 				files = append(files, match)
+ 			}
+ 		}
++	}
++	// The NPU lives in DriverStore rather than the application's library tree.
++	if path := ml.QcomNpuBackendPath(); path != "" && !seen[path] {
++		files = append(files, path)
+ 	}
+ 	return files
+ }
+--- a/discover/native_probe_windows.go
++++ b/discover/native_probe_windows.go
+@@ -124,7 +124,7 @@
+ 				Name:                windowsCString(props.Name),
+ 				Description:         windowsCString(props.Description),
+ 				DeviceID:            windowsCString(props.DeviceID),
+-				Integrated:          ggmlDeviceTypeIntegrated(props.Type),
++				Integrated:          library == "HTP" || ggmlDeviceTypeIntegrated(props.Type),
+ 				IntegratedKnown: props.Type == ggmlBackendDeviceTypeGPU ||
+ 					props.Type == ggmlBackendDeviceTypeIGPU,
+ 				TotalMemory: uint64(props.MemoryTotal),
+--- a/discover/runner.go
++++ b/discover/runner.go
+@@ -387,7 +387,7 @@
+ 	allow, explicit := integratedGPUAdmission()
+ 	filtered := devices[:0]
+ 	for _, device := range devices {
+-		if !device.Integrated {
++		if !device.Integrated || device.Library == "HTP" {
+ 			filtered = append(filtered, device)
+ 			continue
+ 		}
+--- a/llm/llama_server.go
++++ b/llm/llama_server.go
+@@ -518,6 +518,11 @@
+ 	}
+ 
+ 	libraryPaths := llamaServerLibraryPaths(exe, gpuLibs, envUpdates)
++	if envUpdates["GGML_BACKEND_PATH"] == "" && os.Getenv("GGML_BACKEND_PATH") == "" {
++		if path := ml.QcomNpuBackendPath(); path != "" {
++			envUpdates["GGML_BACKEND_PATH"] = path
++		}
++	}
+ 	pathEnv := llamaServerLibraryPathEnv()
+ 	envUpdates[pathEnv] = strings.Join(libraryPaths, string(filepath.ListSeparator))
+ 
+--- a/ml/device.go
++++ b/ml/device.go
+@@ -108,6 +108,9 @@
+ // on the device for overhead (e.g. VRAM consumed by context structures independent
+ // of model allocations)
+ func (d DeviceInfo) MinimumMemory() uint64 {
++	if d.Library == "HTP" {
++		return 32 * format.MebiByte
++	}
+ 	if d.Library == "Metal" {
+ 		return 512 * format.MebiByte
+ 	}
+@@ -278,7 +281,7 @@
+ 			gpu.Name == "Metal" || gpu.Library == "Metal" ||
+ 			cudaFlashAttentionSupported(gpu) ||
+ 			gpu.Library == "ROCm" ||
+-			gpu.Library == "Vulkan"
++			gpu.Library == "Vulkan" || gpu.Library == "HTP"
+ 
+ 		if !supportsFA {
+ 			return false
+@@ -341,6 +344,14 @@
+ 	mustFilter := len(l) == 1 || allDevicesUseLibrary(l, "CUDA")
+ 	env := map[string]string{}
+ 	for _, d := range l {
++		if d.Library == "HTP" {
++			if path := QcomNpuBackendPath(); path != "" {
++				env["GGML_BACKEND_PATH"] = path
++			}
++			if _, set := os.LookupEnv("LLAMA_ARG_FIT_TARGET"); !set {
++				env["LLAMA_ARG_FIT_TARGET"] = "256"
++			}
++		}
+ 		d.updateVisibleDevicesEnv(env, mustFilter)
+ 		for k, v := range d.RunnerEnvOverrides {
+ 			if existing, ok := env[k]; ok && existing != v {
+--- a/server/routes.go
++++ b/server/routes.go
+@@ -2857,6 +2857,7 @@
+ 		}
+ 
+ 		mr := api.ProcessModelResponse{
++			Accelerator:   v.accelerator,
+ 			Model:         displayName,
+ 			Name:          displayName,
+ 			Size:          v.size,
+--- a/server/sched.go
++++ b/server/sched.go
+@@ -864,6 +864,11 @@
+ }
+ 
+ func automaticGenerationBatch(effectiveCtx int, predictedVRAM, availableMemory uint64, flashAttention ml.FlashAttentionType, gpus []ml.DeviceInfo) int {
++	for _, gpu := range gpus {
++		if gpu.Library == "HTP" {
++			return 128
++		}
++	}
+ 	if flashAttention == ml.FlashAttentionDisabled && hasCUDADevice(gpus) {
+ 		if constrainedCUDAWithoutFlashAttention(effectiveCtx, gpus) {
+ 			return llamaServerGenerationBatchConstrained
+@@ -1798,6 +1803,7 @@
+ // loadedModel is a point-in-time snapshot of a loaded runner's state, safe to
+ // use without holding any scheduler locks.
+ type loadedModel struct {
++	accelerator   string
+ 	model         *Model
+ 	runner        string
+ 	size          int64
+@@ -1840,6 +1846,14 @@
+ 			lm.size = int64(total)
+ 			lm.sizeVRAM = int64(vram)
+ 		}
++		if lm.sizeVRAM > 0 {
++			for _, gpu := range r.gpus {
++				if gpu.Library == "HTP" {
++					lm.accelerator = "NPU"
++					break
++				}
++			}
++		}
+ 		// The scheduler waits to set expiresAt, so a model that is still
+ 		// loading may have the zero value. Estimate expiration from the
+ 		// session duration instead.

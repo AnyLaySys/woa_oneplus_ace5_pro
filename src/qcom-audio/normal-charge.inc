@@ -3,7 +3,7 @@ static VOID QchNormalExit(PSIA_LINK L,ULONGLONG Now)
 {
     static const ULONG P[][2]={{0x30,24},{0x30,34},{0x32,39},{0x30,56}};
     QCH_LINK *C=&L->Charge;
-    if(Now-C->ExitAt>6000){C->Fault=10;C->Phase=92;return;}
+    if(Now-C->ExitAt>3000){C->Fault=10;C->Phase=92;return;}
     if(C->Waiting)return;
     if(C->OffCheck){
         ULONG I=C->OffCheck-1;
@@ -26,7 +26,7 @@ static VOID QchNormalPoll(PSIA_LINK L,ULONGLONG Now)
         {0x30,8},{0x30,10},{0x30,11},{0x30,24},{0x30,34},{0x32,39},{0x30,56}
     };
     QCH_LINK *C=&L->Charge;
-    if(Now-C->GuardAt>=500)QchBatteryGuard(C);
+    if(Now-C->GuardAt>=300)QchBatteryGuard(C);
     ULONG Limit=QchLoadFvLimit(C->LoadFvUv);
     if(Limit && C->GaugeCvMv && C->GaugeCvMv!=65535)Limit=min(Limit,C->GaugeCvMv);
     BOOLEAN Full=C->CellValid && C->Soc>=99 && (C->BatteryStatus&0x20);
@@ -35,15 +35,15 @@ static VOID QchNormalPoll(PSIA_LINK L,ULONGLONG Now)
        (C->GaugeCvMv && C->GaugeCvMv!=65535 && (C->GaugeCvMv<7500 || C->GaugeCvMv>9200)) ||
        !C->UsbOnline || C->UsbVoltage<4500000 || C->UsbVoltage>5500000 ||
        C->SourceEnabled || C->SourceRole || C->Moisture || C->UfcsStarted || C->PeerRunning || C->LoadMos || C->CpActive ||
-       Now-C->OnlineAt>2500 || Now-C->VoltageAt>2500 || Now-C->SourceAt>2500 || Now-C->RoleAt>2500 || Now-C->MoistureAt>2500 ||
+       Now-C->OnlineAt>3000 || Now-C->VoltageAt>3000 || Now-C->SourceAt>3000 || Now-C->RoleAt>3000 || Now-C->MoistureAt>3000 ||
        (Limit && (Limit<7500 || Limit>9200 || C->PackVoltage>=Limit || max(C->Cell1Mv,C->Cell2Mv)*2>=Limit)) ||
-       (C->LoadAt && (!Limit || !QchLoadCurrent(C) || Now-C->LoadFvAt>2500 || Now-C->LoadFccAt>2500 ||
-        Now-C->LoadFccMaxAt>2500 || Now-C->InputAt>2500 || (LONG)C->UsbLimitUa<=0))){
+       (C->LoadAt && (!Limit || !QchLoadCurrent(C) || Now-C->LoadFvAt>3000 || Now-C->LoadFccAt>3000 ||
+        Now-C->LoadFccMaxAt>3000 || Now-C->InputAt>3000 || (LONG)C->UsbLimitUa<=0))){
         C->LoadStopReason=(!C->LoadAt && Now>=C->Deadline)?3:C->Temperature>=ALS_CHARGE_TEMP_LIMIT_DK?ALS_CHARGE_STOP_TEMPERATURE:2;
         C->Fault=(!C->LoadAt && Now>=C->Deadline)?0:27;QchOff(L);return;
     }
     if(Full){C->LoadStopReason=1;C->Fault=0;QchOff(L);return;}
-    if(C->Waiting){if(Now-C->Last>1500){C->Fault=3;QchOff(L);}return;}
+    if(C->Waiting){if(Now-C->Last>900){C->Fault=3;QchOff(L);}return;}
     if(C->ReplyReady && C->ReplyResult){C->Fault=4;QchOff(L);return;}
     if(C->Phase<120){
         ULONG Step=C->Phase-100;
@@ -65,5 +65,5 @@ static VOID QchNormalPoll(PSIA_LINK L,ULONGLONG Now)
     if(C->ReplyReady && C->ReplyOp==0x30 &&
        ((C->ReplyProp==24 && C->ReplyValue!=1) || (C->ReplyProp==34 && C->ReplyValue))){C->Fault=38;QchOff(L);return;}
     C->LoadFvLimitMv=Limit;
-    if(Now-C->Last>=50){ULONG I=C->LoadQuery%ARRAYSIZE(Poll);if(QchRequest(L,Poll[I][0],Poll[I][1],0))C->LoadQuery++;}
+    if(Now-C->Last>=30){ULONG I=C->LoadQuery%ARRAYSIZE(Poll);if(QchRequest(L,Poll[I][0],Poll[I][1],0))C->LoadQuery++;}
 }

@@ -4,20 +4,24 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
+subprocess.run(['python3', str(root / 'tests/isp.py')], check=True)
 with tempfile.TemporaryDirectory(prefix='qcom-cam-test-') as directory:
     work = Path(directory)
     for source, name in [(root / 'flash.c', 'flash.c'), (root / 'tests/flash.c', 'flash-test.c'), (root / 'cci.c', 'cci.c'), (root / 'focus.c', 'focus.c'), (root / 'pdaf.h', 'pdaf.h'), (root / 'tests/focus.c', 'focus-test.c'), (root / 'tests/pdaf.c', 'pdaf-test.c'), (root / 'scm.c', 'scm.c'), (root / 'dma-table.h', 'dma-table.h'),
                          (root / 'dma-address.h', 'dma-address.h'),
                          (root / 'frame-map-table.h', 'frame-map-table.h'),
+                         (root / 'frame-context.h', 'frame-context.h'),
                          (root / 'dma-idle.h', 'dma-idle.h'),
                          (root / 'rdi-frame.h', 'rdi-frame.h'), (root / 'frame-clock.h', 'frame-clock.h'),
                          (root / 'dma-ready.h', 'dma-ready.h'),
                          (root / 'scm-ready.h', 'scm-ready.h'),
                          (root / 'dma-route.h', 'dma-route.h'),
                          (root / 'cdm-command.h', 'cdm-command.h'),
+                         (root / 'cdm-target.h', 'cdm-target.h'),
                          (root / 'cdm-route.h', 'cdm-route.h'),
                          (root / 'cdm-abort.h', 'cdm-abort.h'),
                          (root / 'smmu-fault.h', 'smmu-fault.h'),
+                         (root / 'smmu-route-check.h', 'smmu-route-check.h'),
                          (root / 'smmu-restore.h', 'smmu-restore.h'),
                          (root / 'frame-route.h', 'frame-route.h'),
                          (root / 'tbu-translate.h', 'tbu-translate.h'),

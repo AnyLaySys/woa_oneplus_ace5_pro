@@ -11,8 +11,12 @@ static NTSTATUS CamTbuWait(PUCHAR base,ULONG offset,ULONGLONG mask,ULONGLONG exp
 
 static NTSTATUS CamTbuTranslateExpected(PUCHAR base,ULONG sid,ULONGLONG address,ULONGLONG expected,ULONG attributes,ULONGLONG sample[8]) {
     RtlZeroMemory(sample,8*sizeof(*sample));
+    /* HF image DMA accepts the native 36-bit address carried by the 64-bit
+       ECATS VA register. CDM fetch remains bounded to its 32-bit interface. */
+    ULONGLONG maximum=sid==0x1c00?0xfffffff00ULL:0xffffff00ULL;
+    ULONGLONG alignment=sid==0x1c00?15ULL:255ULL;
     if(!((sid==0x1860&&attributes==0x408)||(sid==0x1c00&&attributes==0x409))||
-       !address||(address&255)||address>0xffffff00u||!expected||(expected&255)||expected>0xfffffff00ULL)return STATUS_INVALID_PARAMETER;
+       !address||(address&alignment)||address>maximum||!expected||(expected&alignment)||expected>0xfffffff00ULL)return STATUS_INVALID_PARAMETER;
     sample[0]=CamRead64(base,0x410);sample[1]=CamRead64(base,0x418);
     sample[2]=CamRead64(base,0x450);sample[3]=CamRead64(base,0x458);
     if(((sample[0]|sample[1])&1)||CamRead64(base,0x448)||(sample[2]&1)||

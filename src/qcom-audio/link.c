@@ -698,13 +698,16 @@ SiaLinkStop (
     SeeReset(STATUS_DEVICE_NOT_CONNECTED);
     if (Link->Charge.Bridge==2 && (Link->Charge.Running || Link->Charge.UfcsStarted || Link->Charge.OffMask)) {
         QchOff(Link);
-        for(ULONG Tick=0;Tick<12000 && Link->Charge.Phase!=91 && Link->Charge.Phase!=92;Tick++){
+        for(ULONG Tick=0;Tick<9000 && Link->Charge.Phase!=91 && Link->Charge.Phase!=92;Tick++){
             SiaUsbPoll(Link);SiaLinkPoll(Dev);SiaSleep(1);
         }
     }
+    for(ULONG Tick=0;Tick<3000 && Link->Charge.BypassState;Tick++){
+        SiaUsbPoll(Link);SiaLinkPoll(Dev);SiaSleep(1);
+    }
     if (Link->Usb.Acked && Link->Usb.Rcid) {
         OtgShutdown (&Link->Usb.Otg, KeQueryInterruptTime () / 10000);
-        for (ULONG Tick = 0; Tick < 5500 && (OtgActive (&Link->Usb.Otg) || Link->Usb.Otg.Touched); Tick++) {
+        for (ULONG Tick = 0; Tick < 3000 && (OtgActive (&Link->Usb.Otg) || Link->Usb.Otg.Touched); Tick++) {
             SiaUsbPoll (Link); SiaLinkPoll (Dev); SiaSleep (1);
         }
         SiaGlinkCmd (Link, GLINK_CMD_CLOSE, SIA_USB_LCID, 0);

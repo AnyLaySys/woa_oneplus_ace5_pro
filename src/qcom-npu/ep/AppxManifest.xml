@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap17="http://schemas.microsoft.com/appx/manifest/uap/windows10/17" IgnorableNamespaces="uap17">
+  <Identity Name="AnyLaySys.QcomNpu.ExecutionProvider" Publisher="CN=AnyLaySys" Version="@VERSION@" ProcessorArchitecture="arm64" />
+  <Properties><DisplayName>Qualcomm Hexagon NPU</DisplayName><PublisherDisplayName>AnyLaySys</PublisherDisplayName><Logo>logo.png</Logo><Framework>true</Framework></Properties>
+  <Resources><Resource Language="en-us" /></Resources>
+  <Dependencies><TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.26100.0" MaxVersionTested="10.0.26300.0" /></Dependencies>
+  <Extensions>
+    <uap17:Extension Category="windows.packageExtension">
+      <uap17:PackageExtension Name="com.microsoft.windowsmlruntime.executionprovider.3" Id="QcomHtpExecutionProvider" PublicFolder="EP" DisplayName="Qualcomm Hexagon NPU">
+        <uap17:Properties><ExecutionProvider>QcomHtpExecutionProvider</ExecutionProvider><ProviderName>QcomHtpExecutionProvider</ProviderName><ProviderPath>qcom_npu_ep.dll</ProviderPath></uap17:Properties>
+      </uap17:PackageExtension>
+    </uap17:Extension>
+  </Extensions>
+</Package>

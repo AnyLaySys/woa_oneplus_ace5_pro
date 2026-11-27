@@ -30,7 +30,7 @@
     <QcbRevision Condition="'$(QcbRevision)' == '' and '$(QcbVersionDate)' == '2026-11-04'">19</QcbRevision>
     <QcbRevision Condition="'$(QcbRevision)' == '' and '$(QcbVersionDate)' == '2026-11-06'">2</QcbRevision>
     <QcbRevision Condition="'$(QcbRevision)' == '' and '$(QcbVersionDate)' == '2026-11-07'">4</QcbRevision>
-    <QcbRevision Condition="'$(QcbRevision)' == ''">7</QcbRevision>
+    <QcbRevision Condition="'$(QcbRevision)' == ''">8</QcbRevision>
     <QcbDriverDate>$([System.DateTime]::Parse('$(QcbVersionDate)').ToString('MM/dd/yyyy'))</QcbDriverDate>
     <QcbDriverVersion>$([System.DateTime]::Parse('$(QcbVersionDate)').ToString('yy.M.d')).$(QcbRevision)</QcbDriverVersion>
     <QcbDriverVersionComma>$([System.String]::Copy('$(QcbDriverVersion)').Replace('.', ','))</QcbDriverVersionComma>

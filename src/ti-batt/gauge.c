@@ -315,7 +315,7 @@ Store:
     KeAcquireSpinLock (&Dev->Lock, &OldIrql);
     ULONGLONG Now = KeQueryInterruptTime () / 10000;
     S.Online = Dev->Source.Valid && Dev->Source.Online && Dev->Source.TimeMs <= Now &&
-               Now - Dev->Source.TimeMs <= QCB_POWER_MAX_AGE_MS;
+               Now - Dev->Source.TimeMs <= QCB_SOURCE_MAX_AGE_MS;
     Changed = (S.Online != Dev->Now.Online) || (S.Valid != Dev->Now.Valid) || (S.Soc != Dev->Now.Soc) ||
               (S.VoltageMv != Dev->Now.VoltageMv) || (S.RemainingMah != Dev->Now.RemainingMah) ||
               (S.FullMah != Dev->Now.FullMah) ||

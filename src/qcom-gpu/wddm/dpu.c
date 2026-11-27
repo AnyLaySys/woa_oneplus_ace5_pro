@@ -303,7 +303,7 @@ static BOOLEAN RefreshAccess(PVOID context) {
 }
 NTSTATUS A830DpuSetRefresh(PVOID context,ULONG hz) {
     A830_ADAPTER *a=context;
-    if(hz!=60 && hz!=90 && hz!=120)return STATUS_INVALID_PARAMETER;
+    if(hz!=60 && hz!=72 && hz!=90 && hz!=120)return STATUS_INVALID_PARAMETER;
     if(KeGetCurrentIrql()!=PASSIVE_LEVEL)return STATUS_INVALID_DEVICE_STATE;
     KeWaitForSingleObject(&a->DisplayPowerLock,Executive,KernelMode,FALSE,NULL);
     A830_DPU *d=NULL;KIRQL old;NTSTATUS status=STATUS_DEVICE_BUSY;

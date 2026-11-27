@@ -123,6 +123,23 @@ static NTSTATUS Branch(CAM *c,PUCHAR b,ULONG offset) {
     c->Diag.Observed=CamRead(b,offset);return status;
 }
 
+NTSTATUS CamIspPixelClocksOn(CAM *c) {
+    if(!c->IspFd||!c->Powered||!c->BusOn||c->DmaActive||c->RxActive||c->IspFdOwned||
+       c->CdmPending||c->ScmPending||c->TbuPending)return STATUS_DEVICE_BUSY;
+    /* OEM sun-camera.dtsi TFE2 requires these Bayer processing/NoC clocks
+       separately from Bayer fast AHB. RAW RDI transport did not need them. */
+    const ULONG offsets[]={0x1112c,0x1113c};
+    PUCHAR base=c->Base[CamCc];
+    for(ULONG i=0;i<RTL_NUMBER_OF(offsets);i++) {
+        c->IspFd->PixelClocks[i][0]=CamRead(base,offsets[i]);
+        NTSTATUS status=Branch(c,base,offsets[i]);
+        ULONG observed=CamRead(base,offsets[i]);c->IspFd->PixelClocks[i][1]=observed;
+        if(!NT_SUCCESS(status))return status;
+        if((observed&0x80000001u)!=1)return STATUS_DEVICE_NOT_READY;
+    }
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS Rcg(CAM *c,PUCHAR b,ULONG offset,ULONG cfg) {
     c->Diag.Step=132;c->Diag.Offset=offset;c->Diag.Mask=1;c->Diag.Expected=0;
     c->Diag.Region=b==c->Base[CamMclk]?CamMclk:CamCc;
@@ -203,7 +220,7 @@ static VOID MclkRestore(CAM *c) {
 }
 
 NTSTATUS CamPowerOn(CAM *c) {
-    if(c->ScmPending||c->CdmPending||c->TbuPending||c->FrameRouteOwned)return STATUS_DEVICE_BUSY;
+    if(c->ScmPending||c->CdmPending||c->TbuPending||c->FrameRouteOwned||c->FrameContextOwned||c->IspFdOwned)return STATUS_DEVICE_BUSY;
     if(c->Powered)return STATUS_SUCCESS;
     if(c->PowerState||c->Faulted)return STATUS_DEVICE_HARDWARE_ERROR;
     RtlZeroMemory(&c->Diag,sizeof(c->Diag));c->Diag.Step=100;
@@ -256,7 +273,7 @@ NTSTATUS CamPowerOn(CAM *c) {
 }
 
 NTSTATUS CamPowerOff(CAM *c) {
-    if(c->ScmPending||c->CdmPending||c->TbuPending||c->FrameRouteOwned)return STATUS_DEVICE_BUSY;
+    if(c->ScmPending||c->CdmPending||c->TbuPending||c->FrameRouteOwned||c->FrameContextOwned||c->IspFdOwned)return STATUS_DEVICE_BUSY;
     if(c->DmaActive||c->RxActive||c->BusOn)return STATUS_DEVICE_BUSY;
     NTSTATUS status=CamFlashStop(c);
     if(NT_SUCCESS(status))status=CamCrmOff(c);

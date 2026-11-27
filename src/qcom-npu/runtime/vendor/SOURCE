@@ -1,0 +1,6 @@
+https://github.com/quic/fastrpc.git
+Commit: 3b7f929145db1a52a8d0a334805defefd287e97e
+Selected FastRPC API headers, BSD dspqueue shared-memory ABI, rpcmem declarations,
+and apps_std QAIC dispatcher.
+remote_ext.h is local; this dispatcher uses direct function calls.
+apps_std.h: renamed parameter override to overwrite for C++ compilation.

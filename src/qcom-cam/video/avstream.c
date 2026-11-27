@@ -5,6 +5,7 @@
 #include <ksmedia.h>
 #include "../uapi.h"
 #include "../frame-clock.h"
+#include "yuy2.h"
 
 DRIVER_INITIALIZE DriverEntry;
 
@@ -17,12 +18,13 @@ struct VIDEO_PIN {
     EX_RUNDOWN_REF PhotoRundown;
     HANDLE Parent,Thread; PKSPIN Pin; PKSFILTER Filter;
     QCAM_VIDEO_FORMAT_OPTIONS Format; ULONG Bytes,SourceWidth,SourceHeight,ScaleX[QCAM_VIDEO_MAX_WIDTH],ScaleY[QCAM_VIDEO_MAX_HEIGHT]; LONGLONG Interval; ULONGLONG NextSof; KMUTEX IoLock; KSPIN_LOCK FrameLock;
-    volatile LONG Stopping; BOOLEAN Resizing; PUCHAR Storage; VIDEO_FRAME Slots[3]; NTSTATUS CaptureStatus;
+    volatile LONG Stopping; BOOLEAN Resizing,Yuy2; PUCHAR Storage; VIDEO_FRAME Slots[3]; NTSTATUS CaptureStatus;
     PIKSREFERENCECLOCK Clock; ULONGLONG Started; LONGLONG ClockStart;
     ULONG Sequence,Dropped; CAM_FRAME_CLOCK Timeline;
 };
 #define STATIC_QCAM_NV12 0x3231564e,0,0x0010,0x80,0,0,0xaa,0,0x38,0x9b,0x71
 static const GUID Nv12={STATIC_QCAM_NV12};
+static const GUID Yuy2={0x32595559,0,0x0010,0x80,0,0,0xaa,0,0x38,0x9b,0x71};
 static const GUID Categories[]={{STATIC_KSCATEGORY_CAPTURE},{STATIC_KSCATEGORY_VIDEO},{STATIC_KSCATEGORY_VIDEO_CAMERA}};
 static const LONGLONG FrameInterval=166667;
 
@@ -176,9 +178,9 @@ static NTSTATUS ExtendedTorch(PIRP irp,PKSIDENTIFIER request,PVOID data) {
     ULONG available=IoGetCurrentIrpStackLocation(irp)->Parameters.DeviceIoControl.OutputBufferLength;
     irp->IoStatus.Information=size;if(!available)return STATUS_BUFFER_OVERFLOW;if(available<size)return STATUS_BUFFER_TOO_SMALL;
     KSCAMERA_EXTENDEDPROP_HEADER *h=data;KSCAMERA_EXTENDEDPROP_VALUE *value=(PVOID)(h+1);
-    if(h->Version!=1||h->PinId!=KSCAMERA_EXTENDEDPROP_FILTERSCOPE||h->Size<size)return STATUS_INVALID_PARAMETER;
     PKSFILTER filter=KsGetFilterFromIrp(irp);VIDEO_FILTER *f=filter->Context;VIDEO_PIN *v=CaptureSource(filter);
     if(request->Flags&KSPROPERTY_TYPE_SET) {
+        if(h->Version!=1||h->PinId!=KSCAMERA_EXTENDEDPROP_FILTERSCOPE||h->Size<size||h->Size>available)return STATUS_INVALID_PARAMETER;
         if(h->Flags!=KSCAMERA_EXTENDEDPROP_VIDEOTORCH_OFF&&h->Flags!=KSCAMERA_EXTENDEDPROP_VIDEOTORCH_ON&&h->Flags!=KSCAMERA_EXTENDEDPROP_VIDEOTORCH_ON_ADJUSTABLEPOWER)return STATUS_NOT_SUPPORTED;
         if(h->Flags==KSCAMERA_EXTENDEDPROP_VIDEOTORCH_ON_ADJUSTABLEPOWER&&value->Value.ull>100)return STATUS_INVALID_PARAMETER;
         ULONG power=h->Flags==KSCAMERA_EXTENDEDPROP_VIDEOTORCH_ON_ADJUSTABLEPOWER?max((ULONG)value->Value.ull,1u):40;
@@ -198,9 +200,9 @@ static NTSTATUS ExtendedFlash(PIRP irp,PKSIDENTIFIER request,PVOID data) {
     ULONG available=IoGetCurrentIrpStackLocation(irp)->Parameters.DeviceIoControl.OutputBufferLength;
     irp->IoStatus.Information=size;if(!available)return STATUS_BUFFER_OVERFLOW;if(available<size)return STATUS_BUFFER_TOO_SMALL;
     KSCAMERA_EXTENDEDPROP_HEADER *h=data;KSCAMERA_EXTENDEDPROP_VALUE *value=(PVOID)(h+1);
-    if(h->Version!=1||h->PinId!=KSCAMERA_EXTENDEDPROP_FILTERSCOPE||h->Size<size)return STATUS_INVALID_PARAMETER;
     ULONGLONG caps=KSCAMERA_EXTENDEDPROP_FLASH_ON|KSCAMERA_EXTENDEDPROP_FLASH_AUTO|KSCAMERA_EXTENDEDPROP_FLASH_ON_ADJUSTABLEPOWER|KSCAMERA_EXTENDEDPROP_FLASH_AUTO_ADJUSTABLEPOWER;
     if(request->Flags&KSPROPERTY_TYPE_SET) {
+        if(h->Version!=1||h->PinId!=KSCAMERA_EXTENDEDPROP_FILTERSCOPE||h->Size<size||h->Size>available)return STATUS_INVALID_PARAMETER;
         if(h->Flags&&h->Flags!=KSCAMERA_EXTENDEDPROP_FLASH_ON&&h->Flags!=KSCAMERA_EXTENDEDPROP_FLASH_AUTO&&h->Flags!=KSCAMERA_EXTENDEDPROP_FLASH_ON_ADJUSTABLEPOWER&&h->Flags!=KSCAMERA_EXTENDEDPROP_FLASH_AUTO_ADJUSTABLEPOWER)return STATUS_NOT_SUPPORTED;
         BOOLEAN adjustable=(h->Flags&(KSCAMERA_EXTENDEDPROP_FLASH_ON_ADJUSTABLEPOWER|KSCAMERA_EXTENDEDPROP_FLASH_AUTO_ADJUSTABLEPOWER))!=0;
         if(adjustable&&value->Value.ull>100)return STATUS_INVALID_PARAMETER;
@@ -390,7 +392,7 @@ static NTSTATUS ExtendedFocus(PIRP irp,PKSIDENTIFIER request,PVOID data) {
 
 static VOID ScaleFrame(VIDEO_PIN *v,const UCHAR *source,ULONG width,ULONG height,UCHAR *output) {
     ULONG ow=v->Format.Width,oh=v->Format.Height;
-    if(width==ow&&height==oh){RtlCopyMemory(output,source,v->Bytes);return;}
+    if(width==ow&&height==oh){if(v->Yuy2)CamNv12Yuy2(source,output,width,height);else RtlCopyMemory(output,source,v->Bytes);return;}
     if(v->SourceWidth!=width||v->SourceHeight!=height) {
         ULONG cw=width,ch=height;
         if((ULONGLONG)cw*oh>(ULONGLONG)ch*ow)cw=(ULONG)((ULONGLONG)ch*ow/oh);else ch=(ULONG)((ULONGLONG)cw*oh/ow);
@@ -398,6 +400,14 @@ static VOID ScaleFrame(VIDEO_PIN *v,const UCHAR *source,ULONG width,ULONG height
         for(ULONG x=0;x<ow;x++)v->ScaleX[x]=left+x*cw/ow;
         for(ULONG y=0;y<oh;y++)v->ScaleY[y]=top+y*ch/oh;
         v->SourceWidth=width;v->SourceHeight=height;
+    }
+    if(v->Yuy2) {
+        const UCHAR *uv=source+width*height;
+        for(ULONG y=0;y<oh;y++) {
+            const UCHAR *row=source+v->ScaleY[y]*width,*chroma=uv+(v->ScaleY[y]/2)*width;UCHAR *target=output+y*ow*2;
+            for(ULONG x=0;x<ow;x+=2){ULONG at=v->ScaleX[x]&~1u;target[x*2]=row[v->ScaleX[x]];target[x*2+1]=chroma[at];target[x*2+2]=row[v->ScaleX[x+1]];target[x*2+3]=chroma[at+1];}
+        }
+        return;
     }
     for(ULONG y=0;y<oh;y++) {
         const UCHAR *row=source+v->ScaleY[y]*width;UCHAR *out=output+y*ow;
@@ -441,7 +451,7 @@ static VOID Capture(PVOID context) {
         VIDEO_PIN *pins[3]={0};QCAM_VIDEO_FORMAT_OPTIONS format={sizeof(format),QCAM_ABI,QCAM_VIDEO_WIDTH,QCAM_VIDEO_HEIGHT};ULONG pixels=0;
         for(ULONG i=0;i<3;i++) {
             pins[i]=EndpointReference(f,i);
-            if(pins[i]&&!pins[i]->Stopping&&i!=1&&pins[i]->Bytes>pixels){format=pins[i]->Format;pixels=pins[i]->Bytes;}
+            if(pins[i]&&!pins[i]->Stopping&&i!=1&&pins[i]->Format.Width*pins[i]->Format.Height>pixels){format=pins[i]->Format;pixels=format.Width*format.Height;}
         }
         BOOLEAN pending=InterlockedCompareExchange(&f->PhotoPending,1,1)==1;
         if(pending&&pins[1]&&!pins[1]->Stopping&&(!pixels||KeQueryInterruptTime()>=f->PhotoAfter+333333))format=pins[1]->Format;
@@ -524,14 +534,14 @@ static VOID Power(PKSDEVICE device,PIRP irp,DEVICE_POWER_STATE to,DEVICE_POWER_S
 
 static BOOLEAN Format(PKSDATAFORMAT format,ULONG sensor) {
     if(!format||format->FormatSize<sizeof(KS_DATAFORMAT_VIDEOINFOHEADER2)||
-       !IsEqualGUID(&format->MajorFormat,&KSDATAFORMAT_TYPE_VIDEO)||!IsEqualGUID(&format->SubFormat,&Nv12)||
+       !IsEqualGUID(&format->MajorFormat,&KSDATAFORMAT_TYPE_VIDEO)||(!IsEqualGUID(&format->SubFormat,&Nv12)&&!IsEqualGUID(&format->SubFormat,&Yuy2))||
        !IsEqualGUID(&format->Specifier,&KSDATAFORMAT_SPECIFIER_VIDEOINFO2))return FALSE;
     KS_VIDEOINFOHEADER2 *h=&((PKS_DATAFORMAT_VIDEOINFOHEADER2)format)->VideoInfoHeader2;
     ULONG w=(ULONG)h->bmiHeader.biWidth,height=(ULONG)h->bmiHeader.biHeight;
-    BOOLEAN slow=sensor==1||sensor==2||w*height>1920*1080;
+    BOOLEAN slow=sensor==1||sensor==2||w*height>1920*1080,yuy2=IsEqualGUID(&format->SubFormat,&Yuy2);
     return w>=160&&w<=QCAM_VIDEO_MAX_WIDTH&&height>=120&&height<=QCAM_VIDEO_MAX_HEIGHT&&!(w&7)&&!(height&1)&&
-        h->bmiHeader.biCompression==0x3231564e&&h->bmiHeader.biPlanes==1&&h->bmiHeader.biBitCount==12&&
-        h->bmiHeader.biSizeImage==w*height*3/2&&(h->AvgTimePerFrame==333333||h->AvgTimePerFrame==333334||
+        h->bmiHeader.biCompression==(yuy2?0x32595559u:0x3231564eu)&&h->bmiHeader.biPlanes==1&&h->bmiHeader.biBitCount==(yuy2?16:12)&&
+        h->bmiHeader.biSizeImage==(yuy2?w*height*2:w*height*3/2)&&(h->AvgTimePerFrame==333333||h->AvgTimePerFrame==333334||
         !slow&&(h->AvgTimePerFrame==166666||h->AvgTimePerFrame==FrameInterval));
 }
 
@@ -548,7 +558,7 @@ static NTSTATUS ApplyFormat(PKSPIN pin,VIDEO_PIN *v) {
         NTSTATUS status=KsAddItemToObjectBag(pin->Bag,storage,NULL);if(!NT_SUCCESS(status)){ExFreePoolWithTag(storage,'bCcQ');return status;}
         if(v->Storage)KsRemoveItemFromObjectBag(pin->Bag,v->Storage,TRUE);v->Storage=storage;v->Bytes=bytes;
     }
-    v->Format.Size=sizeof(v->Format);v->Format.Abi=QCAM_ABI;v->Format.Width=h->bmiHeader.biWidth;v->Format.Height=h->bmiHeader.biHeight;v->Interval=h->AvgTimePerFrame;
+    v->Format.Size=sizeof(v->Format);v->Format.Abi=QCAM_ABI;v->Format.Width=h->bmiHeader.biWidth;v->Format.Height=h->bmiHeader.biHeight;v->Interval=h->AvgTimePerFrame;v->Yuy2=IsEqualGUID(&pin->ConnectionFormat->SubFormat,&Yuy2);
     v->SourceWidth=v->SourceHeight=0;return STATUS_SUCCESS;
 }
 
@@ -607,7 +617,7 @@ static NTSTATUS SetFormat(PKSPIN pin,PKSDATAFORMAT old,PKSMULTIPLE_ITEM oldAttri
     if(!old)return STATUS_SUCCESS;
     VIDEO_PIN *v=PinContext(pin);if(!v)return STATUS_INVALID_DEVICE_STATE;
     KS_VIDEOINFOHEADER2 *h=&((PKS_DATAFORMAT_VIDEOINFOHEADER2)pin->ConnectionFormat)->VideoInfoHeader2;
-    if(v->Format.Width==(ULONG)h->bmiHeader.biWidth&&v->Format.Height==(ULONG)h->bmiHeader.biHeight&&
+    if(v->Yuy2==IsEqualGUID(&pin->ConnectionFormat->SubFormat,&Yuy2)&&v->Format.Width==(ULONG)h->bmiHeader.biWidth&&v->Format.Height==(ULONG)h->bmiHeader.biHeight&&
        v->Interval>=h->AvgTimePerFrame-1&&v->Interval<=h->AvgTimePerFrame+1)return STATUS_SUCCESS;
     BOOLEAN running=!v->Stopping;InterlockedExchange(&v->Stopping,1);ExWaitForRundownProtectionRelease(&v->PhotoRundown);
     NTSTATUS status=ApplyFormat(pin,v);KIRQL irql;KeAcquireSpinLock(&v->FrameLock,&irql);
@@ -667,10 +677,10 @@ static NTSTATUS Process(PKSPIN pin) {
         h->Duration=v->Interval;h->OptionsFlags|=KSSTREAM_HEADER_OPTIONSF_DURATIONVALID|KSSTREAM_HEADER_OPTIONSF_TIMEVALID;
         if(h->Size>=sizeof(*h)+sizeof(KS_FRAME_INFO)) {
             KS_FRAME_INFO *f=(KS_FRAME_INFO *)(h+1);RtlZeroMemory(f,sizeof(*f));
-            f->ExtendedHeaderSize=sizeof(*f);f->PictureNumber=frame->Time.Sequence+frame->Time.Dropped;
+            f->ExtendedHeaderSize=sizeof(*f);f->PictureNumber=v->Sequence;
             h->OptionsFlags|=KSSTREAM_HEADER_OPTIONSF_FRAMEINFO;
         }
-        v->Dropped=frame->Time.Dropped;v->Sequence=frame->Time.Sequence;
+        v->Dropped=frame->Time.Dropped;v->Sequence++;
     } else {
         h->DataUsed=0;h->OptionsFlags&=~KSSTREAM_HEADER_OPTIONSF_ENDOFSTREAM;
         KsStreamPointerSetStatusCode(p,status);
@@ -697,7 +707,7 @@ static const PKSDATARANGE Ranges[]={(PKSDATARANGE)&VideoRange.DataRange};
 
 static NTSTATUS Intersect(PVOID context,PIRP irp,PKSP_PIN pin,PKSDATARANGE requested,PKSDATARANGE supported,ULONG size,PVOID data,PULONG dataSize) {
     UNREFERENCED_PARAMETER(context);UNREFERENCED_PARAMETER(irp);UNREFERENCED_PARAMETER(pin);
-    if(!IsEqualGUID(&requested->MajorFormat,&KSDATAFORMAT_TYPE_VIDEO)||!IsEqualGUID(&requested->SubFormat,&Nv12)||
+    if(!IsEqualGUID(&requested->MajorFormat,&KSDATAFORMAT_TYPE_VIDEO)||!IsEqualGUID(&requested->SubFormat,&supported->SubFormat)||
        !IsEqualGUID(&requested->Specifier,&KSDATAFORMAT_SPECIFIER_VIDEOINFO2))return STATUS_NO_MATCH;
     if(requested->FormatSize>=sizeof(KS_DATARANGE_VIDEO2)) {
         KS_VIDEOINFOHEADER2 *r=&((KS_DATARANGE_VIDEO2 *)requested)->VideoInfoHeader,*h=&((KS_DATARANGE_VIDEO2 *)supported)->VideoInfoHeader;
@@ -712,7 +722,7 @@ static NTSTATUS Intersect(PVOID context,PIRP irp,PKSP_PIN pin,PKSDATARANGE reque
 }
 
 DECLARE_SIMPLE_FRAMING_EX(Framing,STATIC_KSMEMORY_TYPE_KERNEL_NONPAGED,
-    KSALLOCATOR_REQUIREMENTF_SYSTEM_MEMORY|KSALLOCATOR_REQUIREMENTF_PREFERENCES_ONLY,3,0,160*120*3/2,QCAM_VIDEO_MAX_BYTES);
+    KSALLOCATOR_REQUIREMENTF_SYSTEM_MEMORY|KSALLOCATOR_REQUIREMENTF_PREFERENCES_ONLY,3,0,160*120*3/2,QCAM_VIDEO_MAX_WIDTH*QCAM_VIDEO_MAX_HEIGHT*2);
 
 static const KSPIN_DISPATCH PinDispatch={PinCreate,PinClose,Process,NULL,SetFormat,State,NULL,NULL,NULL,NULL};
 static const KSPIN_DESCRIPTOR_EX Pins[]={

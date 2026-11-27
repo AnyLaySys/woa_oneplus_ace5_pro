@@ -1,0 +1,43 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=ComputeAccelerator
+ClassGuid={F01A9D53-3FF6-48D2-9F97-C8A7004BE10C}
+Provider=%Provider%
+DriverVer=11/27/2026,26.11.27.71
+CatalogFile=qcom_npu_mcdm.cat
+PnpLockdown=1
+[DestinationDirs]
+DriverCopy=13
+[SourceDisksNames]
+1=%Description%,,,
+[SourceDisksFiles]
+qcom_npu_mcdm.sys=1
+[Manufacturer]
+%Provider%=Devices,NT$ARCH$.10.0...26100
+[Devices.NT$ARCH$.10.0...26100]
+%Description%=Install,ROOT\QCOMNPU
+[Install.NT]
+CopyFiles=DriverCopy
+AddReg=AdapterReg
+[DriverCopy]
+qcom_npu_mcdm.sys
+[Install.NT.HW]
+AddReg=AdapterReg
+[AdapterReg]
+HKR,,DXCoreAttributes,0x00010000,"{D46140C4-ADD7-451B-9E56-06FE8C3B58ED}"
+HKR,,HardwareInformation.AdapterString,0x00000000,%Description%
+HKR,,HardwareInformation.ChipType,0x00000000,"Qualcomm Hexagon V79"
+HKR,,HardwareInformation.BiosString,0x00000000,"UEFI authenticated CDSP"
+HKR,,HardwareInformation.DacType,0x00000000,"Compute"
+[Install.NT.Services]
+AddService=qcom_npu_mcdm,0x00000002,Service
+[Service]
+DisplayName=%Description%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\qcom_npu_mcdm.sys
+Dependencies=qcom_npu
+[Strings]
+Provider="AnyLaySys"
+Description="Qualcomm Hexagon NPU"

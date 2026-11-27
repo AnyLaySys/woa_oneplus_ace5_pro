@@ -1,0 +1,29 @@
+{
+  "device": "OnePlus Ace 5 Pro / PKR110 / SM8750",
+  "stock": "PKR110domestic_11_15.0.0.861CN01_2025081317160252",
+  "image": "IMAGES/NON-HLOS.bin",
+  "image_sha256": "f573c29c69c1c9832f467d5ac2fd5458124529e15a588849dcbae392b0a64249",
+  "path": "image/cdsp.* and image/cdsp_dtb.*",
+  "files": {
+    "cdsp.b00": "9189aa3b70ee43c8d1c988f8ebd1594e2bd8202495bc427a7da0105e229b8daa",
+    "cdsp.b01": "258c658d2ed7f6f7089894f34a6e798592160a0da8c48fe037c9bf868b26663b",
+    "cdsp.b02": "b007fc2d4918ff663a8e33f3fda934ca2d57deb46eb2571bd2e3fa4beb2a8f66",
+    "cdsp.b03": "35207ec3126524049320c757aecd55160bb80316c442c8d652348b805dd8e8d1",
+    "cdsp.b04": "fb4ad56d859ec9dcacc1bfbba02db2b81125c5d22d4dbe0e3bf0ede184925103",
+    "cdsp.b05": "8f2412a36c4007f529b97dc4d84973faa542d92cb269711b192acd4409458804",
+    "cdsp.b06": "427c1ff0a28ffcfeb2d2941821cafd19cc67f3352a86afd5f4b4cba327821a18",
+    "cdsp.b07": "cdece17dc3f31ff913b389f4ad9a0757e1cde9acf109d53f06843d6a03b5c797",
+    "cdsp.b08": "8039276090df4b4d6a293ec25e29cbd15a2c81dfdbe97b0bd516052b3ef09dab",
+    "cdsp.b09": "acd1c6e6b1beb357f2c77d53dc1ad981c8a5a8ebcbb053347d9ce4f860cebd70",
+    "cdsp.b10": "d02504bc4bbd1594e7a5f3e85d36d3d69ea449867ee11ae7329887df0995ff89",
+    "cdsp.b11": "a4d2f21aa7a651ee1e5fe9572a728fba60a32a363cdfdea30e6a6c3e7d378d05",
+    "cdsp.b12": "758763b81b55995dd9efb16a676a8e23e8b3ad5a6395f01269faf491f57e8683",
+    "cdsp.b13": "477c8bc6696ebb016e87b7b2369c759cb145e49440b3042b80339a5be7165f18",
+    "cdsp.b15": "7a6f98bc9d33b65b74e80019357df3cdb40e8d575fd54c97fe8ffef339ae75ee",
+    "cdsp.mdt": "ba7657726a861f56f3a7841caa85dee13d0f7d7224bd69c5abe2203c3c4cc1c9",
+    "cdsp_dtb.b00": "31747c7001fa4a31aaac7e8c41d6dea16659a8cd33e51e90ecb6469509e7e216",
+    "cdsp_dtb.b01": "73fccf195764b6ad7dbaf023609295b64279ff558fdc14538dd879848382046d",
+    "cdsp_dtb.b02": "1e7b17a784550f3013a21f6ab0628c422218d8b3842cd655d4149bbbf3694e4f",
+    "cdsp_dtb.mdt": "faf10d1c4fd6b305af356c48db123012e92b5c694de9d745d28934364c426ba9"
+  }
+}

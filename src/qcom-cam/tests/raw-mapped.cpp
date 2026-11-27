@@ -24,6 +24,7 @@ using BOOLEAN=bool;
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
 #include "../video/nv12.h"
+#include "../video/yuy2.h"
 #pragma GCC diagnostic pop
 
 extern "C" void CamRgbRowMapped(const UCHAR *,ULONG,const UCHAR [3][1024],const CAM_RAW_BLOCK *,USHORT *,USHORT *,USHORT *);
@@ -33,7 +34,7 @@ int main() {
     constexpr ULONG companion=QCAM_STRIDE*3072*2+256;
     auto dma=static_cast<UCHAR *>(std::malloc(companion+QCAM_STRIDE*4));assert(dma);
     UCHAR colors[3][1024];USHORT pixels[4][4096],output[3][4098];
-    USHORT scratch[4096*6+2];UCHAR nv12[4096*6+2];
+    USHORT scratch[4096*6+2];UCHAR nv12[4096*6+2],yuy2[4096*8+2];
     for(ULONG c=0;c<3;c++)for(ULONG value=0;value<1024;value++)colors[c][value]=static_cast<UCHAR>((value*(c*5+3)+19)%251);
     const ULONG sizes[][2]={{4096,3072},{3264,2448},{2304,1728},{1600,1200}};
     const ULONG outputs[][2]={{160,120},{320,240},{640,360},{640,480},{800,600},{960,540},{1024,768},{1280,720},{1280,960},
@@ -83,6 +84,9 @@ int main() {
                     assert(nv12[off+1]==128+((112*r-94*g-18*b+128)>>8));
                 }
                 assert(scratch[0]==0xfeed&&scratch[4096*6+1]==0xbeef&&nv12[0]==0xfe&&nv12[ow*6+1]==0xef);
+                yuy2[0]=0xad;yuy2[ow*8+1]=0xbe;CamNv12Yuy2(nv12+1,yuy2+1,ow,4);
+                for(ULONG y=0;y<4;y++)for(ULONG x=0;x<ow;x++){assert(yuy2[1+(y*ow+x)*2]==nv12[1+y*ow+x]);assert(yuy2[2+(y*ow+x)*2]==nv12[1+ow*4+(y/2)*ow+x]);}
+                assert(yuy2[0]==0xad&&yuy2[ow*8+1]==0xbe);
             }
         }
     }

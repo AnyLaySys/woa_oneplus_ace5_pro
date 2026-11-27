@@ -3,7 +3,7 @@ Signature="$WINDOWS NT$"
 Class=Biometric
 ClassGuid={53D29EF7-377C-4D14-864B-EB3A85769359}
 Provider=%Provider%
-DriverVer=11/24/2026,26.11.24.32
+DriverVer=11/24/2026,26.11.24.34
 CatalogFile=jiiov_fp.cat
 PnpLockdown=1
 

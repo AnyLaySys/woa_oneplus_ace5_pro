@@ -1,7 +1,7 @@
 #include "adapter.h"
 #include "dpu.h"
 
-const ULONG A830RefreshRates[3]={120,90,60};
+const ULONG A830RefreshRates[4]={120,90,72,60};
 ULONG A830RefreshRate(const A830_ADAPTER *a) {return (ULONG)ReadAcquire(&a->RefreshRate);}
 D3DKMDT_VIDEO_SIGNAL_INFO A830SignalAtRate(const A830_ADAPTER *a,ULONG hz) {
     D3DKMDT_VIDEO_SIGNAL_INFO s={0};s.VideoStandard=D3DKMDT_VSS_OTHER;
@@ -27,7 +27,7 @@ VOID A830Edid(const A830_ADAPTER *a,UCHAR e[128]) {
         c.BluePoint.cx,c.BluePoint.cy,c.WhitePoint.cx,c.WhitePoint.cy};
     for(ULONG i=0;i<8;i++){e[25+i/4]|=(UCHAR)((points[i]&3u)<<(6-(i%4)*2));e[27+i]=(UCHAR)(points[i]>>2);}
     for(ULONG i=38;i<54;i++)e[i]=1;
-    for(ULONG i=0;i<3;i++) {
+    for(ULONG i=0;i<RTL_NUMBER_OF(A830RefreshRates);i++) {
         UCHAR *d=e+54+i*18;
         if(i && !A830DpuCanRefresh((PVOID)a)){d[3]=0x10;continue;}
         D3DKMDT_VIDEO_SIGNAL_INFO signal=A830SignalAtRate(a,A830RefreshRates[i]);
@@ -36,7 +36,6 @@ VOID A830Edid(const A830_ADAPTER *a,UCHAR e[128]) {
         d[2]=(UCHAR)w;d[3]=80;d[4]=(UCHAR)((w>>8)<<4);d[5]=(UCHAR)h;d[6]=20;d[7]=(UCHAR)((h>>8)<<4);
         d[8]=8;d[9]=16;d[10]=0x22;d[12]=71;d[13]=157;d[17]=0x18;
     }
-    e[111]=0xfc;RtlCopyMemory(e+113,"BOE AA590\n   ",13);
     ULONG sum=0;for(ULONG i=0;i<127;i++)sum+=e[i];e[127]=(UCHAR)(0u-sum);
 }
 BOOLEAN A830PathSupport(D3DKMDT_VIDPN_PRESENT_PATH *path,const DXGKARG_ENUMVIDPNCOFUNCMODALITY *args) {

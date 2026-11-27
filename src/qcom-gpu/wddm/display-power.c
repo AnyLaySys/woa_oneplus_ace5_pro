@@ -45,9 +45,10 @@ static NTSTATUS Send(UCHAR command,USHORT brightness) {
     return Transfer(words,command==0x51?8:4);
 }
 NTSTATUS A830PanelRefresh(ULONG hz) {
-    if(hz!=60 && hz!=90 && hz!=120)return STATUS_INVALID_PARAMETER;
-    ULONG words[]={0x40390004,0x00a55aff,0x00150060|(hz==90?2u<<8:0),
-        0x40390004,0x02a55aff,0x40390009,0x008000b0,0x00000010,0,
+    if(hz!=60 && hz!=72 && hz!=90 && hz!=120)return STATUS_INVALID_PARAMETER;
+    ULONG words[]={0x40390004,0x00a55aff,0x00150060|(hz==72?4u<<8:hz==90?2u<<8:0),
+        0x40390004,0x02a55aff,0x40390005,0x000003c0,0,
+        0x40390009,(hz==72?0x008300b0u:0x008000b0u),0x00000010,0,
         0x40390004,0x2da55aff,0x40390003,(hz==90?0x85u:0x83u)|(hz==60?1u<<8:0),
         0x001500f2|(hz==60?1u<<8:0),0xc0390004,0x00a55aff};
     return Transfer(words,sizeof(words));

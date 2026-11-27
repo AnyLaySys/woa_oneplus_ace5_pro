@@ -21,7 +21,7 @@
   <PropertyGroup>
     <TargetName>qcom_cam</TargetName>
     <CamVersionDate Condition="'$(CamVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</CamVersionDate>
-    <CamRevision Condition="'$(CamRevision)' == ''">246</CamRevision>
+    <CamRevision Condition="'$(CamRevision)' == ''">318</CamRevision>
     <CamDriverDate>$([System.DateTime]::Parse('$(CamVersionDate)').ToString('MM/dd/yyyy'))</CamDriverDate>
     <CamDriverVersion>$([System.DateTime]::Parse('$(CamVersionDate)').ToString('yy.M.d')).$(CamRevision)</CamDriverVersion>
     <CamDriverVersionComma>$([System.String]::Copy('$(CamDriverVersion)').Replace('.', ','))</CamDriverVersionComma>
@@ -44,6 +44,7 @@
     <ClCompile Include="..\platform.c" />
     <ClCompile Include="..\rpmh.c" />
     <ClCompile Include="..\capture.c" />
+    <ClCompile Include="..\isp-capture.c" />
     <ClCompile Include="..\cdm.c" />
     <ClCompile Include="..\clock-measure.c" />
     <ClCompile Include="..\cpas.c" />
@@ -67,8 +68,8 @@
     <FilesToPackage Include="$(OutDir)qcom_cam_video.inf" />
   </ItemGroup>
   <Target Name="BuildCaptureTool" BeforeTargets="PrepareForBuild">
-    <MSBuild Projects="$(MSBuildThisFileDirectory)..\tools\capture.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=$(Platform);OutDir=$(OutDir);IntDir=$(IntDir)capture\;CamDriverVersion=$(CamDriverVersion);CamDriverVersionComma=$(CamDriverVersionComma)" />
-    <MSBuild Projects="$(MSBuildThisFileDirectory)..\tools\camera-check.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=$(Platform);OutDir=$(OutDir);IntDir=$(IntDir)check\;CamDriverVersion=$(CamDriverVersion);CamDriverVersionComma=$(CamDriverVersionComma)" />
+    <MSBuild Projects="$(MSBuildThisFileDirectory)..\..\..\out\tools\capture.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=$(Platform);OutDir=$(OutDir);IntDir=$(IntDir)capture\;CamDriverVersion=$(CamDriverVersion);CamDriverVersionComma=$(CamDriverVersionComma)" />
+    <MSBuild Projects="$(MSBuildThisFileDirectory)..\..\..\out\tools\camera-check.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=$(Platform);OutDir=$(OutDir);IntDir=$(IntDir)check\;CamDriverVersion=$(CamDriverVersion);CamDriverVersionComma=$(CamDriverVersionComma)" />
     <MSBuild Projects="$(MSBuildThisFileDirectory)..\video\qcom_cam_video.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=$(Platform);OutDir=$(OutDir);IntDir=$(IntDir)video\;CamDriverDate=$(CamDriverDate);CamDriverVersion=$(CamDriverVersion);CamDriverVersionComma=$(CamDriverVersionComma)" />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

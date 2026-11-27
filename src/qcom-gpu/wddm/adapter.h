@@ -139,7 +139,7 @@ VOID A830Worker(PVOID context);
 NTSTATUS A830DisplayStart(A830_ADAPTER *adapter);
 NTSTATUS A830DisplayLayout(const DXGK_DISPLAY_INFORMATION *display,SIZE_T *bytes);
 ULONG A830RefreshRate(const A830_ADAPTER *adapter);
-extern const ULONG A830RefreshRates[3];
+extern const ULONG A830RefreshRates[4];
 D3DKMDT_VIDEO_SIGNAL_INFO A830SignalAtRate(const A830_ADAPTER *adapter,ULONG hz);
 D3DKMDT_VIDEO_SIGNAL_INFO A830Signal(const A830_ADAPTER *adapter);
 VOID A830Edid(const A830_ADAPTER *adapter,UCHAR edid[128]);

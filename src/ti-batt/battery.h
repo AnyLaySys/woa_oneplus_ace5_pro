@@ -25,7 +25,7 @@
 #define BQ_REG_SOC              0x2Cu
 #define BQ_REG_DESIGN           0x3Cu
 
-#define BAT_POLL_MS             5000u
+#define BAT_POLL_MS             3000u
 #define BAT_BATTERY_TAG         1u
 #define BAT_DEVICE_NAME         L"OnePlus Ace 5 Pro Battery"
 #define BAT_NOMINAL_MV          7740u

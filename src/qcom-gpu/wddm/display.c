@@ -20,7 +20,7 @@ static NTSTATUS Interface(A830_ADAPTER *a,D3DKMDT_HVIDPN h,const DXGK_VIDPN_INTE
 static ULONG SignalRate(A830_ADAPTER *a,const D3DKMDT_VIDEO_SIGNAL_INFO *s) {
     if(s->ActiveSize.cx!=a->DisplayInfo.Width || s->ActiveSize.cy!=a->DisplayInfo.Height || !s->VSyncFreq.Denominator)return 0;
     ULONGLONG n=s->VSyncFreq.Numerator,d=s->VSyncFreq.Denominator;
-    for(ULONG i=0;i<(A830DpuCanRefresh(a)?3u:1u);i++) {
+    for(ULONG i=0;i<(A830DpuCanRefresh(a)?RTL_NUMBER_OF(A830RefreshRates):1u);i++) {
         ULONG hz=A830RefreshRates[i];ULONGLONG expected=hz*d,error=n>expected?n-expected:expected-n;
         if(error*100<=d)return hz;
     }
@@ -67,7 +67,7 @@ static NTSTATUS TargetModes(A830_ADAPTER *a,D3DKMDT_HVIDPN h,const DXGK_VIDPN_IN
         if(!NT_SUCCESS(pinnedStatus))return pinnedStatus;
     }
     NTSTATUS status=v->pfnCreateNewTargetModeSet(h,0,&set,&i);if(!NT_SUCCESS(status))return status;
-    for(ULONG n=0;NT_SUCCESS(status) && n<(A830DpuCanRefresh(a)?3u:1u);n++) {
+    for(ULONG n=0;NT_SUCCESS(status) && n<(A830DpuCanRefresh(a)?RTL_NUMBER_OF(A830RefreshRates):1u);n++) {
         D3DKMDT_VIDPN_TARGET_MODE *m=NULL;status=i->pfnCreateNewModeInfo(set,&m);if(!NT_SUCCESS(status))break;
         m->VideoSignalInfo=A830SignalAtRate(a,A830RefreshRates[n]);m->Preference=n?D3DKMDT_MP_NOTPREFERRED:D3DKMDT_MP_PREFERRED;
         m->WireFormatAndPreference.Rgb=D3DKMDT_BITS_PER_COMPONENT_08|(A830DpuEnabled(a)?D3DKMDT_BITS_PER_COMPONENT_10:0);
@@ -290,7 +290,7 @@ static NTSTATUS APIENTRY MonitorModes(HANDLE adapter,const DXGKARG_RECOMMENDMONI
     const DXGK_MONITORSOURCEMODESET_INTERFACE *i=p->pMonitorSourceModeSetInterface;
     NTSTATUS status=STATUS_SUCCESS;
     ULONG bits=A830DpuEnabled(a)?10u:8u;
-    for(ULONG n=0;NT_SUCCESS(status) && n<(A830DpuCanRefresh(a)?3u:1u);n++) {
+    for(ULONG n=0;NT_SUCCESS(status) && n<(A830DpuCanRefresh(a)?RTL_NUMBER_OF(A830RefreshRates):1u);n++) {
         D3DKMDT_MONITOR_SOURCE_MODE *m=NULL;status=i->pfnCreateNewModeInfo(p->hMonitorSourceModeSet,&m);if(!NT_SUCCESS(status))break;
         m->VideoSignalInfo=A830SignalAtRate(a,A830RefreshRates[n]);m->Origin=D3DKMDT_MCO_DRIVER;
         m->Preference=n?D3DKMDT_MP_NOTPREFERRED:D3DKMDT_MP_PREFERRED;

@@ -1,5 +1,6 @@
 #include <ntifs.h>
 #include "sia9177.h"
+#include "usb-phy.inc"
 static const ULONG PinFirst[]={2,72,101,121,164};
 static const ULONG PinSizes[]={0x1000,0x2000,0x1000,0x4000,0x1000};
 PUCHAR SiaPin(PSIA_DEVICE Dev,ULONG pin){for(ULONG i=0;i<RTL_NUMBER_OF(PinFirst);i++)if(pin>=PinFirst[i]&&pin<PinFirst[i]+PinSizes[i]/0x1000)return Dev->Pins[i]+(pin-PinFirst[i])*0x1000;return NULL;}
@@ -57,7 +58,11 @@ SiaWorker (PVOID Context)
             LinkReady = NT_SUCCESS (Status);
             if (!LinkReady) SiaLinkStop (Dev);
         }
-        if (NT_SUCCESS (Status)) { SiaLinkPoll (Dev); if (Dev->Running) SiaAudioRun (Dev); }
+        if (NT_SUCCESS (Status)) {
+            UsbClockPoll(Dev,Dev->Link&&Dev->Link->Usb.Otg.Phase>=OtgEnable&&Dev->Link->Usb.Otg.Phase<=OtgDisable);
+            SiaLinkPoll (Dev);
+            if (Dev->Running) SiaAudioRun (Dev);
+        }
         if (!NT_SUCCESS(Status)) {
             InterlockedExchange (&Dev->Running, 0);
             for (ULONG Index = 0; Index < 2; Index++) {
@@ -152,6 +157,7 @@ SiaHardwareStop (PSIA_DEVICE Dev)
         ZwClose (Dev->Thread);
         Dev->Thread = NULL;
     }
+    UsbClockStop(Dev);
     if (Dev->Se) MmUnmapIoSpace (Dev->Se, Dev->SeSize);
     if (Dev->Gcc) MmUnmapIoSpace (Dev->Gcc, SIA_GCC_SIZE);
     for(ULONG i=0;i<RTL_NUMBER_OF(PinSizes);i++)if(Dev->Pins[i]){MmUnmapIoSpace(Dev->Pins[i],PinSizes[i]);Dev->Pins[i]=NULL;}

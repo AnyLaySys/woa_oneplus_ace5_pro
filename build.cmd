@@ -7,6 +7,7 @@ if /i "%~1"=="/?" goto help
 if /i "%~1"=="install-fw" goto install_fw
 if not "%~2"=="" goto invalid
 if /i "%~1"=="all" goto build_all
+if /i "%~1"=="ollama-npu" goto build_ollama_npu
 set "NAME=%~1"
 set "TARGET="
 if /i "%NAME%"=="syna-touch" (set "NAME=syna-touch"& set "TARGET=syna_touch")
@@ -24,10 +25,13 @@ if /i "%NAME%"=="qcom-ir" (set "NAME=qcom-ir"& set "TARGET=qcom_ir")
 if /i "%NAME%"=="ir-remote" (set "NAME=ir-remote"& set "TARGET=ir_remote")
 if /i "%NAME%"=="qcom-cam" (set "NAME=qcom-cam"& set "TARGET=qcom_cam")
 if /i "%NAME%"=="qcom-gpu" (set "NAME=qcom-gpu"& set "TARGET=qcom_gpu")
+if /i "%NAME%"=="qcom-npu" (set "NAME=qcom-npu"& set "TARGET=qcom_npu")
 if not defined TARGET goto invalid
+set "APP_PACKAGE="
+if /i "%NAME%"=="ir-remote" set "APP_PACKAGE=1"
 set "DRIVER_EXT=sys"
 if /i "%NAME%"=="nxp-nfc" set "DRIVER_EXT=dll"
-if /i "%NAME%"=="ir-remote" set "DRIVER_EXT=exe"
+if defined APP_PACKAGE set "DRIVER_EXT=exe"
 set "CREDENTIAL="
 if /i "%NAME%"=="qcom-audio" (
   set "CREDENTIAL=%ROOT%\fw\charge\credential.bin"
@@ -52,7 +56,7 @@ if not "%PROJECT_COUNT%"=="1" (
   exit /b 1
 )
 set "DST=%ROOT%\out\drv\%NAME%"
-if /i "%NAME%"=="ir-remote" set "DST=%ROOT%\out\app\ir-remote"
+if defined APP_PACKAGE set "DST=%ROOT%\out\app\%NAME%"
 set "WORK=%ROOT%\out\%NAME%\ARM64\Release"
 set "BIN=%WORK%\bin"
 set "VS=C:\Program Files\Microsoft Visual Studio\18\Insiders"
@@ -67,6 +71,16 @@ if not exist "%DST%" mkdir "%DST%"
 if not exist "%WORK%\obj" mkdir "%WORK%\obj"
 call "%VS%\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul 2>&1
 if errorlevel 1 exit /b 1
+if /i "%NAME%"=="qcom-npu" (
+  wsl.exe --cd "%ROOT%" --exec python3 src/qcom-npu/fetch-runtime.py
+  if errorlevel 1 exit /b 1
+  call "%ROOT%\src\qcom-npu\runtime\build.cmd"
+  if errorlevel 1 exit /b 1
+  call "%ROOT%\src\qcom-npu\ggml\build.cmd"
+  if errorlevel 1 exit /b 1
+  call "%ROOT%\src\qcom-npu\ep\build.cmd"
+  if errorlevel 1 exit /b 1
+)
 set "GPU_RENDER_PACKAGE=%ROOT%\out\mesa\umd-package"
 if defined GPU_PACKAGE call :build_gpu_renderer
 if errorlevel 1 exit /b 1
@@ -90,7 +104,7 @@ if errorlevel 1 exit /b 1
 if defined GPU_PACKAGE for %%E in (sys inf cat) do if exist "%DST%\*.%%E" del /q "%DST%\*.%%E"
 copy /y "%BIN%\%TARGET%.%DRIVER_EXT%" "%DST%\%TARGET%.%DRIVER_EXT%" >nul
 if errorlevel 1 exit /b 1
-if /i not "%NAME%"=="ir-remote" (
+if not defined APP_PACKAGE (
   copy /y "%BIN%\%TARGET%.inf" "%DST%\%TARGET%.inf" >nul
   if errorlevel 1 exit /b 1
 )
@@ -108,13 +122,7 @@ if defined GPU_PACKAGE (
 )
 "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%TARGET%.%DRIVER_EXT%"
 if errorlevel 1 exit /b 1
-if /i "%NAME%"=="ir-remote" goto build_done
-if /i "%NAME%"=="jiiov-fp" (
-  copy /y "%BIN%\jiiov_fp_check.exe" "%DST%\jiiov_fp_check.exe" >nul
-  if errorlevel 1 exit /b 1
-  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\jiiov_fp_check.exe"
-  if errorlevel 1 exit /b 1
-)
+if defined APP_PACKAGE goto build_done
 if /i "%NAME%"=="qcom-cam" (
   for %%F in (qcom_cam_video.sys qcom_cam_video.inf) do (
     copy /y "%BIN%\%%F" "%DST%\%%F" >nul
@@ -154,10 +162,67 @@ if /i "%NAME%"=="qcom-audio" (
   copy /y "%ROOT%\fw\adsp\adsp_dtb.*" "%DST%\ADSP\" >nul
   if errorlevel 1 exit /b 1
 )
+if /i "%NAME%"=="qcom-npu" (
+  call "%ROOT%\src\qcom-npu\mcdm\build.cmd"
+  if errorlevel 1 exit /b 1
+  for %%F in (qcom_npu_mcdm.sys qcom_npu_mcdm.inf) do (
+    copy /y "%WORK%\mcdm\%%F" "%DST%\%%F" >nul
+    if errorlevel 1 exit /b 1
+  )
+  for %%F in (qcom_npu_ep.dll qcom_npu_rpc.dll) do (
+    copy /y "%ROOT%\out\qcom-npu\inference\runner\%%F" "%DST%\%%F" >nul
+    if errorlevel 1 exit /b 1
+  )
+  for %%F in (qcom_npu_mcdm.sys qcom_npu_ep.dll qcom_npu_rpc.dll) do (
+    "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%%F"
+    if errorlevel 1 exit /b 1
+  )
+  for %%F in (QNN-LICENSE.pdf FastRPC-LICENSE.txt ONNX-Runtime-LICENSE.txt) do (
+    copy /y "%ROOT%\out\qcom-npu\inference\runner\%%F" "%DST%\%%F" >nul
+    if errorlevel 1 exit /b 1
+  )
+  if not exist "%DST%\GGML" mkdir "%DST%\GGML"
+  copy /y "%ROOT%\out\qcom-npu\chat-build\native\bin\ggml-hexagon.dll" "%DST%\GGML\qcom_npu_ggml.dll" >nul
+  if errorlevel 1 exit /b 1
+  copy /y "%ROOT%\out\qcom-npu\chat-build\native\bin\ggml-base.dll" "%DST%\GGML\ggml-base.dll" >nul
+  if errorlevel 1 exit /b 1
+  for %%F in (qcom_npu_ggml.dll ggml-base.dll) do (
+    "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\GGML\%%F"
+    if errorlevel 1 exit /b 1
+  )
+  for %%F in (msvcp140.dll vcruntime140.dll) do (
+    copy /y "%VS%\VC\Redist\MSVC\14.52.37025\arm64\Microsoft.VC145.CRT\%%F" "%DST%\GGML\%%F" >nul
+    if errorlevel 1 exit /b 1
+  )
+  if not exist "%DST%\DSP250" mkdir "%DST%\DSP250"
+  for %%F in (fastrpc_shell_unsigned_3 libc++.so.1 libc++abi.so.1) do (
+    copy /y "%ROOT%\fw\cdsp\user\%%F" "%DST%\DSP250\%%F" >nul
+    if errorlevel 1 exit /b 1
+  )
+  for %%F in (libQnnHtpV79Skel.so libQnnHtpV79.so) do (
+    copy /y "%ROOT%\out\qcom-npu\inference\sdk\lib\hexagon-v79\unsigned\%%F" "%DST%\DSP250\%%F" >nul
+    if errorlevel 1 exit /b 1
+  )
+  copy /y "%ROOT%\out\qcom-npu\inference\ggml\libggml-htp-v79.so" "%DST%\DSP250\libggml-htp-v79.so" >nul
+  if errorlevel 1 exit /b 1
+  copy /y "%ROOT%\out\qcom-npu\inference\ggml\GGML-LICENSE.txt" "%DST%\GGML-LICENSE.txt" >nul
+  if errorlevel 1 exit /b 1
+  if not exist "%DST%\CDSP" mkdir "%DST%\CDSP"
+  copy /y "%ROOT%\fw\cdsp\cdsp.*" "%DST%\CDSP\" >nul
+  if errorlevel 1 exit /b 1
+  copy /y "%ROOT%\fw\cdsp\cdsp_dtb.*" "%DST%\CDSP\" >nul
+  if errorlevel 1 exit /b 1
+)
 "%INF2CAT%" /driver:"%DST%" /os:10_CO_ARM64 /uselocaltime
 if errorlevel 1 exit /b 1
 "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\%TARGET%.cat"
 if errorlevel 1 exit /b 1
+if /i "%NAME%"=="qcom-npu" (
+  "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_npu_mcdm.cat"
+  if errorlevel 1 exit /b 1
+  wsl.exe --cd "%ROOT%" --exec python3 src/qcom-npu/ep/package.py
+  if errorlevel 1 exit /b 1
+)
 if /i "%NAME%"=="qcom-sensors" (
   "%SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %CERT% "%DST%\qcom_sensors_native.cat"
   if errorlevel 1 exit /b 1
@@ -168,12 +233,32 @@ if /i "%NAME%"=="qcom-cam" (
 )
 echo.
 :build_done
-if /i "%NAME%"=="ir-remote" (echo APP=%DST%) else echo DRIVER=%DST%
+if defined APP_PACKAGE (echo APP=%DST%) else echo DRIVER=%DST%
 dir "%DST%" /b
 exit /b 0
 
+:build_ollama_npu
+call "%ROOT%\src\qcom-npu\ggml\build.cmd"
+if errorlevel 1 exit /b 1
+wsl.exe --cd "%ROOT%" --exec python3 src/qcom-npu/ollama/build.py
+if errorlevel 1 exit /b 1
+set "OLLAMA_NPU_DST=%ROOT%\out\app\ollama-npu"
+set "OLLAMA_SIGNTOOL=C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
+set "OLLAMA_SIGN_CERT=FF7908A360512CF12E08C0BD99625830C1EA4E6D"
+if defined WOA_SIGN_CERT set "OLLAMA_SIGN_CERT=%WOA_SIGN_CERT%"
+for %%F in (ollama.exe "ollama app.exe") do (
+  "%OLLAMA_SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %OLLAMA_SIGN_CERT% "%OLLAMA_NPU_DST%\%%~F"
+  if errorlevel 1 exit /b 1
+)
+for %%F in (llama-server.exe llama-server-impl.dll llama-common.dll llama.dll mtmd.dll ggml.dll ggml-base.dll ggml-cpu.dll) do (
+  "%OLLAMA_SIGNTOOL%" sign /q /fd sha256 /s My /sha1 %OLLAMA_SIGN_CERT% "%OLLAMA_NPU_DST%\lib\ollama\%%F"
+  if errorlevel 1 exit /b 1
+)
+echo APP=%OLLAMA_NPU_DST%
+exit /b 0
+
 :build_all
-for %%D in (syna-touch qcom-audio qcom-bt qcom-wlan ti-batt qcom-cpupwr qcom-keys qcom-sensors nxp-nfc jiiov-fp qcom-ir qcom-cam qcom-gpu) do (
+for %%D in (syna-touch qcom-audio qcom-bt qcom-wlan ti-batt qcom-cpupwr qcom-keys qcom-sensors nxp-nfc jiiov-fp qcom-ir qcom-cam qcom-gpu qcom-npu) do (
   echo.
   echo Building %%D...
   call "%~f0" %%D
@@ -264,6 +349,8 @@ echo        build.cmd qcom-ir
 echo        build.cmd ir-remote
 echo        build.cmd qcom-cam
 echo        build.cmd qcom-gpu
+echo        build.cmd qcom-npu
+echo        build.cmd ollama-npu
 echo        build.cmd install-fw -WindowsDirectory "W:\Windows" [-BluetoothAddress "XX:XX:XX:XX:XX:XX"] [-WhatIf] [-Force]
 echo all builds every driver.
 echo qcom-charge builds qcom-audio with autonomous kernel charging.

@@ -352,6 +352,12 @@ void S8ClearStaging(S8 *S)
     S->SignalAt=S->SignalAttemptAt=S->ReachabilityAt=0;S->AssocIndicated=FALSE;S->SaeRequested=S->SaeAwaitOs=S->SaeConfirmSent=S->SaePeerConfirm=FALSE;S->SaeTxLength=0;RtlSecureZeroMemory(S->SaeTx,sizeof(S->SaeTx));KeReleaseSpinLock(&S->Lock,Irql);
 }
 static void S8ScanFinish(S8 *S,NTSTATUS Status);
+static void S8RadioComplete(S8 *S,const WDI_MESSAGE_HEADER &H,NTSTATUS Status)
+{
+    if(NT_SUCCESS(Status)){WDI_INDICATION_RADIO_STATUS_PARAMETERS P;auto D=S->D;P.RadioState.HardwareState=D->Ce.WmiReady&&!D->Mhi.SysErr&&!D->Mhi.RddmFailed&&!D->Ce.SourceFailed&&!D->Dp.Failed&&!D->Runtime.Failed;P.RadioState.SoftwareState=S->Radio;UCHAR *Out=nullptr;ULONG N=0;
+        if(GenerateWdiIndicationRadioStatusFromIhv(&P,0,&S->Tlv,&N,&Out)==NDIS_STATUS_SUCCESS){S8Indicate(S,&H,WDI_INDICATION_RADIO_STATUS,Status,Out,N,true);FreeGenerated(Out);}else Status=STATUS_INSUFFICIENT_RESOURCES;}
+    S8Indicate(S,&H,WDI_INDICATION_SET_RADIO_STATE_COMPLETE,Status);
+}
 static void S8FinishReset(S8 *S,NTSTATUS Status)
 {
     auto D=S->D;auto J=S->J;
@@ -367,7 +373,7 @@ static void S8FinishReset(S8 *S,NTSTATUS Status)
         J->H2e=J->Reassociate=FALSE;J->TwtState=J->CsaState=J->CsaStep=0;J->CsaAck=J->CsaBlock=FALSE;J->Traffic=0;J->TrafficAt=J->TrafficBusyAt=J->TwtAt=0;RtlZeroMemory(&J->NextChannel,sizeof(J->NextChannel));
         J->WmmSet=J->BeamformSet=J->AggregationSet=FALSE;J->TxFrames=0;RtlZeroMemory(J->Ba,sizeof(J->Ba));
         WcnStationKeysClear(J);
-        S->FailureReported=FALSE;
+        S->Fatal=S->FailureReported=FALSE;
     }
     WcnPmfClear(D,S->J);S->Connect=S->Resetting=FALSE;
     if(S->RoamPending){S->RoamPending=FALSE;
@@ -375,7 +381,7 @@ static void S8FinishReset(S8 *S,NTSTATUS Status)
         else{S8SetLink(S,false);S8Indicate(S,&S->RoamHeader,WDI_INDICATION_ROAM_COMPLETE,NT_SUCCESS(Status)?STATUS_CANCELLED:Status);}
         RtlZeroMemory(&S->RoamAp,sizeof(S->RoamAp));
     }
-    if(S->ResetPending){S->ResetPending=FALSE;S8Indicate(S,&S->ResetHeader,S->ResetMessage==WDI_TASK_DISCONNECT?WDI_INDICATION_DISCONNECT_COMPLETE:WDI_INDICATION_DOT11_RESET_COMPLETE,Status);}
+    if(S->ResetPending){S->ResetPending=FALSE;if(S->ResetMessage==WDI_TASK_SET_RADIO_STATE)S8RadioComplete(S,S->ResetHeader,Status);else S8Indicate(S,&S->ResetHeader,S->ResetMessage==WDI_TASK_DISCONNECT?WDI_INDICATION_DISCONNECT_COMPLETE:WDI_INDICATION_DOT11_RESET_COMPLETE,Status);}
 }
 static void S8CancelPendingRoam(S8 *S,NTSTATUS Status)
 {if(S->RoamPending){S->RoamPending=FALSE;S->ConnectBssSize=0;RtlSecureZeroMemory(&S->Ft,sizeof(S->Ft));RtlZeroMemory(&S->RoamAp,sizeof(S->RoamAp));S8Indicate(S,&S->RoamHeader,WDI_INDICATION_ROAM_COMPLETE,Status);S8SetLink(S,false);}}
@@ -412,6 +418,7 @@ static void S8ResetSession(S8 *S,bool Aborted=false)
     S8ClearStaging(S);S->Connect=S->Roaming=FALSE;
     if(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Dp.Failed||D->Ce.SourceFailed||D->Runtime.Failed){S8FinishReset(S,STATUS_DEVICE_HARDWARE_ERROR);return;}
     if(!J->Started&&!J->PeerCreated&&!J->VdevStarted){S8FinishReset(S,STATUS_SUCCESS);return;}
+    if(S->Fatal&&J->Resetting){S->Resetting=TRUE;S->ResetAt=WcnNowMs();return;}
     S->Resetting=J->Resetting=TRUE;S->ResetStep=J->ReoReleaseStep=0;J->ReoReleaseAt=0;S->ResetAt=WcnNowMs();
     J->VdevStopConfirmed=J->PeerDeleteConfirmed=J->PeerUnmapped=FALSE;
 }
@@ -556,8 +563,8 @@ static void S8Handle(S8 *S,WIFIREQUEST R)
     auto Secondary=(S8*)S->D->SecondaryStage8;if(Secondary&&Secondary->Adapter&&!Secondary->AdapterGone&&H.PortId==Secondary->Port)S=Secondary;
     auto Role=(S8*)S->D->RoleStage8;if(Role&&Role->Adapter&&!Role->AdapterGone&&H.PortId==Role->Port)S=Role;
     if(P2pCommand(S,R,H,Id,P,N)||HotspotCommand(S,R,H,Id,P,N))return;
-    if(S->Fatal){S8Complete(R,STATUS_DEVICE_HARDWARE_ERROR);return;}
-    if(S->Resetting&&Id!=WDI_GET_STATISTICS&&Id!=WDI_ABORT_TASK&&Id!=WDI_TASK_DISCONNECT&&Id!=WDI_TASK_DOT11_RESET&&Id!=WDI_TASK_CONNECT){S8Complete(R,STATUS_DEVICE_BUSY);return;}
+    if(S->Fatal&&Id!=WDI_TASK_DISCONNECT&&Id!=WDI_TASK_DOT11_RESET&&Id!=WDI_TASK_SET_RADIO_STATE){S8Complete(R,STATUS_DEVICE_HARDWARE_ERROR);return;}
+    if(S->Resetting&&Id!=WDI_GET_STATISTICS&&Id!=WDI_ABORT_TASK&&Id!=WDI_TASK_DISCONNECT&&Id!=WDI_TASK_DOT11_RESET&&Id!=WDI_TASK_SET_RADIO_STATE&&Id!=WDI_TASK_CONNECT){S8Complete(R,STATUS_DEVICE_BUSY);return;}
     if(S->Adapter&&H.PortId!=WDI_PORT_ID_ADAPTER&&H.PortId!=S->Port){S8Complete(R,STATUS_NOT_SUPPORTED);return;}
 
     if((Id==WDI_TASK_SCAN||Id==WDI_TASK_CONNECT||Id==WDI_TASK_ROAM||Id==WDI_SET_ADD_CIPHER_KEYS)&&(!S->Adapter||H.PortId!=S->Port)){S8Complete(R,STATUS_NOT_SUPPORTED);return;}
@@ -611,13 +618,9 @@ static void S8Handle(S8 *S,WIFIREQUEST R)
     case WDI_SET_CONNECTION_QUALITY:{WDI_SET_CONNECTION_QUALITY_PARAMETERS K;auto Ns=ParseWdiSetConnectionQualityToIhv(N,P,&S->Tlv,&K);St=Ns==NDIS_STATUS_SUCCESS?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;CleanupParsedWdiSetConnectionQuality(&K);break;}
     case WDI_TASK_SET_RADIO_STATE:{
         WDI_SET_RADIO_STATE_PARAMETERS K;auto Ns=ParseWdiTaskSetRadioStateToIhv(N,P,&S->Tlv,&K);
-        St=Ns==NDIS_STATUS_SUCCESS&&K.SoftwareRadioState<=1&&(!S->Connect||K.SoftwareRadioState==1)?STATUS_SUCCESS:STATUS_NOT_SUPPORTED;
-        UCHAR *RadioTlv=nullptr;ULONG RadioLength=0;BOOLEAN NewRadio=K.SoftwareRadioState!=0;
-        if(NT_SUCCESS(St)){WDI_INDICATION_RADIO_STATUS_PARAMETERS RadioStatus;RadioStatus.RadioState.HardwareState=TRUE;RadioStatus.RadioState.SoftwareState=NewRadio;
-            if(GenerateWdiIndicationRadioStatusFromIhv(&RadioStatus,0,&S->Tlv,&RadioLength,&RadioTlv)!=NDIS_STATUS_SUCCESS)St=STATUS_INSUFFICIENT_RESOURCES;}
-        if(NT_SUCCESS(St))S->Radio=NewRadio;
-        CleanupParsedWdiTaskSetRadioState(&K);S8Complete(R,St);
-        if(NT_SUCCESS(St)){S8Indicate(S,&H,WDI_INDICATION_RADIO_STATUS,St,RadioTlv,RadioLength,true);FreeGenerated(RadioTlv);S8Indicate(S,&H,WDI_INDICATION_SET_RADIO_STATE_COMPLETE,St);}
+        St=Ns==NDIS_STATUS_SUCCESS&&K.SoftwareRadioState<=1?STATUS_SUCCESS:STATUS_NOT_SUPPORTED;BOOLEAN NewRadio=K.SoftwareRadioState!=0;
+        if(NT_SUCCESS(St)&&S->ResetPending)St=STATUS_DEVICE_BUSY;CleanupParsedWdiTaskSetRadioState(&K);S8Complete(R,St);
+        if(NT_SUCCESS(St)){S->Radio=NewRadio;if(!NewRadio||S->Fatal||S->Resetting){S->ResetPending=TRUE;S->ResetHeader=H;S->ResetMessage=Id;S8CancelPendingRoam(S,(NTSTATUS)NDIS_STATUS_REQUEST_ABORTED);S8ResetSession(S);}else S8RadioComplete(S,H,St);}
         return;}
     case WDI_TASK_DISCONNECT:
     case WDI_TASK_DOT11_RESET:

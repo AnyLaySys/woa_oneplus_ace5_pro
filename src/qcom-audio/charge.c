@@ -2,14 +2,10 @@
 #include <wdmsec.h>
 #include "sia9177.h"
 #include "..\ti-batt\power.h"
-static HANDLE InputKey;
-static BOOLEAN InputSaved;
-BOOLEAN QchInputSaved(VOID){return InputSaved;}
-NTSTATUS QchInputSave(BOOLEAN Suspended){
-    UNICODE_STRING Name=RTL_CONSTANT_STRING(L"InputSuspended");ULONG Value=Suspended;
-    NTSTATUS Status=InputKey?ZwSetValueKey(InputKey,&Name,0,REG_DWORD,&Value,sizeof(Value)):STATUS_DEVICE_NOT_READY;
-    if(NT_SUCCESS(Status))InputSaved=Suspended;return Status;
-}
+static HANDLE ThermalKey;
+static BOOLEAN ThermalHeld;
+static UNICODE_STRING ThermalName=RTL_CONSTANT_STRING(L"ThermalHeld");
+BOOLEAN QchThermalHeld(VOID){return ThermalHeld;}
 static KSPIN_LOCK Lock;
 static PDEVICE_OBJECT Control,SensorControl;
 static BOOLEAN ControlDeleted;
@@ -36,7 +32,7 @@ static NTSTATUS BatteryIo(PDEVICE_OBJECT Device,ULONG Code,VOID *In,ULONG InSize
     if(!Irp) return STATUS_INSUFFICIENT_RESOURCES;
     NTSTATUS Status=IoCallDriver(Device,Irp);
     if(Status==STATUS_PENDING) {
-        Timeout.QuadPart=-10000000LL;
+        Timeout.QuadPart=-9000000LL;
         Status=KeWaitForSingleObject(&Event,Executive,KernelMode,FALSE,&Timeout);
         if(Status==STATUS_TIMEOUT) { IoCancelIrp(Irp);KeWaitForSingleObject(&Event,Executive,KernelMode,FALSE,NULL);return STATUS_IO_TIMEOUT; }
         Status=Io.Status;
@@ -48,7 +44,7 @@ BOOLEAN QchBatteryGuard(QCH_LINK *C)
     PWSTR Names=NULL;PFILE_OBJECT File=NULL;PDEVICE_OBJECT Device=NULL;UNICODE_STRING Name;
     QCB_SOURCE Source={C->OnlineAt,1,C->UsbOnline};QCB_POWER P={0};
     ULONGLONG Now=KeQueryInterruptTime()/10000;
-    Source.Valid=C->OnlineAt<=Now && Now-C->OnlineAt<=QCB_POWER_MAX_AGE_MS;
+    Source.Valid=C->OnlineAt<=Now && Now-C->OnlineAt<=QCB_SOURCE_MAX_AGE_MS;
     NTSTATUS Status=IoGetDeviceInterfaces(&BatteryGuid,NULL,0,&Names);
     if(NT_SUCCESS(Status)) {
         if(!Names[0]) Status=STATUS_DEVICE_NOT_READY;
@@ -72,6 +68,14 @@ BOOLEAN QchBatteryGuard(QCH_LINK *C)
         C->PackCurrent=(ULONG)P.CurrentMa;C->Remaining=P.RemainingMah;C->Soc=P.Soc;
     }
     C->BatteryValid=NT_SUCCESS(Status) && P.Valid && P.SampleTimeMs && P.SampleTimeMs<=Now && Now-P.SampleTimeMs<=QCB_POWER_MAX_AGE_MS;
+    if(C->BatteryValid){
+        BOOLEAN Held=P.TemperatureDeciK>=ALS_CHARGE_TEMP_LIMIT_DK ||
+            (ThermalHeld && P.TemperatureDeciK>ALS_CHARGE_TEMP_RESUME_DK);
+        if(Held!=ThermalHeld){
+            ULONG Value=Held;
+            if(NT_SUCCESS(ZwSetValueKey(ThermalKey,&ThermalName,0,REG_DWORD,&Value,sizeof(Value))))ThermalHeld=Held;
+        }
+    }
     C->GuardGood=C->BatteryValid &&
         P.TemperatureDeciK<ALS_CHARGE_TEMP_LIMIT_DK && C->CellValid && P.VoltageMv<=9200 && P.Soc<=100;
     return C->GuardGood;
@@ -103,7 +107,7 @@ static NTSTATUS Dispatch(PDEVICE_OBJECT Device,PIRP Irp)
         else{
             KIRQL I;KeAcquireSpinLock(&Lock,&I);QCH_LINK C=Snapshot;BOOLEAN Ready=AuthReady;KeReleaseSpinLock(&Lock,I);
             ULONGLONG Now=KeQueryInterruptTime()/10000;
-            ALS_CHARGE_STATUS_DATA V={ALS_CHARGE_ABI,12,C.Bridge,C.Phase,C.Running,C.Fault,C.Command||C.Bridge==1||C.Waiting||(C.InputState&&C.InputState!=7),Ready,C.AuthVerified,C.UsbOnline,C.UsbVoltage/1000,C.SourceEnabled,C.SourceRole,C.Moisture,C.AdapterType,Age(Now,C.OnlineAt),Age(Now,C.VoltageAt),Age(Now,C.SourceAt),Age(Now,C.RoleAt),Age(Now,C.MoistureAt),Age(Now,C.SampleTimeMs),C.GuardGood,C.CellValid,C.Temperature,C.PackVoltage,C.PackCurrent,C.Soc,C.Remaining,C.Cell1Mv,C.Cell2Mv,C.BatteryStatus,C.LoadMos,C.CpActive,C.CpOffVerified,C.CpTouched,C.CpError,C.LoadCv,C.LoadStopReason,C.LoadFvLimitMv,C.LoadReqMv,C.LoadReqMa,C.PortOnline,C.PortVoltage/1000,C.PortRole,C.PortMoisture,Age(Now,C.PortAt),C.OtgPhase,C.OtgFault,C.UfcsStarted,C.PeerRunning,C.SourceLo,Age(Now,C.InfoAt),C.InputState,C.InputError,C.InputResult,C.UsbLimitUa,Age(Now,C.InputAt),C.CableOrientation,Age(Now,C.CableAt)};
+            ALS_CHARGE_STATUS_DATA V={ALS_CHARGE_ABI,15,C.Bridge,C.Phase,C.Running && C.BypassState!=QchBypassSupply,C.Fault,C.Command||C.Bridge==1||C.Waiting||(C.BypassState&&C.BypassState!=QchBypassReady&&C.BypassState!=QchBypassSupply),Ready,C.AuthVerified,C.UsbOnline,C.UsbVoltage/1000,C.SourceEnabled,C.SourceRole,C.Moisture,C.AdapterType,Age(Now,C.OnlineAt),Age(Now,C.VoltageAt),Age(Now,C.SourceAt),Age(Now,C.RoleAt),Age(Now,C.MoistureAt),Age(Now,C.SampleTimeMs),C.GuardGood,C.CellValid,C.Temperature,C.PackVoltage,C.PackCurrent,C.Soc,C.Remaining,C.Cell1Mv,C.Cell2Mv,C.BatteryStatus,C.LoadMos,C.CpActive,C.CpOffVerified,C.CpTouched,C.CpError,0,C.LoadStopReason,C.LoadFvLimitMv,C.LoadReqMv,C.LoadReqMa,C.PortOnline,C.PortVoltage/1000,C.PortRole,C.PortMoisture,Age(Now,C.PortAt),C.OtgPhase,C.OtgFault,C.UfcsStarted,C.PeerRunning,C.SourceLo,Age(Now,C.InfoAt),C.BypassState,C.BypassError,C.BypassResult,C.UsbLimitUa,Age(Now,C.InputAt),C.CableOrientation,Age(Now,C.CableAt)};
             Bytes=S->Parameters.DeviceIoControl.OutputBufferLength>=sizeof(V)?sizeof(V):ALS_CHARGE_STATUS_BASE_SIZE;
             RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer,&V,Bytes);Status=STATUS_SUCCESS;
         }
@@ -129,7 +133,7 @@ VOID QchRemove(VOID)
 static VOID Unload(PDRIVER_OBJECT Driver)
 {
     QchRemove();Control=SensorControl=NULL;
-    if(InputKey){ZwClose(InputKey);InputKey=NULL;}
+    if(ThermalKey){ZwClose(ThermalKey);ThermalKey=NULL;}
     if(CredentialPath.Buffer){ExFreePoolWithTag(CredentialPath.Buffer,'aChQ');RtlZeroMemory(&CredentialPath,sizeof(CredentialPath));}
     if(PrevUnload) PrevUnload(Driver);
 }
@@ -160,12 +164,12 @@ NTSTATUS QchInit(PDRIVER_OBJECT Driver,PUNICODE_STRING RegistryPath)
     UNICODE_STRING Link=RTL_CONSTANT_STRING(L"\\DosDevices\\AlsCharge");
     UNICODE_STRING Sddl=RTL_CONSTANT_STRING(L"D:P(A;;GR;;;SY)(A;;GR;;;BA)");
     OBJECT_ATTRIBUTES Attributes;InitializeObjectAttributes(&Attributes,RegistryPath,OBJ_CASE_INSENSITIVE|OBJ_KERNEL_HANDLE,NULL,NULL);
-    NTSTATUS Status=ZwOpenKey(&InputKey,KEY_QUERY_VALUE|KEY_SET_VALUE,&Attributes);
+    NTSTATUS Status=ZwOpenKey(&ThermalKey,KEY_QUERY_VALUE|KEY_SET_VALUE,&Attributes);
     if(!NT_SUCCESS(Status))return Status;
-    UNICODE_STRING ValueName=RTL_CONSTANT_STRING(L"InputSuspended");UCHAR ValueBuffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION)+sizeof(ULONG)];ULONG ValueBytes;
-    if(NT_SUCCESS(ZwQueryValueKey(InputKey,&ValueName,KeyValuePartialInformation,ValueBuffer,sizeof(ValueBuffer),&ValueBytes))){
+    UCHAR ValueBuffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION)+sizeof(ULONG)];ULONG ValueBytes;
+    if(NT_SUCCESS(ZwQueryValueKey(ThermalKey,&ThermalName,KeyValuePartialInformation,ValueBuffer,sizeof(ValueBuffer),&ValueBytes))){
         PKEY_VALUE_PARTIAL_INFORMATION V=(PKEY_VALUE_PARTIAL_INFORMATION)ValueBuffer;
-        InputSaved=V->Type==REG_DWORD && V->DataLength==sizeof(ULONG) && *(ULONG*)V->Data==1;
+        ThermalHeld=V->Type==REG_DWORD && V->DataLength==sizeof(ULONG) && *(ULONG*)V->Data==1;
     }
     KeInitializeSpinLock(&Lock);
     UNICODE_STRING Image;
@@ -198,5 +202,5 @@ NTSTATUS QchInit(PDRIVER_OBJECT Driver,PUNICODE_STRING RegistryPath)
     ControlDeleted=FALSE;Control->Flags&=~DO_DEVICE_INITIALIZING;SensorControl->Flags&=~DO_DEVICE_INITIALIZING;return STATUS_SUCCESS;
 Failed:
     if(CredentialPath.Buffer){ExFreePoolWithTag(CredentialPath.Buffer,'aChQ');RtlZeroMemory(&CredentialPath,sizeof(CredentialPath));}
-    ZwClose(InputKey);InputKey=NULL;return Status;
+    ZwClose(ThermalKey);ThermalKey=NULL;return Status;
 }

@@ -1,11 +1,13 @@
 #include "host.h"
 #include "dma-table.h"
 #include "frame-map-table.h"
+#include "frame-context.h"
 #include "dma-route.h"
 #include "cdm-command.h"
 #include "cdm-route.h"
 #include "cdm-abort.h"
 #include "smmu-fault.h"
+#include "smmu-route-check.h"
 #include "smmu-restore.h"
 #include "frame-route.h"
 #include "tbu-translate.h"
@@ -202,6 +204,22 @@ NTSTATUS CamSave(CAM *c,PUCHAR base,ULONG offset,ULONG value) {
 }
 
 static VOID CdmTests(void) {
+    memset(smmuRegs,0,sizeof(smmuRegs));
+    assert(!CamSmmuExactRoute((PUCHAR)smmuRegs,0x1860,9,1));
+    smmuRegs[(0x800+9*4)/4]=0x80001860;smmuRegs[(0xc00+9*4)/4]=1;
+    smmuRegs[0x800/4]=0x80001820;smmuRegs[0x804/4]=0x800018a0;
+    smmuRegs[0x808/4]=0x80001c00;
+    assert(CamSmmuExactRoute((PUCHAR)smmuRegs,0x1860,9,1));
+    assert(!CamSmmuExactRoute((PUCHAR)smmuRegs,0x1860,8,1));
+    assert(!CamSmmuExactRoute((PUCHAR)smmuRegs,0x1860,9,2));
+    smmuRegs[0x80c/4]=0x80001860;
+    assert(!CamSmmuExactRoute((PUCHAR)smmuRegs,0x1860,9,1));
+    smmuRegs[0x80c/4]=0x83ff1800;
+    assert(!CamSmmuExactRoute((PUCHAR)smmuRegs,0x1860,9,1));
+    smmuRegs[0x80c/4]=0x80c018a0;
+    assert(!CamSmmuExactRoute((PUCHAR)smmuRegs,0x1860,9,1));
+    smmuRegs[0x80c/4]=0x80001840;
+    assert(CamSmmuExactRoute((PUCHAR)smmuRegs,0x1860,9,1));
     memset(cdmRegs,0,sizeof(cdmRegs));cdmRegs[0x44/4]=1;cdmRegs[0x30/4]=1;cdmRegs[0x6c/4]=1;
     assert(CamCdmAbortCore(&cdmBase)==STATUS_SUCCESS&&cdmRegs[0x1c/4]==0&&!cdmRegs[0x6c/4]);
     cdmResetStuck=TRUE;clockValue=0;
@@ -210,21 +228,55 @@ static VOID CdmTests(void) {
     assert(CamCdmAbortCore(&cdmBase)==STATUS_DEVICE_BUSY);
     cdmPendingStuck=FALSE;
     assert(!CamSmmuFault(0x400));
+    assert(CamFrameContextFormat(0)&&CamFrameContextFormat(0x1f300));
+    assert(CamDmaArenaAddressReady(0x10000000,QCAM_ARENA_BYTES));
+    assert(CamDmaArenaAddressReady(0x1000000000ULL-QCAM_ARENA_BYTES,QCAM_ARENA_BYTES));
+    assert(!CamDmaArenaAddressReady(0,QCAM_ARENA_BYTES)&&!CamDmaArenaAddressReady(0x10000100,QCAM_ARENA_BYTES));
+    assert(!CamDmaArenaAddressReady(0x1000000000ULL-QCAM_ARENA_BYTES+4096,QCAM_ARENA_BYTES));
+    assert(!CamDmaArenaAddressReady(0xfffffffffffff000ULL,QCAM_ARENA_BYTES)&&!CamDmaArenaAddressReady(4096,4096));
+    assert(!CamFrameContextFormat(0xf000)&&!CamFrameContextFormat(0x20000));
+    {
+        ULONG before[12]={0},bank=5,context=0x85000;
+        memset(smmuRegs,0,sizeof(smmuRegs));smmuWrites=0;
+        smmuRegs[0x1014/4]=0x1f300;
+        smmuRegs[(context+0x20)/4]=0x12345000;
+        smmuRegs[0x800/4]=0x80001c00;smmuRegs[0xc00/4]=bank;
+        assert(CamFrameContextRetire((PUCHAR)smmuRegs,bank,before,0)==STATUS_DEVICE_BUSY&&!smmuWrites);
+        smmuRegs[0xc00/4]=0x10000;
+        smmuRegs[context/4]=1;
+        assert(CamFrameContextRetire((PUCHAR)smmuRegs,bank,before,0)==STATUS_DEVICE_BUSY&&!smmuWrites);
+        smmuRegs[context/4]=0;smmuRegs[(context+0x7f4)/4]=1;
+        assert(CamFrameContextRetire((PUCHAR)smmuRegs,bank,before,0)==STATUS_DEVICE_BUSY&&!smmuWrites);
+        smmuRegs[(context+0x7f4)/4]=0;
+        assert(CamFrameContextRetire((PUCHAR)smmuRegs,bank,before,0)==STATUS_SUCCESS&&smmuWrites==4);
+        assert(smmuRegs[0x1014/4]==0x1f300&&!smmuRegs[(context+0x20)/4]);
+        before[0]=0x1f000;before[5]=0xabcdef00;
+        assert(CamFrameContextRetire((PUCHAR)smmuRegs,bank,before,0x66)==STATUS_SUCCESS);
+        assert(smmuRegs[0x1014/4]==before[0]&&smmuRegs[(context+0x20)/4]==before[5]&&smmuRegs[context/4]==0x66);
+    }
     assert(CamSmmuFault(0x40000002)&&CamSmmuFault(0x80000010));
     ULONG cmd[8]={0};CamCdmEncode(cmd,0x5a);
-    assert(CAM_CDM_COMMAND_BYTES==24&&cmd[0]==0x08127000&&cmd[1]==0x04000001);
+    assert(CAM_CDM_RT_WRAPPER_BASE==0x86000&&CAM_CDM_TFE2_BASE==0x20000&&CAM_CDM_CSID2_BASE==0xa7000);
+    assert(CAM_CDM_COMMAND_BYTES==24&&cmd[0]==0x080a7000&&cmd[1]==0x04000001);
     assert(cmd[2]==0xe10&&cmd[3]==0x8011&&cmd[4]==0x06000001&&cmd[5]==0x5a&&cmd[6]==0);
     ULONG fetch[4]={0};CamCdmEncodeFetch(fetch,0x5a);
     assert(CAM_CDM_FETCH_BYTES==8&&fetch[0]==0x06000001&&fetch[1]==0x5a&&!fetch[2]);
     memset(regs,0,sizeof(regs));
-    regs[0x80/4]=0x59;regs[0xd0/4]=0xad27e10;regs[0xd4/4]=0x8011;regs[0x44/4]=2;
+    regs[0x80/4]=0x59;regs[0xd0/4]=0xad2de10;regs[0xd4/4]=0x8011;regs[0x44/4]=2;
     assert(!CamCdmCompleted(NULL,0x5a));
     regs[0x80/4]=0x5a;assert(CamCdmCompleted(NULL,0x5a));
+    regs[0xd0/4]=0xa7e10;assert(CamCdmCompleted(NULL,0x5a));
+    regs[0xd0/4]=0x12de10;assert(!CamCdmCompleted(NULL,0x5a));
+    regs[0xd0/4]=0xad2de10;
     regs[0x6c/4]=1;assert(!CamCdmCompleted(NULL,0x5a));regs[0x6c/4]=0;
+    regs[0x6c/4]=0x10000;assert(!CamCdmFetched(NULL,0x5a));regs[0x6c/4]=0;
+    regs[0x70/4]=1;assert(!CamCdmFetched(NULL,0x5a));regs[0x70/4]=0x10000;
+    assert(!CamCdmFetched(NULL,0x5a));regs[0x70/4]=0;
     regs[0x44/4]=0x40002;assert(!CamCdmCompleted(NULL,0x5a));regs[0x44/4]=0;
     assert(!CamCdmFetched(NULL,0x5a));regs[0x44/4]=2;
     regs[0xd0/4]=0;assert(CamCdmFetched(NULL,0x5a)&&!CamCdmCompleted(NULL,0x5a));
-    regs[0xd0/4]=0xd27e10;assert(!CamCdmCompleted(NULL,0x5a));
+    regs[0xd0/4]=0xad27e10;assert(!CamCdmCompleted(NULL,0x5a));
+    regs[0xd0/4]=0xd2de10;assert(!CamCdmCompleted(NULL,0x5a));
     CAM c={0};c.Base[CamSmmu]=(PUCHAR)smmuRegs;
     memset(smmuRegs,0,sizeof(smmuRegs));smmuWrites=0;
     assert(CamCdmRoute(&c)==STATUS_NOT_SUPPORTED&&!smmuWrites);
@@ -329,6 +381,20 @@ static VOID TbuTests(void) {
     assert(CamTbuTranslateAccess((PUCHAR)tbuRegs,0x1860,0x90123000,0x409,sample)==STATUS_INVALID_PARAMETER&&!tbuWrites);
     assert(CamTbuTranslateAccess((PUCHAR)tbuRegs,0x1c00,0x90123000,0x408,sample)==STATUS_INVALID_PARAMETER&&!tbuWrites);
     assert(CamTbuTranslatePage((PUCHAR)tbuRegs,0x1860,0x90123001,sample)==STATUS_INVALID_PARAMETER&&!tbuWrites);
+    assert(CamTbuTranslatePage((PUCHAR)tbuRegs,0x1860,0xbbc5ff000ULL,sample)==STATUS_INVALID_PARAMETER&&!tbuWrites);
+    assert(CamTbuTranslateAccess((PUCHAR)tbuRegs,0x1c00,0x1000000000ULL,0x409,sample)==STATUS_INVALID_PARAMETER&&!tbuWrites);
+    const ULONGLONG imageAddresses[]={0x100000000ULL,0xbbc5ff000ULL,0xbbc5ff080ULL,0xbbc5ff100ULL,0xfffffff00ULL};
+    for(ULONG i=0;i<RTL_NUMBER_OF(imageAddresses);i++) {
+        memset(tbuRegs,0,sizeof(tbuRegs));tbuDone=0;clockValue=0;
+        tbuRegs[0x430/8]=0x15;tbuRegs[0x438/8]=0x27;tbuRegs[0x440/8]=0x39;
+        assert(CamTbuTranslateAccess((PUCHAR)tbuRegs,0x1c00,imageAddresses[i],0x409,sample)==STATUS_SUCCESS);
+        assert(sample[5]>>12==imageAddresses[i]);
+        assert(!tbuRegs[0x410/8]&&!tbuRegs[0x448/8]);
+        assert(tbuRegs[0x430/8]==0x15&&tbuRegs[0x438/8]==0x27&&tbuRegs[0x440/8]==0x39);
+    }
+    tbuWrites=0;
+    assert(CamTbuTranslateAccess((PUCHAR)tbuRegs,0x1c00,0xbbc5ff081ULL,0x409,sample)==STATUS_INVALID_PARAMETER&&!tbuWrites);
+    assert(CamTbuTranslatePage((PUCHAR)tbuRegs,0x1860,0x90123080,sample)==STATUS_INVALID_PARAMETER&&!tbuWrites);
     tbuRegs[0x450/8]=1;
     assert(CamTbuTranslatePage((PUCHAR)tbuRegs,0x1860,0x90123000,sample)==STATUS_DEVICE_BUSY&&!tbuWrites);
     tbuRegs[0x450/8]=0;tbuRegs[0xc10/8]=1;
@@ -478,6 +544,18 @@ static VOID FrameMapTableTests(void) {
     }
     assert(WalkBound(table,root,CAM_FRAME_MAP_IOVA-1,CAM_FRAME_MAP_TABLE_BYTES)==UINT64_MAX);
     assert(WalkBound(table,root,CAM_FRAME_MAP_IOVA+QCAM_ARENA_BYTES,CAM_FRAME_MAP_TABLE_BYTES)==UINT64_MAX);
+    assert(CamFrameMapTablePolicy(table,root,physical,QCAM_ARENA_BYTES,TRUE));
+    for(ULONG page=0;page<QCAM_ARENA_BYTES/4096;page++) {
+        ULONG leaf=page/512;
+        assert(table[(leaf+2)*512+(page&511)]==((physical+(ULONGLONG)page*4096)|0xe47));
+        for(ULONG offset=0;offset<4096;offset+=256)
+            assert(WalkBound(table,root,CAM_FRAME_MAP_IOVA+(ULONGLONG)page*4096+offset,CAM_FRAME_MAP_TABLE_BYTES)==physical+(ULONGLONG)page*4096+offset);
+    }
+    assert(CamFrameMapCoherentReady(0xe47,0xff44,0xff));
+    assert(!CamFrameMapCoherentReady(0xe43,0xff44,0xff));
+    assert(!CamFrameMapCoherentReady(0xe47,0x4444,0xff));
+    assert(!CamFrameMapCoherentReady(0xe47,0xff44,0x44));
+    assert(!CamFrameMapTablePolicy(table,root,physical,QCAM_ARENA_BYTES,2));
     assert(!CamFrameMapTable(table,root+1,physical,QCAM_ARENA_BYTES));
     assert(!CamFrameMapTable(table,root,physical+1,QCAM_ARENA_BYTES));
     assert(!CamFrameMapTable(table,root,physical,16385u*4096));
@@ -494,10 +572,18 @@ static VOID DmaTests(void) {
     regs[0x228/4]=0xe0000190;regs[0x11350/4]=regs[0x110f0/4]=0x10000;
     regs[0x2a8c/4]=regs[0x32cc/4]=regs[0x34dc/4]=1;
     assert(CamDiagnosticDmaReady(&ready));
+    assert(!CamIspPixelDmaReady(&ready));
+    regs[0x1112c/4]=1;assert(!CamIspPixelDmaReady(&ready));
+    regs[0x1113c/4]=1;assert(CamIspPixelDmaReady(&ready));
+    regs[0x1112c/4]=0x80000001;assert(!CamIspPixelDmaReady(&ready));regs[0x1112c/4]=1;
+    regs[0x1113c/4]=0x80000001;assert(!CamIspPixelDmaReady(&ready));regs[0x1113c/4]=1;
+    ready.ReceiverVerified=FALSE;
+    assert(CamControlDmaReady(&ready)&&!CamDiagnosticDmaReady(&ready));
+    ready.ReceiverVerified=TRUE;
     const ULONG disabled[]={0x11300,0x26014,0x228,0x11350,0x110f0,0x2a8c,0x32cc,0x34dc};
     for(ULONG i=0;i<RTL_NUMBER_OF(disabled);i++) {
         ULONG old=regs[disabled[i]/4];regs[disabled[i]/4]=0;
-        assert(!CamDiagnosticDmaReady(&ready));regs[disabled[i]/4]=old;
+        assert(!CamControlDmaReady(&ready)&&!CamDiagnosticDmaReady(&ready));regs[disabled[i]/4]=old;
     }
     regs[0x112e8/4]=0x80000000;assert(!CamDiagnosticDmaReady(&ready));regs[0x112e8/4]=0;
     regs[0x11300/4]|=0x80000000;assert(!CamDiagnosticDmaReady(&ready));regs[0x11300/4]=1;
@@ -788,12 +874,16 @@ static VOID DmaIdleTests(void) {
     regs[0x5220/4]=0x90001;
     assert(CamDmaStopped(NULL,NULL,NULL,tbu,tbu));
     assert(CamDmaDrain(NULL,NULL,NULL,tbu,tbu,5)==STATUS_SUCCESS);
-    const ULONG busyRegs[]={0xf0,0xf8,0x2400,0x2500,0x2600,0x2700,0xe04,0x1004,0x1204,0x1404};
+    ULONG busyRegs[48]={0xf0,0xf8};
+    for(ULONG i=0;i<28;i++)busyRegs[2+i]=0xd00+i*0x100;
+    for(ULONG i=0;i<9;i++)busyRegs[30+i]=0x604+i*0x200;
+    for(ULONG i=0;i<9;i++)busyRegs[39+i]=0x600+i*0x200;
     for(ULONG i=0;i<RTL_NUMBER_OF(busyRegs);i++) {
-        regs[busyRegs[i]/4]=1;
+        ULONG value=i>=39?0x80000000u:1;
+        regs[busyRegs[i]/4]=value;
         assert(!CamDmaStopped(NULL,NULL,NULL,tbu,tbu));
         assert(CamDmaDrain(NULL,NULL,NULL,tbu,tbu,5)==STATUS_IO_TIMEOUT);
-        assert(regs[busyRegs[i]/4]==1);regs[busyRegs[i]/4]=0;
+        assert(regs[busyRegs[i]/4]==value);regs[busyRegs[i]/4]=0;
     }
     for(ULONG port=0;port<2;port++) {
         ULONG slot=(0xc10+port*0x10)/8;tbuRegs[slot]=1ULL<<40;

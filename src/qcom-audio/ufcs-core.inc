@@ -39,7 +39,6 @@ static VOID QchReceive(PSIA_LINK L,const UCHAR *Data,ULONG Length)
                     ULONGLONG Now=KeQueryInterruptTime()/10000;
                     if(Prop==0) {
                         C->UsbOnline=Value==1;C->OnlineAt=Value<=1?Now:0;
-                        if(!C->UsbOnline){C->UfcsStarted=FALSE;C->NotifyFlags=0;C->CapResponse=0;RtlZeroMemory(&C->Caps,sizeof(C->Caps));}
                     }
                     if(Prop==1) {C->UsbVoltage=Value;C->VoltageAt=Now;}
                     if(Prop==5){C->UsbLimitUa=Value;C->InputAt=Now;}
@@ -117,43 +116,50 @@ static VOID QchOff(PSIA_LINK L)
     QCH_LINK *C=&L->Charge;
     if(C->CpTouched)QchScStop(L);
     QchDiscardAuth();
+    if(C->BypassState==QchBypassSupply){C->BypassState=QchBypassExit;C->BypassDeadline=0;C->Policy.Normal=0;}
     C->Running=FALSE;C->Phase=90;C->OffMask=11|((C->UfcsStarted||C->PeerRunning)?4:0);
     C->Waiting=FALSE;C->ReplyReady=FALSE;C->OffRetries=C->OffCheck=0;C->ExitAt=KeQueryInterruptTime()/10000;
 }
 #include "ufcs-load.inc"
 #include "normal-charge.inc"
-#include "input-power.inc"
+#include "bypass-power.inc"
 static VOID QchPoll(PSIA_LINK L)
 {
     static const ULONG Queries[][2]={{0x32,20},{0x32,5},{0x32,0},{0x32,1},{0x32,24},{0x32,22},{0x32,9},{0x32,7},{0x32,39},{0x30,24},{0x30,34},{0x30,56}};
     QCH_LINK *C=&L->Charge;SIA_USB *U=&L->Usb;ULONGLONG Now=KeQueryInterruptTime()/10000;
     if(!U->Acked||!U->Rcid)return;
-    if(!C->Running && !C->OffMask && C->Phase!=90 && (C->Phase!=92 || C->Fault==39) && QchInputPoll(L,Now))return;
+    if(C->Phase==92 && C->Fault!=39 && !C->Closing && Now-C->ExitAt>=9000){QchOff(L);return;}
+    if(!C->Running && !C->OffMask && C->Phase!=90 && (C->Phase!=92 || C->Fault==39) && QchBypassPoll(L,Now))return;
     ULONG Action=C->Command;C->Command=ChargeNone;
-    if((Action==ChargeStart||Action==ChargeNormal) && C->Waiting && !C->Running && !C->OffMask && !C->UfcsStarted && C->Phase!=92){C->Command=Action;Action=ChargeNone;}
+    if((Action==ChargeStart||Action==ChargeNormal||Action==ChargeBypass) && C->Waiting && !C->Running && !C->OffMask && !C->UfcsStarted && C->Phase!=92){C->Command=Action;Action=ChargeNone;}
     if(Action==ChargeStop){QchOff(L);return;}
-    if((Action==ChargeStart||Action==ChargeNormal) && C->InputState){C->Command=Action;Action=ChargeNone;}
-    if(Action==ChargeStart||Action==ChargeNormal){
+    if((Action==ChargeStart||Action==ChargeNormal||Action==ChargeBypass) && C->BypassState){C->Command=Action;Action=ChargeNone;}
+    if(Action==ChargeStart||Action==ChargeNormal||Action==ChargeBypass){
         if(C->Running||C->OffMask){C->Fault=6;QchOff(L);return;}
-        if(Action==ChargeStart && !QchAuthAvailable()){C->Fault=23;return;}
+        if(Action!=ChargeNormal && !QchAuthAvailable()){C->Fault=23;return;}
         if(C->UfcsStarted||C->PeerRunning||C->Phase==92){QchDiscardAuth();C->Fault=11;return;}
-        if(C->Waiting||!C->SourceAt||Now-C->SourceAt>2500||C->SourceEnabled||
-           !C->RoleAt||Now-C->RoleAt>2500||C->SourceRole||!C->MoistureAt||Now-C->MoistureAt>2500||C->Moisture||
-           !C->UsbOnline||Now-C->OnlineAt>2500||C->UsbVoltage<4500000||C->UsbVoltage>5500000||Now-C->VoltageAt>2500||C->AdapterType!=2||!QchBatteryGuard(C)||!C->CellValid){
+        if(C->Waiting||!C->SourceAt||Now-C->SourceAt>3000||C->SourceEnabled||
+           !C->RoleAt||Now-C->RoleAt>3000||C->SourceRole||!C->MoistureAt||Now-C->MoistureAt>3000||C->Moisture||
+           !C->UsbOnline||Now-C->OnlineAt>3000||C->UsbVoltage<4500000||C->UsbVoltage>5500000||Now-C->VoltageAt>3000||
+           (Action==ChargeNormal?(C->AdapterType<1 || C->AdapterType>3):C->AdapterType!=2)||
+           (Action==ChargeBypass?!QchSupplySafe(C,Now):!QchBatteryGuard(C))||!C->CellValid){
             QchDiscardAuth();C->Phase=99;C->Fault=1;return;
         }
-        C->Normal=Action==ChargeNormal;C->UsbLimitUa=0;C->InputAt=0;
+        C->Normal=Action==ChargeNormal;C->BypassState=Action==ChargeBypass?QchBypassSupply:0;
+        C->BypassMa=Action==ChargeBypass?min(C->UsbLimitUa/1000,1500u):0;C->BypassSampleTime=0;
+        if(Action!=ChargeBypass){C->UsbLimitUa=0;C->InputAt=0;}
         if(C->Normal)QchDiscardAuth();
-        C->Running=TRUE;C->Phase=C->Normal?100:10;C->Deadline=Now+15000;C->PdoRequests=0;
+        C->Running=TRUE;C->Phase=C->Normal?100:10;C->Deadline=Now+9000;C->PdoRequests=0;
         C->SessionValid=C->SessionDevHi=C->SessionRunning=C->SessionStatus=0;
         C->AuthVerified=C->AuthResult=C->AuthReplyValid=0;
-        C->LoadCv=C->LoadStopReason=C->LoadFvUv=C->LoadFvLimitMv=C->LoadReqMv=C->LoadReqMa=C->LoadMos=C->LoadReturn=C->LoadQuery=C->LoadBuckOff=0;
+        C->LoadStopReason=C->LoadFvUv=C->LoadFvLimitMv=C->LoadReqMv=C->LoadReqMa=C->LoadMos=C->LoadReturn=C->LoadQuery=C->LoadBuckOff=0;
+        if(Action==ChargeBypass)C->LoadStopReason=C->Policy.Hold==2?1:C->Policy.Hold==3?ALS_CHARGE_STOP_TEMPERATURE:2;
         C->LoadFccUa=C->LoadFccMaxUa=0;C->LoadStartAt=C->LoadAt=C->LoadNextAt=C->LoadFvAt=C->LoadFccAt=C->LoadFccMaxAt=0;
         C->CpError=C->CpPrepared=C->CpActive=C->CpTouched=C->CpOffVerified=0;
         C->NotifyFlags=0;C->NotifyAcked=FALSE;C->UfcsStarted=FALSE;C->ReplyReady=FALSE;C->Fault=0;C->CapResponse=0;RtlZeroMemory(&C->Caps,sizeof(C->Caps));
     }
     if(C->OffMask){
-        if(C->Waiting && Now-C->Last<500)return;
+        if(C->Waiting && Now-C->Last<300)return;
         if(++C->OffRetries>30){C->Fault=9;C->Phase=92;C->OffMask=0;return;}
         if(C->OffMask&8)QchRequest(L,0x33,39,0);
         else if(C->OffMask&1)QchRequest(L,0x31,24,0);
@@ -167,9 +173,9 @@ static VOID QchPoll(PSIA_LINK L)
     if(C->Running) {
         if(C->UfcsStarted && (C->NotifyFlags&16)){C->Fault=18;QchOff(L);return;}
         if(Now>=C->Deadline || !C->UsbOnline ||
-           ((C->Phase!=10 && C->Phase!=11) && Now-C->OnlineAt>5000) ||
-           C->UsbVoltage>5800000 || (Now-C->GuardAt>=500 && !QchBatteryGuard(C))) {C->Fault=2;QchOff(L);return;}
-        if(C->Waiting){if(Now-C->Last>1500){C->Fault=3;QchOff(L);}return;}
+           ((C->Phase!=10 && C->Phase!=11) && Now-C->OnlineAt>3000) ||
+           C->UsbVoltage>5800000 || (Now-C->GuardAt>=300 && (C->BypassState==QchBypassSupply?!QchSupplySafe(C,Now):!QchBatteryGuard(C)))) {C->Fault=2;QchOff(L);return;}
+        if(C->Waiting){if(Now-C->Last>900){C->Fault=3;QchOff(L);}return;}
         if(C->ReplyReady && C->ReplyResult){C->Fault=4;QchOff(L);return;}
         if(C->Phase==10){if(QchRequest(L,0x32,0,0))C->Phase=11;return;}
         if(C->Phase==11){if(QchRequest(L,0x32,1,0))C->Phase=1;return;}
@@ -210,7 +216,7 @@ static VOID QchPoll(PSIA_LINK L)
             return;
         }
         if(C->Phase==4){
-            if(!C->NotifyAcked){if(Now-C->Last>1000){C->Fault=5;QchOff(L);}return;}
+            if(!C->NotifyAcked){if(Now-C->Last>900){C->Fault=5;QchOff(L);}return;}
             C->NotifyFlags&=~16u; // Only pre-session notices, not active-session failures.
             if(QchRequest(L,0x33,54,1)){C->UfcsStarted=TRUE;C->NotifyFlags=0;C->Phase=5;}
             return;
@@ -218,7 +224,7 @@ static VOID QchPoll(PSIA_LINK L)
         if(C->Phase==5){
             // Wait for fresh session handshake, then real identity/authentication/PDO.
             if(C->NotifyFlags&1){if(QchRequest(L,0x32,58,0))C->Phase=15;return;}
-            if(Now-C->Last>=500)QchRequest(L,0x32,C->Query++%2,0);
+            if(Now-C->Last>=300)QchRequest(L,0x32,C->Query++%2,0);
             return;
         }
         // Native host reads device info immediately after handshake; snapshot survives peer drop/cache clearing.
@@ -238,17 +244,17 @@ static VOID QchPoll(PSIA_LINK L)
         }
         if(C->Phase==6){
             if(C->CapResponse==1 && C->Caps.Count){
-                C->LoadStartAt=Now;C->Deadline=Now+14888000;C->Phase=40;
+                C->LoadStartAt=Now;C->Deadline=Now+14887800;C->Phase=40;
                 return;
             }
             if(C->CapResponse==2){C->Fault=21;QchOff(L);return;}
             // A correctly framed empty cache is not evidence of absent adapter capability.
-            if(C->PdoRequests<3 && Now-C->Last>=100)QchCapsRequest(L);
-            else if(Now-C->Last>=500)QchRequest(L,0x32,C->Query++%2,0);
+            if(C->PdoRequests<3 && Now-C->Last>=90)QchCapsRequest(L);
+            else if(Now-C->Last>=300)QchRequest(L,0x32,C->Query++%2,0);
             return;
         }
     }
 
-    if(C->Waiting){if(Now-C->Last>1500){C->Waiting=FALSE;C->Last=Now;}return;}
-    if(Now-C->Last>=100){ULONG I=C->Query%ARRAYSIZE(Queries);if(QchRequest(L,Queries[I][0],Queries[I][1],0))C->Query++;}
+    if(C->Waiting){if(Now-C->Last>900){C->Waiting=FALSE;C->Last=Now;}return;}
+    if(Now-C->Last>=90){ULONG I=C->Query%ARRAYSIZE(Queries);if(QchRequest(L,Queries[I][0],Queries[I][1],0))C->Query++;}
 }

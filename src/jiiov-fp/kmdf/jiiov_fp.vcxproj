@@ -17,11 +17,10 @@
     <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-  <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.props" />
   <PropertyGroup>
     <TargetName>jiiov_fp</TargetName>
     <FpVersionDate Condition="'$(FpVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</FpVersionDate>
-    <FpRevision Condition="'$(FpRevision)' == ''">32</FpRevision>
+    <FpRevision Condition="'$(FpRevision)' == ''">34</FpRevision>
     <FpDriverDate>$([System.DateTime]::Parse('$(FpVersionDate)').ToString('MM/dd/yyyy'))</FpDriverDate>
     <FpDriverVersion>$([System.DateTime]::Parse('$(FpVersionDate)').ToString('yy.M.d')).$(FpRevision)</FpDriverVersion>
     <FpDriverVersionComma>$([System.String]::Copy('$(FpDriverVersion)').Replace('.', ','))</FpDriverVersionComma>
@@ -36,15 +35,8 @@
     <ResourceCompile><PreprocessorDefinitions>ALS_DRIVER_VERSION=$(FpDriverVersionComma);ALS_DRIVER_VERSION_TEXT=$(FpDriverVersion);%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\driver.c" /><ClCompile Include="..\platform.c" /><ClCompile Include="..\power.c" /><ClCompile Include="..\spi.c" />
-    <ClCompile Include="..\registers.c" /><ClCompile Include="..\qtee.c" /><ClCompile Include="..\audit.c" /><ClCompile Include="..\storage.c" /><MARMASM Include="..\scm.asm" />
-    <ClInclude Include="..\fingerprint.h" /><ClInclude Include="..\uapi.h" />
+    <ClCompile Include="..\driver.c" />
     <ResourceCompile Include="jiiov_fp.rc" /><Inf Include="jiiov_fp.inx" /><FilesToPackage Include="$(TargetPath)" />
-    <FilesToPackage Include="$(OutDir)jiiov_fp_check.exe" />
   </ItemGroup>
-  <Target Name="BuildFingerprintCheck" BeforeTargets="PrepareForBuild">
-    <MSBuild Projects="$(MSBuildThisFileDirectory)..\tools\check.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=$(Platform);OutDir=$(OutDir);IntDir=$(IntDir)check\" />
-  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <Import Project="$(VCTargetsPath)\BuildCustomizations\marmasm.targets" />
 </Project>

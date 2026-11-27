@@ -17,5 +17,5 @@ typedef struct _ALS_CHARGE_STATUS_DATA {
     ULONG Cv,StopReason,FvMv,RequestedMv,RequestedMa,PortOnline;
     ULONG PortMv,PortRole,PortMoisture,PortAge,OtgPhase,OtgFault;
     ULONG UfcsStarted,PeerRunning,SourceInfoLow,SourceInfoAge;
-    ULONG InputState,InputError,InputResult,InputLimitUa,InputAge,CableOrientation,CableAge;
+    ULONG BypassState,BypassError,BypassResult,InputLimitUa,InputAge,CableOrientation,CableAge;
 } ALS_CHARGE_STATUS_DATA;

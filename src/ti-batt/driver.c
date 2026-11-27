@@ -29,7 +29,7 @@ BatSnapshotGet (
     *Snapshot = Dev->Now;
     ULONGLONG Now = KeQueryInterruptTime () / 10000;
     Snapshot->Online = Dev->Source.Valid && Dev->Source.Online && Dev->Source.TimeMs <= Now &&
-                       Now - Dev->Source.TimeMs <= QCB_POWER_MAX_AGE_MS;
+                       Now - Dev->Source.TimeMs <= QCB_SOURCE_MAX_AGE_MS;
     if (Snapshot->SampleTimeMs > Now || Now - Snapshot->SampleTimeMs > QCB_POWER_MAX_AGE_MS) {
         Snapshot->Valid = FALSE;
     }
@@ -276,7 +276,7 @@ BatPowerExchange (PDEVICE_OBJECT DeviceObject, PIRP Irp)
         BAT_SNAPSHOT S;
 
         if (Source.Valid > 1 || Source.Online > 1 || Source.TimeMs > Now ||
-            Now - Source.TimeMs > QCB_POWER_MAX_AGE_MS) Source.Valid = 0;
+            Now - Source.TimeMs > QCB_SOURCE_MAX_AGE_MS) Source.Valid = 0;
         KeAcquireSpinLock (&Dev->Lock, &Irql);
         Changed = Dev->Now.Online != (Source.Valid && Source.Online);
         Dev->Source = Source;
