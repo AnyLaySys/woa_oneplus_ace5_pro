@@ -49,6 +49,7 @@ NpuContext::NpuContext(NpuRuntime& runtime, const std::vector<uint8_t>& binary) 
     Initialize(file, static_cast<std::streamoff>(binary.size()));
 }
 void NpuContext::Initialize(std::istream& file, std::streamoff length) {
+    std::vector<std::vector<uint8_t>> images;
     file.read(reinterpret_cast<char*>(header_), sizeof(header_));
     if (header_[0] != 0x3156504e || header_[1] != 1 || header_[2] != runtime_.SocId || !header_[3] || header_[3] > 16 ||
         header_[4] > 0x10000 || header_[5] != 72 || header_[6] >= header_[3] || header_[9] >= header_[3] || header_[12] >= header_[3] ||
@@ -58,13 +59,13 @@ void NpuContext::Initialize(std::istream& file, std::streamoff length) {
         file.read(reinterpret_cast<char*>(&d), sizeof(d));
         if (!file || (d.Kind != 2 && d.Kind != 7) || !d.Bytes || d.Bytes > 0x200000 || !d.Address || d.DataBytes != d.Bytes || d.Reserved)
             throw std::runtime_error("Invalid native HTP DMA descriptor");
-        Block block{d.Kind, d.Bytes, d.Address, 0, {}, {}}; block.Data.resize(d.DataBytes);
-        file.read(reinterpret_cast<char*>(block.Data.data()), block.Data.size());
+        images.emplace_back(d.DataBytes);
+        file.read(reinterpret_cast<char*>(images.back().data()), images.back().size());
         if (!file) throw std::runtime_error("Truncated native HTP DMA image");
-        blocks_.push_back(std::move(block));
+        blocks_.push_back({d.Kind, d.Bytes, d.Address, 0, {}});
     }
-    initialize_.resize(header_[4]); execute_.resize(header_[5]);
-    file.read(reinterpret_cast<char*>(initialize_.data()), initialize_.size()); file.read(reinterpret_cast<char*>(execute_.data()), execute_.size());
+    std::vector<uint8_t> initialize(header_[4]); execute_.resize(header_[5]);
+    file.read(reinterpret_cast<char*>(initialize.data()), initialize.size()); file.read(reinterpret_cast<char*>(execute_.data()), execute_.size());
     if (!file || file.tellg() != length) throw std::runtime_error("Invalid native HTP context size");
     auto validRange = [this](uint32_t index, uint32_t offset, uint32_t bytes) {
         return offset <= blocks_[index].Bytes && bytes <= blocks_[index].Bytes - offset;
@@ -81,7 +82,9 @@ void NpuContext::Initialize(std::istream& file, std::streamoff length) {
     uint32_t op[] = {24, 17, 3, 0, 1, 0}; std::vector<uint8_t> config(sizeof(op)), none;
     std::memcpy(config.data(), op, sizeof(op)); Generic(config, {}, none);
     for (auto& block : blocks_) {
-        CheckRpc(runtime_.MapBuffer(block.Bytes, 3, &block.Allocation), "Create native HTP DMA object");
+        QCOM_NPU_SHARED_ALLOCATION allocation{};
+        CheckRpc(runtime_.MapShared(block.Bytes, &allocation, 3), "Create native HTP DMA object");
+        block.Allocation = allocation.Allocation;
         struct Map { uint32_t Kind, Id; uint64_t Offset, Bytes, Reserved; } request{block.Kind, block.Allocation.Id, 0, block.Bytes, 0};
         uint64_t result[2]{}; remote_arg args[2]{};
         args[0].buf = {&request, sizeof(request)}; args[1].buf = {result, sizeof(result)};
@@ -89,16 +92,16 @@ void NpuContext::Initialize(std::istream& file, std::streamoff length) {
         if (!result[0] || result[1]) throw std::runtime_error("DSP did not map native HTP memory");
         block.Address = result[0];
     }
-    for (auto& block : blocks_) Upload(block, Relocate(block.Data));
+    for (size_t i = 0; i < blocks_.size(); i++) Upload(blocks_[i], Relocate(images[i]));
     // Validate the compiler-produced deserialization packet. Only buffers,
     // never handles or host/physical pointers, pass through this packet.
-    if (Get(initialize_, 4) != 0x04040300 || Get(initialize_, 8) != 7) throw std::runtime_error("Invalid context initialization scalar");
-    uint32_t bytes = Get(initialize_, 16), inputBytes = Get(initialize_, 20), inoutBytes = Get(initialize_, 24);
+    if (Get(initialize, 4) != 0x04040300 || Get(initialize, 8) != 7) throw std::runtime_error("Invalid context initialization scalar");
+    uint32_t bytes = Get(initialize, 16), inputBytes = Get(initialize, 20), inoutBytes = Get(initialize, 24);
     size_t offset = 12 + 7 * 4 + 24;
-    if (bytes > initialize_.size() - offset || inputBytes != 8 || inoutBytes || initialize_.size() != offset + bytes + inputBytes ||
-        Get(initialize_, offset) != bytes || Get(initialize_, offset + 4) != 15) throw std::runtime_error("Invalid compiled HTP import request");
-    std::vector<uint8_t> request(initialize_.begin() + offset, initialize_.begin() + offset + bytes);
-    std::vector<uint8_t> in(initialize_.end() - inputBytes, initialize_.end());
+    if (bytes > initialize.size() - offset || inputBytes != 8 || inoutBytes || initialize.size() != offset + bytes + inputBytes ||
+        Get(initialize, offset) != bytes || Get(initialize, offset + 4) != 15) throw std::runtime_error("Invalid compiled HTP import request");
+    std::vector<uint8_t> request(initialize.begin() + offset, initialize.begin() + offset + bytes);
+    std::vector<uint8_t> in(initialize.end() - inputBytes, initialize.end());
     Generic(Relocate(request), in, none);
 }
 void NpuContext::Execute(const uint8_t* input, uint32_t bytes, std::vector<uint8_t>& output) {
@@ -115,9 +118,4 @@ void NpuContext::Execute(const uint8_t* input, uint32_t bytes, std::vector<uint8
     uint64_t profile[8]{};
     CheckRpc(runtime_.ReadBuffer(blocks_[header_[12]].Allocation.Id, 0, reinterpret_cast<uint8_t*>(profile), sizeof(profile)), "Read native HTP profiling");
     if (!profile[6]) throw std::runtime_error("No native HTP hardware cycles reported");
-}
-NpuContext::~NpuContext() {
-    // Runtime process release is the final fence for all model mappings and
-    // heaps, including partially loaded contexts and outstanding DMA.
-    // Do not close a descriptor until the skel has stopped using it.
 }

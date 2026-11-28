@@ -6,14 +6,6 @@ C_ASSERT(sizeof(NPU_ARGUMENT) == 16);
 C_ASSERT(sizeof(NPU_BUFFER) == 8);
 C_ASSERT(sizeof(NPU_PAGE) == 16);
 
-static ULONG RequestThreadId(WDFREQUEST request) {
-    if (!request) return 0;
-    PIRP irp = WdfRequestWdmGetIrp(request);
-    // KMDF may run this callback on its passive worker. FastRPC must identify
-    // the original caller so the listener and its blocked client stay distinct.
-    return irp->Tail.Overlay.Thread ? HandleToUlong(PsGetThreadId(irp->Tail.Overlay.Thread)) : 0;
-}
-
 VOID NpuRpcReply(NPU *n, ULONGLONG context, ULONG result) {
 if (n->Pending && context == n->Context) {
     n->LastResult = result;
@@ -93,7 +85,7 @@ NTSTATUS NpuInvoke(NPU_CLIENT *s, QCOM_NPU_PACKET *q, ULONG input, ULONG output,
     }
     n->Context = (++n->Sequence << 16) | 0x10 | s->Pd;
     NPU_MESSAGE message = { kernel || !s->Attached ? 0 : s->Pid,
-        (request ? RequestThreadId(request) : (kernel ? 0 : s->Thread)), n->Context,
+        (request ? NpuRequestThreadId(request) : (kernel ? 0 : s->Thread)), n->Context,
         q->Handle, q->Scalar, (ULONGLONG)n->Physical.QuadPart | 0x100000000ULL,
         (used + PAGE_SIZE - 1u) & ~(PAGE_SIZE - 1u) };
     n->Reply = FALSE;
@@ -241,7 +233,7 @@ VOID NpuDetach(NPU_CLIENT *s) {
 }
 
 NTSTATUS NpuSubmit(NPU_CLIENT *s, QCOM_NPU_PACKET *q, ULONG input, WDFREQUEST request, QCOM_NPU_TICKET *ticket) {
-    return NpuSubmitThread(s, q, input, RequestThreadId(request), ticket);
+    return NpuSubmitThread(s, q, input, NpuRequestThreadId(request), ticket);
 }
 NTSTATUS NpuSubmitThread(NPU_CLIENT *s, QCOM_NPU_PACKET *q, ULONG input, ULONG thread, QCOM_NPU_TICKET *ticket) {
     NPU *n = s->Device;

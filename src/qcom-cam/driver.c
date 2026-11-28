@@ -7,7 +7,6 @@
 #include "csid-commit.h"
 #include "dma-address.h"
 #include "video/nv12.h"
-#include "isp-audit.h"
 
 DRIVER_INITIALIZE DriverEntry;
 static EVT_WDF_DRIVER_DEVICE_ADD AddDevice;
@@ -473,7 +472,7 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         }
         goto done;
     }
-    if(code==QCAM_ISP_FD_LUT_PROBE||code==QCAM_ISP_FD_PROBE||code==QCAM_ISP_FD_CAPTURE||code==QCAM_ISP_FD_CAPTURE_HALF||code==QCAM_ISP_FD_CAPTURE_EXACT||code==QCAM_ISP_FD_CAPTURE_BYTE||code==QCAM_ISP_FD_CAPTURE_UNCACHED||code==QCAM_ISP_FD_CAPTURE_LOW||code==QCAM_ISP_FD_CAPTURE_OFFSET||code==QCAM_ISP_FD_CAPTURE_CONSTANT||code==QCAM_ISP_FD_CAPTURE_CHROMA||code==QCAM_ISP_FD_CAPTURE_CST_BIAS||code==QCAM_ISP_FD_CAPTURE_COMPAND||code==QCAM_ISP_FD_CAPTURE_GAMMA||code==QCAM_ISP_FD_CAPTURE_CC_BYPASS||code==QCAM_ISP_FD_CAPTURE_BLS_BYPASS||code==QCAM_ISP_FD_CAPTURE_WB_BYPASS||code==QCAM_ISP_FD_CAPTURE_LUMA_BIAS||code==QCAM_ISP_FD_CAPTURE_BDS2||code==QCAM_ISP_FD_CAPTURE_GTM||code==QCAM_ISP_FD_CAPTURE_GTM_GAMMA||code==QCAM_ISP_FD_CAPTURE_GTM_GAMMA_BDS2||code==QCAM_ISP_FD_CAPTURE_CB_LUMA||code==QCAM_ISP_FD_CAPTURE_INVERSE_LUMA||code==QCAM_ISP_FD_CAPTURE_NATIVE_LUMA_BIAS||code==QCAM_ISP_FD_CAPTURE_POSITIVE_GREEN||code==QCAM_ISP_FD_CAPTURE_NEGATIVE_GREEN||code==QCAM_ISP_FD_CAPTURE_PRECISION_CHAIN||code==QCAM_ISP_FD_CAPTURE_PRECISION_CHAIN_BDS2||code==QCAM_ISP_FD_CAPTURE_LUMA_CLAMP||code==QCAM_ISP_FD_CAPTURE_ZERO_CLAMP||code==QCAM_ISP_FD_CAPTURE_CST_BYPASS||code==QCAM_ISP_FD_CAPTURE_COHERENT||code==QCAM_ISP_FD_CAPTURE_CST_16BIT||code==QCAM_ISP_FD_CAPTURE_CST_14BIT||code==QCAM_ISP_FD_CAPTURE_COMMON_BUFFER||code==QCAM_ISP_FD_CAPTURE_NATIVE_DMI64||code==QCAM_ISP_FD_CAPTURE_OFFSET128) {
+    if(code==QCAM_ISP_FD_CAPTURE_NATIVE_DISCARD||code==QCAM_ISP_FD_CAPTURE_NATIVE_SETTLED||code==QCAM_ISP_FD_CAPTURE_NATIVE_BLACKLEVEL||code==QCAM_ISP_FD_CAPTURE_COMMON_BUFFER32||code==QCAM_ISP_FD_LUT_PROBE||code==QCAM_ISP_FD_PROBE||code==QCAM_ISP_FD_CAPTURE||code==QCAM_ISP_FD_CAPTURE_HALF||code==QCAM_ISP_FD_CAPTURE_EXACT||code==QCAM_ISP_FD_CAPTURE_BYTE||code==QCAM_ISP_FD_CAPTURE_UNCACHED||code==QCAM_ISP_FD_CAPTURE_LOW||code==QCAM_ISP_FD_CAPTURE_OFFSET||code==QCAM_ISP_FD_CAPTURE_CONSTANT||code==QCAM_ISP_FD_CAPTURE_CHROMA||code==QCAM_ISP_FD_CAPTURE_CST_BIAS||code==QCAM_ISP_FD_CAPTURE_COMPAND||code==QCAM_ISP_FD_CAPTURE_GAMMA||code==QCAM_ISP_FD_CAPTURE_CC_BYPASS||code==QCAM_ISP_FD_CAPTURE_BLS_BYPASS||code==QCAM_ISP_FD_CAPTURE_WB_BYPASS||code==QCAM_ISP_FD_CAPTURE_LUMA_BIAS||code==QCAM_ISP_FD_CAPTURE_BDS2||code==QCAM_ISP_FD_CAPTURE_GTM||code==QCAM_ISP_FD_CAPTURE_GTM_GAMMA||code==QCAM_ISP_FD_CAPTURE_GTM_GAMMA_BDS2||code==QCAM_ISP_FD_CAPTURE_CB_LUMA||code==QCAM_ISP_FD_CAPTURE_INVERSE_LUMA||code==QCAM_ISP_FD_CAPTURE_NATIVE_LUMA_BIAS||code==QCAM_ISP_FD_CAPTURE_POSITIVE_GREEN||code==QCAM_ISP_FD_CAPTURE_NEGATIVE_GREEN||code==QCAM_ISP_FD_CAPTURE_PRECISION_CHAIN||code==QCAM_ISP_FD_CAPTURE_PRECISION_CHAIN_BDS2||code==QCAM_ISP_FD_CAPTURE_LUMA_CLAMP||code==QCAM_ISP_FD_CAPTURE_ZERO_CLAMP||code==QCAM_ISP_FD_CAPTURE_CST_BYPASS||code==QCAM_ISP_FD_CAPTURE_COHERENT||code==QCAM_ISP_FD_CAPTURE_CST_16BIT||code==QCAM_ISP_FD_CAPTURE_CST_14BIT||code==QCAM_ISP_FD_CAPTURE_COMMON_BUFFER||code==QCAM_ISP_FD_CAPTURE_NATIVE_DMI64||code==QCAM_ISP_FD_CAPTURE_OFFSET128) {
         QCAM_ISP_FD_STATE *state;
         BOOLEAN lutProbe=code==QCAM_ISP_FD_LUT_PROBE;
         BOOLEAN capture=code!=QCAM_ISP_FD_PROBE&&!lutProbe;
@@ -493,9 +492,12 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         c->IspFdCompand=code==QCAM_ISP_FD_CAPTURE_COMPAND;
         c->IspFdCoherent=code==QCAM_ISP_FD_CAPTURE_COHERENT;
         c->IspFdDmi64=code==QCAM_ISP_FD_CAPTURE_NATIVE_DMI64;
-        c->IspFdCommonBuffer=lutProbe||c->IspFdDmi64||code==QCAM_ISP_FD_CAPTURE_COMMON_BUFFER||code==QCAM_ISP_FD_CAPTURE_OFFSET128;
+        c->IspFdSettled=code==QCAM_ISP_FD_CAPTURE_NATIVE_SETTLED;
+        c->IspFdDiscard=code==QCAM_ISP_FD_CAPTURE_NATIVE_DISCARD;
+        c->IspFdCommonBuffer32=c->IspFdDiscard||c->IspFdSettled||code==QCAM_ISP_FD_CAPTURE_COMMON_BUFFER32||code==QCAM_ISP_FD_CAPTURE_NATIVE_BLACKLEVEL;
+        c->IspFdCommonBuffer=c->IspFdCommonBuffer32||lutProbe||c->IspFdDmi64||code==QCAM_ISP_FD_CAPTURE_COMMON_BUFFER||code==QCAM_ISP_FD_CAPTURE_OFFSET128;
         c->IspFdPrecisionChain=code==QCAM_ISP_FD_CAPTURE_PRECISION_CHAIN||code==QCAM_ISP_FD_CAPTURE_PRECISION_CHAIN_BDS2;
-        c->IspFdLumaProfile=code==QCAM_ISP_FD_CAPTURE_OFFSET128?32:c->IspFdDmi64?31:c->IspFdCommonBuffer?30:code==QCAM_ISP_FD_CAPTURE_COHERENT?27:code==QCAM_ISP_FD_CAPTURE_CST_16BIT?28:code==QCAM_ISP_FD_CAPTURE_CST_14BIT?29:code==QCAM_ISP_FD_CAPTURE_CST_BYPASS?26:code==QCAM_ISP_FD_CAPTURE_LUMA_CLAMP?24:code==QCAM_ISP_FD_CAPTURE_ZERO_CLAMP?25:code==QCAM_ISP_FD_CAPTURE_NATIVE_LUMA_BIAS?19:code==QCAM_ISP_FD_CAPTURE_POSITIVE_GREEN?20:code==QCAM_ISP_FD_CAPTURE_NEGATIVE_GREEN?21:0;
+        c->IspFdLumaProfile=(c->IspFdDiscard||c->IspFdSettled||code==QCAM_ISP_FD_CAPTURE_NATIVE_BLACKLEVEL)?33:code==QCAM_ISP_FD_CAPTURE_OFFSET128?32:c->IspFdDmi64?31:c->IspFdCommonBuffer?30:code==QCAM_ISP_FD_CAPTURE_COHERENT?27:code==QCAM_ISP_FD_CAPTURE_CST_16BIT?28:code==QCAM_ISP_FD_CAPTURE_CST_14BIT?29:code==QCAM_ISP_FD_CAPTURE_CST_BYPASS?26:code==QCAM_ISP_FD_CAPTURE_LUMA_CLAMP?24:code==QCAM_ISP_FD_CAPTURE_ZERO_CLAMP?25:code==QCAM_ISP_FD_CAPTURE_NATIVE_LUMA_BIAS?19:code==QCAM_ISP_FD_CAPTURE_POSITIVE_GREEN?20:code==QCAM_ISP_FD_CAPTURE_NEGATIVE_GREEN?21:0;
         c->IspFdCbLuma=code==QCAM_ISP_FD_CAPTURE_CB_LUMA;
         c->IspFdInverseLuma=code==QCAM_ISP_FD_CAPTURE_INVERSE_LUMA;
         c->IspFdGamma=c->IspFdPrecisionChain||c->IspFdLumaProfile||c->IspFdCbLuma||c->IspFdInverseLuma||code==QCAM_ISP_FD_CAPTURE_GAMMA||code==QCAM_ISP_FD_CAPTURE_GTM_GAMMA||code==QCAM_ISP_FD_CAPTURE_GTM_GAMMA_BDS2;
@@ -512,8 +514,8 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
         status=CamCaptureStart(c,&options);
         if(NT_SUCCESS(status)&&!capture)status=CamIspFdConfigure(c,NULL);
         if(NT_SUCCESS(status)&&capture)status=WaitFrame(c,request,options.TimeoutMs);
-        QCAM_DIAG diag=c->Diag;CamIspAudit(c,58,status);
-        NTSTATUS stopped=CamCaptureStop(c);stopped=CamIspAudit(c,59,stopped);
+        QCAM_DIAG diag=c->Diag;
+        NTSTATUS stopped=CamCaptureStop(c);
         if(!NT_SUCCESS(status))c->Diag=diag;
         if(NT_SUCCESS(status))status=stopped;
         if(c->IspFd&&c->IspFd->Size==sizeof(*state))RtlCopyMemory(state,c->IspFd,sizeof(*state));
@@ -523,8 +525,8 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
             else if(!state->ImageBytes||state->ImageBytes>QCAM_ISP_FD_BYTES)status=STATUS_INVALID_BUFFER_SIZE;
             else {RtlCopyMemory(state+1,(PUCHAR)c->Frame+state->BufferOffset,state->ImageBytes);bytes+=state->ImageBytes;}
         }
-        diag=c->Diag;CamIspAudit(c,60,status);
-        NTSTATUS off=CamPowerOff(c);off=CamIspAudit(c,61,off);
+        diag=c->Diag;
+        NTSTATUS off=CamPowerOff(c);
         if(!NT_SUCCESS(status))c->Diag=diag;
         if(NT_SUCCESS(status))status=off;
         state->Status=(ULONG)status;if(!NT_SUCCESS(status))bytes=sizeof(*state);
@@ -752,13 +754,11 @@ static VOID Control(WDFQUEUE queue,WDFREQUEST request,size_t output,size_t input
     if(code==QCAM_SCM_QOS_PROBE||code==QCAM_SCM_QOS_DIAGNOSTIC||code==QCAM_SCM_QOS_RAW) {
         if(input||output){status=STATUS_INVALID_PARAMETER;goto done;}
         if(c->ScmPending||c->CdmPending||c->TbuPending||c->CrmPending||c->DmaActive||c->RxActive||c->FrameRouteOwned){status=STATUS_DEVICE_BUSY;goto done;}
-        status=CamScmAudit(c,0,NULL,STATUS_SUCCESS);if(!NT_SUCCESS(status))goto done;
         c->ProbeLimit=0;c->PipelineLimit=1;
         QCAM_CAPTURE_OPTIONS options={sizeof(options),QCAM_ABI,1000,0,4980000000ULL};
         status=CamCaptureStart(c,&options);
         if(NT_SUCCESS(status))status=code==QCAM_SCM_QOS_RAW?CamScmQosRaw(c):
             code==QCAM_SCM_QOS_DIAGNOSTIC?CamScmQosDiagnostic(c):CamScmQos(c);
-        if(!NT_SUCCESS(status)&&!c->ScmPending)CamScmAudit(c,3,NULL,status);
         if(code==QCAM_SCM_QOS_RAW){c->Diag.Status=status;goto done;}
         if(c->Powered&&!c->ScmPending)CamBusSnapshot(c);
         QCAM_DIAG diag=c->Diag;

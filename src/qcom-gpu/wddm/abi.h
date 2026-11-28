@@ -4,6 +4,7 @@
 #define A830_RESOURCE_OWNED 2u
 #define A830_RESOURCE_PRIMARY 4u
 #define A830_FORMAT_NV12 0x3231564eu
+#define A830_FORMAT_P010 0x30313050u
 #define A830_SHARED_BASE 0xC8000000ULL
 #define A830_SHARED_END GPU_CLIENT_VA_BASE
 #define A830_OP_FILL 1
@@ -17,6 +18,7 @@ typedef struct { unsigned Version,Size,Width,Height,Pitch,Format,Flags,Rotation;
 static inline unsigned A830PixelBytes(unsigned format) {
     switch(format) {
     case D3DDDIFMT_A8:case A830_FORMAT_NV12:return 1;
+    case A830_FORMAT_P010:return 2;
     case D3DDDIFMT_A8R8G8B8:case D3DDDIFMT_X8R8G8B8:case D3DDDIFMT_A8B8G8R8:
     case D3DDDIFMT_A2R10G10B10:case D3DDDIFMT_A2B10G10R10:return 4;
     case D3DDDIFMT_A16B16G16R16F:return 8;

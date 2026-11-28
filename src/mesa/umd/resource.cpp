@@ -7,9 +7,9 @@ static bool imported_image(Device *d,Resource *r) {
 }
 static UINT image_copies(Resource *r,UINT sub,UINT x,UINT y,UINT z,UINT width,UINT height,UINT depth,VkBufferImageCopy (&copies)[2]) {
  copies[0].imageSubresource={aspects(r->format),sub%r->levels,sub/r->levels,1};copies[0].imageOffset={(INT)x,(INT)y,(INT)z};copies[0].imageExtent={width,height,depth};
- if(r->format!=DXGI_FORMAT_NV12)return 1;
+ if(!planar(r->format))return 1;
  copies[0].imageSubresource.aspectMask=VK_IMAGE_ASPECT_PLANE_0_BIT;copies[1]=copies[0];
- copies[1].bufferOffset=(VkDeviceSize)width*height;copies[1].imageSubresource.aspectMask=VK_IMAGE_ASPECT_PLANE_1_BIT;
+ copies[1].bufferOffset=(VkDeviceSize)width*height*pixel_bytes(r->format);copies[1].imageSubresource.aspectMask=VK_IMAGE_ASPECT_PLANE_1_BIT;
  copies[1].imageOffset.x/=2;copies[1].imageOffset.y/=2;copies[1].imageExtent.width/=2;copies[1].imageExtent.height/=2;return 2;
 }
 SIZE_T APIENTRY CalcPrivateResourceSize(D3D10DDI_HDEVICE,const D3D10DDIARG_CREATERESOURCE *) {return sizeof(Resource);}
@@ -19,7 +19,7 @@ void APIENTRY CreateResource(D3D10DDI_HDEVICE h,const D3D10DDIARG_CREATERESOURCE
  r->levels=std::max(1u,p->MipLevels);r->layers=std::max(1u,p->ArraySize);r->width=p->pMipInfoList[0].TexelWidth;r->height=p->pMipInfoList[0].TexelHeight;r->depth=p->pMipInfoList[0].TexelDepth;
  if(p->pPrimaryDesc)p->pPrimaryDesc->DriverFlags=0;
  if(!r->width){error(d,E_INVALIDARG);return;}
- if(r->format==DXGI_FORMAT_NV12 && (((r->width|r->height)&1) || r->dimension!=D3D10DDIRESOURCE_TEXTURE2D || r->levels!=1 || r->depth>1)){error(d,E_INVALIDARG);return;}
+ if(planar(r->format) && (((r->width|r->height)&1) || r->dimension!=D3D10DDIRESOURCE_TEXTURE2D || r->levels!=1 || r->depth>1)){error(d,E_INVALIDARG);return;}
  if(r->dimension==D3D10DDIRESOURCE_BUFFER) {
    r->height=r->depth=1;r->layers=r->levels=1;
    if(!buffer_create(d,r->storage,r->width,VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT|VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT))return;
@@ -33,7 +33,7 @@ void APIENTRY CreateResource(D3D10DDI_HDEVICE h,const D3D10DDIARG_CREATERESOURCE
    }
    bool shared=(p->MiscFlags&D3D10_DDI_RESOURCE_MISC_SHARED)||(p->BindFlags&(D3D10_DDI_BIND_PRESENT|D3D11_DDI_BIND_CAPTURE));
    if(shared) {
-     unsigned native=r->format==DXGI_FORMAT_A8_UNORM?D3DDDIFMT_A8:r->format==DXGI_FORMAT_NV12?A830_FORMAT_NV12:r->format==DXGI_FORMAT_B8G8R8A8_UNORM?D3DDDIFMT_A8R8G8B8:
+     unsigned native=r->format==DXGI_FORMAT_A8_UNORM?D3DDDIFMT_A8:r->format==DXGI_FORMAT_NV12?A830_FORMAT_NV12:r->format==DXGI_FORMAT_P010?A830_FORMAT_P010:r->format==DXGI_FORMAT_B8G8R8A8_UNORM?D3DDDIFMT_A8R8G8B8:
        r->format==DXGI_FORMAT_R8G8B8A8_UNORM?D3DDDIFMT_A8B8G8R8:
        r->format==DXGI_FORMAT_R10G10B10A2_UNORM?D3DDDIFMT_A2B10G10R10:
        r->format==DXGI_FORMAT_R16G16B16A16_FLOAT?D3DDDIFMT_A16B16G16R16F:0;
@@ -41,9 +41,13 @@ void APIENTRY CreateResource(D3D10DDI_HDEVICE h,const D3D10DDIARG_CREATERESOURCE
      if(!bytes || r->dimension!=D3D10DDIRESOURCE_TEXTURE2D || r->layers*r->levels!=1 || r->width>(UINT_MAX-255)/bytes){error(d,DXGI_ERROR_UNSUPPORTED);return;}
      A830_RESOURCE data={A830_ABI_VERSION,0,r->width,r->height,(r->width*bytes+255)&~255u,native,A830_RESOURCE_OWNED|(p->pPrimaryDesc?A830_RESOURCE_PRIMARY:0u)};
      data.Rotation=p->pPrimaryDesc?(unsigned)p->pPrimaryDesc->ModeDesc.Rotation:(unsigned)D3DDDI_ROTATION_IDENTITY;
-     UINT rows=data.Height+(r->format==DXGI_FORMAT_NV12?data.Height/2:0);
-     if(rows>0x4000000u/data.Pitch){error(d,E_OUTOFMEMORY);return;}data.Size=data.Pitch*rows;
-     if((r->format==DXGI_FORMAT_A8_UNORM || r->format==DXGI_FORMAT_NV12) && !image_layout(d,r,&data.Pitch,&data.Size))return;
+     UINT rows=data.Height+(planar(r->format)?data.Height/2:0);
+     if(rows>(r->format==DXGI_FORMAT_P010?0x8000000u:0x4000000u)/data.Pitch){error(d,E_OUTOFMEMORY);return;}data.Size=data.Pitch*rows;
+     /* Every shared image must use the same layout as its Vulkan import.
+        In particular RGBA16F needs a 512-byte row alignment on this GPU;
+        rounding all RGB rows to 256 bytes underallocates virtual desktops
+        such as 2780x1264 when DWM recreates its composition resources. */
+     if(!image_layout(d,r,&data.Pitch,&data.Size))return;
      D3DDDI_ALLOCATIONINFO info{};info.pPrivateDriverData=&data;info.PrivateDriverDataSize=sizeof(data);info.Flags.Primary=p->pPrimaryDesc!=nullptr;
      D3DDDICB_ALLOCATE a{};a.pPrivateDriverData=&data;a.PrivateDriverDataSize=sizeof(data);a.hResource=rt.handle;a.NumAllocations=1;a.pAllocationInfo=&info;
      HRESULT result=d->callbacks.pfnAllocateCb(d->runtime,&a);if(FAILED(result)){error(d,result);return;}
@@ -60,13 +64,13 @@ void APIENTRY OpenResource(D3D10DDI_HDEVICE h,const D3D10DDIARG_OPENRESOURCE *p,
  if(p->NumAllocations!=1 || p->PrivateDriverDataSize!=sizeof(A830_RESOURCE) || !p->pPrivateDriverData){error(d,E_INVALIDARG);return;}
  auto *a=(const A830_RESOURCE *)p->pPrivateDriverData;
  if(a->Version!=A830_ABI_VERSION || !a->Width || !a->Height || !(a->Flags&A830_RESOURCE_OWNED)){error(d,E_INVALIDARG);return;}
- r->format=a->Format==D3DDDIFMT_A8?DXGI_FORMAT_A8_UNORM:a->Format==A830_FORMAT_NV12?DXGI_FORMAT_NV12:a->Format==D3DDDIFMT_A8R8G8B8 || a->Format==D3DDDIFMT_X8R8G8B8?DXGI_FORMAT_B8G8R8A8_UNORM:
+ r->format=a->Format==D3DDDIFMT_A8?DXGI_FORMAT_A8_UNORM:a->Format==A830_FORMAT_NV12?DXGI_FORMAT_NV12:a->Format==A830_FORMAT_P010?DXGI_FORMAT_P010:a->Format==D3DDDIFMT_A8R8G8B8 || a->Format==D3DDDIFMT_X8R8G8B8?DXGI_FORMAT_B8G8R8A8_UNORM:
    a->Format==D3DDDIFMT_A8B8G8R8?DXGI_FORMAT_R8G8B8A8_UNORM:
    a->Format==D3DDDIFMT_A2B10G10R10?DXGI_FORMAT_R10G10B10A2_UNORM:
    a->Format==D3DDDIFMT_A16B16G16R16F?DXGI_FORMAT_R16G16B16A16_FLOAT:DXGI_FORMAT_UNKNOWN;
  if(r->format==DXGI_FORMAT_UNKNOWN){error(d,DXGI_ERROR_UNSUPPORTED);return;}
  r->vkformat=format(r->format);r->width=a->Width;r->height=a->Height;r->pitch=a->Pitch;r->dimension=D3D10DDIRESOURCE_TEXTURE2D;r->bind=D3D10_DDI_BIND_RENDER_TARGET|D3D10_DDI_BIND_SHADER_RESOURCE;
- r->allocation=p->pOpenAllocationInfo[0].hAllocation;r->kmresource=p->hKMResource.handle;r->runtime=rt.handle;r->imported=true;imported_image(d,r);
+ r->allocation=p->pOpenAllocationInfo[0].hAllocation;r->kmresource=p->hKMResource.handle;r->runtime=rt.handle;imported_image(d,r);
 }
 void APIENTRY DestroyResource(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hr) {
  Device *d=dev(h);Resource *r=res(hr);
@@ -74,7 +78,7 @@ void APIENTRY DestroyResource(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hr) {
  if(r->storage.external)d->shared_access.erase(r->storage.address);
  if(d->recording){d->temporary.push_back(r->mapping.staging);d->temporary.push_back(r->storage);r->mapping.staging={};r->storage={};}
  else {storage_recycle(d,r->mapping.staging);storage_recycle(d,r->storage);}
- if(r->allocation && !r->imported){D3DDDICB_DEALLOCATE a{};a.hResource=r->runtime;d->callbacks.pfnDeallocateCb(d->runtime,&a);}
+ if(r->allocation){D3DDDICB_DEALLOCATE a{};a.hResource=r->runtime;d->callbacks.pfnDeallocateCb(d->runtime,&a);}
  r->~Resource();
 }
 void APIENTRY ResourceMap(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hr,UINT sub,D3D10_DDI_MAP mode,UINT flags,D3D10DDI_MAPPED_SUBRESOURCE *out) {
@@ -97,7 +101,7 @@ void APIENTRY ResourceMap(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hr,UINT sub,D3D1
  bool read=mode==D3D10_DDI_MAP_READ || mode==D3D10_DDI_MAP_READWRITE;
  if(read && !wait && !wait_for(d,r->storage.used,false))return;
  UINT level=sub%r->levels,width=std::max(1u,r->width>>level),height=std::max(1u,r->height>>level),depth=std::max(1u,r->depth>>level);
- buffer_recycle(d,m.staging);m.sub=sub;m.mode=mode;m.row=width*pixel_bytes(r->format);m.slice=m.row*(height+(r->format==DXGI_FORMAT_NV12?height/2:0));
+ buffer_recycle(d,m.staging);m.sub=sub;m.mode=mode;m.row=width*pixel_bytes(r->format);m.slice=m.row*(height+(planar(r->format)?height/2:0));
  if(!buffer_create(d,m.staging,(VkDeviceSize)m.slice*depth,0))return;
  if(read) {
    access(d,r->storage,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT,false,level,1,sub/r->levels,1);access(d,m.staging,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkBufferImageCopy copies[2]{};UINT count=image_copies(r,sub,0,0,0,width,height,depth,copies);
@@ -142,8 +146,8 @@ void APIENTRY ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE 
  UINT x=box?box->left:0,y=box?box->top:0,z=box?box->front:0;
  UINT w=box?box->right-x:std::max(1u,r->width>>level),height=box?box->bottom-y:std::max(1u,r->height>>level),depth=box?box->back-z:std::max(1u,r->depth>>level);
  if(sub>=r->levels*r->layers || x>r->width || w>r->width-x || y>r->height || height>r->height-y || z>r->depth || depth>r->depth-z ||
-    (r->format==DXGI_FORMAT_NV12 && ((x|y|w|height)&1))){error(d,E_INVALIDARG);return;}
- UINT rows=height+(r->format==DXGI_FORMAT_NV12?height/2:0);
+    (planar(r->format) && ((x|y|w|height)&1))){error(d,E_INVALIDARG);return;}
+ UINT rows=height+(planar(r->format)?height/2:0);
  UINT row=w*pixel_bytes(r->format);if(!pitch)pitch=row;if(!slice)slice=pitch*rows;
  if(pitch<row){error(d,E_INVALIDARG);return;}
  VkDeviceSize size=(VkDeviceSize)row*rows*depth,offset;Storage *staging=upload_space(d,size,offset);if(!staging)return;
@@ -154,6 +158,7 @@ void APIENTRY ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE 
  access(d,*staging,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);access(d,r->storage,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT,false,level,1,sub/r->levels,1);
  VkBufferImageCopy copies[2]{};UINT count=image_copies(r,sub,x,y,z,w,height,depth,copies);for(UINT i=0;i<count;i++)copies[i].bufferOffset+=offset;
  d->vk.CmdCopyBufferToImage(d->cmd,staging->buffer,r->storage.image,VK_IMAGE_LAYOUT_GENERAL,count,copies);
+ if(d->transient_bytes>=67108864)flush(d);
 }
 void APIENTRY ResourceCopyRegion(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hd,UINT ds,UINT x,UINT y,UINT z,D3D10DDI_HRESOURCE hs,UINT ss,const D3D10_DDI_BOX *box) {
  Device *d=dev(h);Resource *dst=res(hd),*src=res(hs);
@@ -167,7 +172,7 @@ void APIENTRY ResourceCopyRegion(D3D10DDI_HDEVICE h,D3D10DDI_HRESOURCE hd,UINT d
    UINT level=ss%src->levels,sx=box?box->left:0,sy=box?box->top:0,sz=box?box->front:0;
    VkImageCopy copy{};copy.srcSubresource={aspects(src->format),level,ss/src->levels,1};copy.dstSubresource={aspects(dst->format),ds%dst->levels,ds/dst->levels,1};copy.srcOffset={(INT)sx,(INT)sy,(INT)sz};copy.dstOffset={(INT)x,(INT)y,(INT)z};
    copy.extent={box?box->right-sx:std::max(1u,src->width>>level),box?box->bottom-sy:std::max(1u,src->height>>level),box?box->back-sz:std::max(1u,src->depth>>level)};
-   if(src->format==DXGI_FORMAT_NV12 || dst->format==DXGI_FORMAT_NV12) {
+   if(planar(src->format) || planar(dst->format)) {
      if(src->format!=dst->format || ((sx|sy|x|y|copy.extent.width|copy.extent.height)&1)){error(d,E_INVALIDARG);return;}
      copy.srcSubresource.aspectMask=copy.dstSubresource.aspectMask=VK_IMAGE_ASPECT_PLANE_0_BIT;
      d->vk.CmdCopyImage(d->cmd,src->storage.image,VK_IMAGE_LAYOUT_GENERAL,dst->storage.image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);

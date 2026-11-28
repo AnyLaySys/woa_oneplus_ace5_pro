@@ -76,18 +76,24 @@ Windows 驱动配合 `uefi_oneplus_ace5_pro` 的 UEFI/ACPI 使用；Linux 适配
 
 `all` 编译全部驱动；单组件可指定 `qcom-sensors`、`qcom-gpu` 等目标，完整列表见 `--help`，配置统一为 **Release / ARM64**。红外遥控 App 单独运行 `.\build.cmd ir-remote`。
 
+NPU 第三方应用单独运行 `build.cmd ollama` 或 `build.cmd sdcpp`。构建逻辑统一维护在 `build.cmd`，适配代码和补丁在 `src/qcom-npu/ollama`、`src/qcom-npu/sdcpp`；完整上游源码自动下载到仓库外的 `%LOCALAPPDATA%\WoA\SourceCache\qcom-npu`，NPU 的产物、编译工作副本和中间文件统一位于 `out/qcom-npu`。 构建时按需展开 `out/qcom-npu/build.py`，源码目录不维护分散的 Python 构建脚本。
+
+NPU 输出按组件归到 `driver`、`ggml`、`ollama`、`sdcpp`；每个组件的 `build` 保存编译中间文件，`package` 保存可部署文件。共用的 DSP GGML 运行库放在 `ggml/runtime`。
+
 驱动包输出到 `out/drv/<组件>`，安装时复制完整目录。特殊产物如下：
+
+GPU INF 同时注册 Iris H.264 硬件编码器，并在用户登录时自动设置 H.264 硬件优先项。重装 Windows 或新建用户后，安装完整 GPU 驱动包并重新登录即可生效，无需单独配置截图工具；超出硬件能力时允许软件回退。
 
 | 目标 | 包内容或输出 |
 | --- | --- |
 | `qcom-audio` | 音频、充电及 USB 管理驱动，附带 `ADSP` 固件和 `credential.bin` |
 | `qcom-sensors` | HID 驱动、原生 SensorsCx 驱动及 `QcomSensors` 服务，两份 INF 均需安装 |
 | `qcom-cam` | 主摄控制器、AVStream 视频驱动，两份 INF 均需安装 |
-| `qcom-npu` | FastRPC 与 MCDM 两份驱动、ONNX Runtime 执行提供程序及 `CDSP` 固件 |
+| `qcom-npu` | `out/qcom-npu/driver/package`：FastRPC、MCDM、ONNX Runtime 执行提供程序及 `CDSP` 固件 |
 | `qcom-gpu` | WDDM 驱动、ARM64/x64 用户态后端及固件；D3D12 运行库另存于 `out/drv/qcom-d3d12` |
 | `ir-remote` | `out/app/ir-remote` |
-| `npu` | `out/app/npu` |
-| `ollama-npu` | `out/app/ollama-npu` |
+| `ollama` | `out/qcom-npu/ollama/package` |
+| `sdcpp` | `out/qcom-npu/sdcpp/package` |
 
 充电和 USB 角色管理集成在音频驱动中，`qcom-charge` 构建目标为 `qcom-audio` 的别名。修改 ADSP 通道后，依次构建 `qcom-audio` 和 `qcom-sensors`。
 
@@ -121,7 +127,7 @@ Windows 驱动配合 `uefi_oneplus_ace5_pro` 的 UEFI/ACPI 使用；Linux 适配
 4. NPU 首次部署使用配套 UEFI 和 `linux_oneplus_ace5_pro/build.py -nr` 生成的 `boot.img`。将 `src/qcom-npu/deploy.ps1` 一并复制到设备，在管理员 PowerShell 中运行：
 
    ```powershell
-   .\src\qcom-npu\deploy.ps1 -Package .\out\drv\qcom-npu
+   .\src\qcom-npu\deploy.ps1 -Package .\out\qcom-npu\driver\package
    ```
 
    `build.cmd qcom-npu` 编译 FastRPC 驱动、MCDM 计算驱动、原生 ONNX Runtime 执行提供程序和固定 b12359 版本的 GGML Hexagon 后端，并自动获取和校验 V79 DSP 运行库。`deploy.ps1` 安装两个驱动并创建或更新唯一的计算设备；固件、运行库、`qcom_npu_ep.dll` 和 `GGML/qcom_npu_ggml.dll` 全部由 DriverStore 管理。
@@ -140,7 +146,7 @@ Windows 驱动配合 `uefi_oneplus_ace5_pro` 的 UEFI/ACPI 使用；Linux 适配
 
    驱动构建同时生成签名的 `qcom_npu_ep.msix`。部署脚本在当前交互用户下注册 Windows ML 执行提供程序扩展，支持使用新 Windows ML 提供程序目录的应用发现设备。DirectML 的 Direct3D 12 用户态驱动接口尚未实现；自带旧版、不同架构或私有运行时的软件仍需适配。
 
-   `build.cmd ollama-npu` 构建并签名 Ollama 0.40.18 的 Windows ARM64 本地适配版，完整产物位于 `out/app/ollama-npu`，适配源位于 `src/qcom-npu/ollama`。构建自动获取并校验 Go 与交叉编译器，设备无需 SDK。该包包含相同版本官方源码编译的 ARM64 图形前端，保留官方界面、模型管理、命令行和 HTTP 接口。
+   `build.cmd ollama` 构建并签名 Ollama 0.40.18 的 Windows ARM64 本地适配版，完整产物位于 `out/qcom-npu/ollama/package`，适配源位于 `src/qcom-npu/ollama`。构建自动获取并校验 Go 与交叉编译器，设备无需 SDK。该包包含相同版本官方源码编译的 ARM64 图形前端，保留官方界面、模型管理、命令行和 HTTP 接口。
 
    复制完整产物到设备，运行 `install.ps1` 安装到 `%LOCALAPPDATA%/Programs/Ollama`，加入用户 PATH 并由官方前端管理后台服务与登录启动。桌面“Ollama”打开图形对话界面。使用正常的 `ollama pull`、`ollama run` 下载和运行模型，无需在下载时指定 NPU；`ollama ps` 显示模型的 CPU/NPU 分配，`ollama stop` 释放模型。第三方客户端可使用 `http://127.0.0.1:11434` 或 OpenAI 兼容地址 `http://127.0.0.1:11434/v1`。
 
@@ -148,7 +154,7 @@ Windows 驱动配合 `uefi_oneplus_ace5_pro` 的 UEFI/ACPI 使用；Linux 适配
 
    驱动为新进程注册机器级 `GGML_BACKEND_PATH`，指向 DriverStore 的 Hexagon 后端，保留用户已有的第三方路径。兼容动态后端 ABI 3 的 ARM64 GGML 程序可通过标准 `ggml_backend_load_all()` 枚举 `HTP0: Qualcomm Hexagon V79 NPU`；封装的私有后端、x64 程序或不同 ABI 仍需适配。
 
-   MCDM 将实际推理提交给 Windows 调度，依据 DSP 完成通知累计执行时间。模型、KV 缓存和计算缓冲区登记为已有系统内存，完成驻留后再提交，避免另外分配后备副本，供 Windows 按进程和适配器统计真实共享占用。任务管理器的 2 MiB 专用段是驱动预留的调度内存，模型使用共享系统内存。配套 UEFI 暴露完整 SMMU 资源后，模型缓冲区使用物理地址 4 GiB 以上的非连续内存，预算取该范围 Windows 可见内存并预留 1 GiB；低地址内存留给固件通信。V79 的 32 位虚拟地址通过约 1.75 GiB 的映射窗口复用，可处理总占用超过 4 GiB 的模型；单个张量连同保护页仍须不超过 512 MiB。驱动最多接入八个独立推理进程，共用全局内存预算。MCDM 为各进程管理独立虚拟地址空间并按时间片共享执行引擎，RPC 回复、缓冲区和 DSP 保护域按进程隔离；未执行的任务在抢占后重新提交，退出一个进程会释放其资源。驱动在执行前恢复所需映射，并回收空闲缓冲区的映射以复用窗口。多个模型能否同时驻留仍取决于可用内存。同步 RPC 使用高精度休眠等待，页表采用批量写入；静态缓冲区默认按 256 MiB 分组以减少映射往返。设置用户环境变量 `GGML_HEXAGON_POWER_MODE=balanced` 可切换平衡模式，重启 Ollama 后生效。
+   MCDM 将实际推理提交给 Windows 调度，依据 DSP 完成通知累计执行时间。模型、KV 缓存和计算缓冲区登记为已有系统内存，完成驻留后再提交，避免另外分配后备副本，供 Windows 按进程和适配器统计真实共享占用。任务管理器的约 0.9 MiB 专用段是驱动预留的调度内存，模型使用共享系统内存。配套 UEFI 暴露完整 SMMU 资源后，模型缓冲区使用物理地址 4 GiB 以上的非连续内存，预算取该范围 Windows 可见内存并预留 1 GiB；低地址内存留给固件通信。V79 的 32 位虚拟地址通过约 1.75 GiB 的映射窗口复用，可处理总占用超过 4 GiB 的模型；单个张量连同保护页仍须不超过 512 MiB。驱动最多接入八个独立推理进程，共用全局内存预算。MCDM 为各进程管理独立虚拟地址空间并按时间片共享执行引擎，RPC 回复、缓冲区和 DSP 保护域按进程隔离；未执行的任务在抢占后重新提交，退出一个进程会释放其资源。驱动在执行前恢复所需映射，并回收空闲缓冲区的映射以复用窗口。多个模型能否同时驻留仍取决于可用内存。同步 RPC 使用高精度休眠等待，页表采用批量写入；静态缓冲区默认按 256 MiB 分组以减少映射往返。设置用户环境变量 `GGML_HEXAGON_POWER_MODE=balanced` 可切换平衡模式，重启 Ollama 后生效。
 
 5. 重启设备。
 

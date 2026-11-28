@@ -7,7 +7,8 @@
 #include "isp-stop.h"
 #include "isp-lut-read.h"
 #include "isp-gamma-reference.h"
-#include "isp-audit.h"
+#include "isp-settle.h"
+#include "isp-discard.h"
 #include "../platform/lock.h"
 
 static NTSTATUS FdLutRead(CAM *c) {
@@ -18,11 +19,9 @@ static NTSTATUS FdLutRead(CAM *c) {
     PLATFORM_LOCK_GUARD guard={0};NTSTATUS status=PlatformLockAcquire(&guard,FALSE);
     if(status!=STATUS_SUCCESS)return status;
     PUCHAR t=c->Base[CamTfe];
-    /* Retain access registers in the ordinary power-off restoration stack
-       as well as restoring them immediately after each bounded read. */
-    const ULONG access[]={0x6608,0x660c,0x6b08,0x6b0c,0x6cf4};
-    for(ULONG i=0;i<RTL_NUMBER_OF(access)&&NT_SUCCESS(status);i++)
-        status=CamSave(c,t,access[i],CamRead(t,access[i]));
+    /* The bounded read restores these access registers before releasing
+       this lock. Never put TFE DMI access in CamSave: CamPowerOff retires
+       CRM performance votes before replaying that generic stack. */
     s->LutReadRestoreStatus=0;
     if(NT_SUCCESS(status)&&s->GammaLoaded) {
         CAM_ISP_GAMMA gamma;ULONG points[65];
@@ -82,16 +81,22 @@ static NTSTATUS FdTranslate(CAM *c) {
     if(!CamSmmuExactRoute(base,0x1c00,slot,control)){status=STATUS_DEVICE_BUSY;goto done;}
     /* No SMMU route is altered. Verify both ends of both planes through
        the HF TBU before a writer can own the allocation. */
-    ULONG luma=state->Stride*state->Height;
-    const ULONG offsets[]={0,luma-256,luma,state->ImageBytes-256};
-    for(ULONG i=0;i<4;i++) {
-        c->Diag.Step=192;c->Diag.Region=CamHfTbu;c->Diag.Address=(ULONG)(state->Address+offsets[i]);c->Diag.Count=i;
-        c->TbuPending=TRUE;
-        status=CamTbuTranslateExpected(c->Base[CamHfTbu],0x1c00,state->Address+offsets[i],
-            MmGetPhysicalAddress((PUCHAR)c->Frame+state->BufferOffset+offsets[i]).QuadPart,0x409,state->Translation[i]);
-        if(status!=STATUS_DEVICE_BUSY)c->TbuPending=FALSE;
-        if(!NT_SUCCESS(status))goto done;
-        if(!CamSmmuExactRoute(base,0x1c00,slot,control)){status=STATUS_DEVICE_BUSY;goto done;}
+    for(ULONG frame=0;frame<=state->WarmupFrames;frame++) {
+        CAM_ISP_NV12_OUTPUT layout;ULONG displacement;
+        if(!CamIspFdFrameLayout(&layout,state,frame,&displacement)){status=STATUS_INVALID_PARAMETER;goto done;}
+        ULONG luma=state->Stride*state->Height;
+        const ULONG offsets[]={0,luma-256,luma,state->ImageBytes-256};
+        for(ULONG i=0;i<4;i++) {
+            ULONGLONG address=c->FrameAddress.QuadPart+displacement+offsets[i];
+            ULONGLONG *translation=frame<state->WarmupFrames?state->WarmupTranslation[frame][i]:state->Translation[i];
+            c->Diag.Step=192;c->Diag.Region=CamHfTbu;c->Diag.Address=(ULONG)address;c->Diag.Count=frame*4+i;
+            c->TbuPending=TRUE;
+            status=CamTbuTranslateExpected(c->Base[CamHfTbu],0x1c00,address,
+                MmGetPhysicalAddress((PUCHAR)c->Frame+displacement+offsets[i]).QuadPart,0x409,translation);
+            if(status!=STATUS_DEVICE_BUSY)c->TbuPending=FALSE;
+            if(!NT_SUCCESS(status))goto done;
+            if(!CamSmmuExactRoute(base,0x1c00,slot,control)){status=STATUS_DEVICE_BUSY;goto done;}
+        }
     }
     state->Stage|=4;
 done:
@@ -131,6 +136,9 @@ NTSTATUS CamIspFdConfigure(CAM *c,QCAM_ISP_FD_STATE *output) {
         CamIspFdBuild(c->IspFd,c->Info.Width,c->Info.Height,address,capacity);
     if(!built)
         return STATUS_INVALID_PARAMETER;
+    c->IspFd->WarmupFrames=c->IspFdSettled?3u:0u;
+    c->IspFd->DiscardFrames=c->IspFdDiscard?3u:0u;
+    c->IspFd->DiscardStatus=c->IspFdDiscard?(ULONG)STATUS_PENDING:0;
     c->IspFd->MemoryCached=!c->FrameUncached;
     c->IspFd->LowPhysical=c->FrameLow;
     c->IspFd->BufferOffset=bufferOffset;
@@ -150,9 +158,7 @@ NTSTATUS CamIspFdConfigure(CAM *c,QCAM_ISP_FD_STATE *output) {
         c->IspFd->DeviceMemoryAttribute=(c->IspFd->MappingMair>>(memoryIndex*8))&255;
         if(c->IspFdCoherent&&!CamFrameMapCoherentReady(c->IspFd->MappingLeafFlags,c->IspFd->MappingMair,c->IspFd->CpuMemoryAttribute))return STATUS_DEVICE_NOT_READY;
     }
-    NTSTATUS status=CamIspAudit(c,48,STATUS_SUCCESS);
-    if(NT_SUCCESS(status))status=CamIspPixelClocksOn(c);
-    status=CamIspAudit(c,49,status);
+    NTSTATUS status=CamIspPixelClocksOn(c);
     if(!NT_SUCCESS(status)) {
         c->IspFd->Status=(ULONG)status;
         if(output)RtlCopyMemory(output,c->IspFd,sizeof(*output));
@@ -160,27 +166,17 @@ NTSTATUS CamIspFdConfigure(CAM *c,QCAM_ISP_FD_STATE *output) {
     }
     status=CamIspFdApply(c->Base[CamCsid],c->Base[CamTfe],c->IspFd);
     c->IspFdOwned=(c->IspFd->Stage&2)!=0;
-    status=CamIspAudit(c,50,status);
     if(NT_SUCCESS(status)&&!CamControlDmaReady(c))status=STATUS_DEVICE_NOT_READY;
     if(NT_SUCCESS(status))status=FdTranslate(c);
-    status=CamIspAudit(c,51,status);
     if(NT_SUCCESS(status)&&c->IspFdGamma) {
         ULONG bank;
-        status=CamIspAudit(c,52,status);
-        if(NT_SUCCESS(status))status=CamIspFdGammaBank(c->IspFd,&bank)?CamCdmGammaLoad(c,bank):STATUS_NOT_SUPPORTED;
-        status=CamIspAudit(c,53,status);
+        status=CamIspFdGammaBank(c->IspFd,&bank)?CamCdmGammaLoad(c,bank):STATUS_NOT_SUPPORTED;
         if(NT_SUCCESS(status)&&!CamIspFdGammaConfigured(c->IspFd))status=STATUS_IO_DEVICE_ERROR;
     }
     if(NT_SUCCESS(status)&&c->IspFdGtm) {
-        status=CamIspAudit(c,54,status);
-        if(NT_SUCCESS(status))status=CamCdmGtmLoad(c,c->IspFd->GtmBank);
-        status=CamIspAudit(c,55,status);
+        status=CamCdmGtmLoad(c,c->IspFd->GtmBank);
     }
-    if(NT_SUCCESS(status)&&(c->IspFdGamma||c->IspFdGtm)) {
-        status=CamIspAudit(c,56,status);
-        if(NT_SUCCESS(status))status=FdLutRead(c);
-        status=CamIspAudit(c,57,status);
-    }
+    if(NT_SUCCESS(status)&&(c->IspFdGamma||c->IspFdGtm))status=FdLutRead(c);
     if(!NT_SUCCESS(status))FdFailure(c,status);
     if(output)RtlCopyMemory(output,c->IspFd,sizeof(*output));
     return status;
@@ -189,6 +185,9 @@ NTSTATUS CamIspFdConfigure(CAM *c,QCAM_ISP_FD_STATE *output) {
 NTSTATUS CamIspFdRestore(CAM *c) {
     if(!c->IspFdOwned)return STATUS_SUCCESS;
     if(c->DmaActive||c->RxActive||c->CdmPending||c->ScmPending||c->TbuPending)return STATUS_DEVICE_BUSY;
+    /* Retain ISP ownership and its clocks if immediate DMI restoration
+       failed. Teardown cannot repair access state after dropping votes. */
+    if(c->IspFd->LutReadRestoreStatus)return (NTSTATUS)c->IspFd->LutReadRestoreStatus;
     NTSTATUS status=CamIspFdRestoreRegisters(c->Base[CamCsid],c->Base[CamTfe],c->IspFd);
     if(NT_SUCCESS(status))c->IspFdOwned=FALSE;
     else c->Faulted=TRUE;
@@ -213,8 +212,8 @@ NTSTATUS CamIspFdStart(CAM *c) {
        Keep top IRQs masked while polling the native FD composite bit3. */
     CamWrite(s,0xac,MAXULONG);CamWrite(s,0x14,1);CamWrite(s,0xa8,CAM_ISP_FD_DONE);
     CamWrite(t,0x808,0x7ffffff);
-    CAM_ISP_NV12_OUTPUT layout;
-    if(!CamIspNv12Output(&layout,state->Width,state->Height,state->Address,QCAM_FRAME_BYTES))return STATUS_INVALID_PARAMETER;
+    CAM_ISP_NV12_OUTPUT layout;ULONG displacement;
+    if(!CamIspFdFrameLayout(&layout,state,0,&displacement))return STATUS_INVALID_PARAMETER;
     c->DmaActive=TRUE;state->Stage|=8;
     state->StartSof=CamRead64(s,0x6a8);state->StartEof=CamRead64(s,0x6b8);
     state->DrainStatus=state->RestoreStatus=state->StopStatus=state->ResetStatus=(ULONG)STATUS_PENDING;
@@ -224,7 +223,7 @@ NTSTATUS CamIspFdStart(CAM *c) {
     }
     if(CamRead(t,0x1400)!=1||CamRead(t,0x1500)!=1)return STATUS_IO_DEVICE_ERROR;
     CamWrite(s,0x600,CamRead(s,0x600)|0x80000000u);CamWrite(s,0x28,0x11);
-    CamWrite(s,0x604,1);CamCsidCommit(s,1);c->RxActive=TRUE;
+    CamWrite(s,0x604,state->DiscardFrames?0u:1u);CamCsidCommit(s,1);c->RxActive=TRUE;
     c->Info.Stage=8;NTSTATUS status=CamSensorStream(c,TRUE);
     if(NT_SUCCESS(status))c->Info.Stage=9;
     return status;
@@ -275,14 +274,43 @@ BOOLEAN CamIspFdPoll(CAM *c,NTSTATUS *status) {
         c->Diag.Count=state->PixelViolation;RtlCopyMemory(c->Diag.Resource,"isp-fd",7);
         *status=STATUS_DATA_ERROR;state->Status=(ULONG)*status;return TRUE;
     }
-    CAM_ISP_NV12_OUTPUT layout;
-    if(!CamIspNv12Output(&layout,state->Width,state->Height,state->Address,QCAM_FRAME_BYTES)) {
+    if(state->DiscardFrames&&state->DiscardSofCount<state->DiscardFrames) {
+        if(!c->IspFdOwned||!c->RxActive||c->CdmPending||c->ScmPending||c->TbuPending||c->CrmPending) {
+            *status=STATUS_DEVICE_NOT_READY;state->Status=(ULONG)*status;return TRUE;
+        }
+        NTSTATUS discarded=CamIspFdDiscardPoll(c->Base[CamCsid],c->Base[CamTfe],state,KeQueryInterruptTime());
+        state->DiscardStatus=(ULONG)discarded;
+        if(!NT_SUCCESS(discarded)){*status=discarded;state->Status=(ULONG)*status;return TRUE;}
+        if(discarded==STATUS_SUCCESS) {
+            state->StartSof=CamRead64(c->Base[CamCsid],0x6a8);
+            state->StartEof=CamRead64(c->Base[CamCsid],0x6b8);
+        }
+        return FALSE;
+    }
+    CAM_ISP_NV12_OUTPUT layout;ULONG displacement;
+    if(!CamIspFdFrameLayout(&layout,state,state->CompletedFrames,&displacement)) {
         *status=STATUS_INVALID_PARAMETER;return TRUE;
     }
     ULONGLONG sof=CamIspFdFrameSof(state->Sof,state->PreviousSof,state->Eof,state->StartSof,state->StartEof);
     if(!CamIspFdFrameReady(state->BusIrq,state->IppIrq,sof,state->Eof,state->StartEof,state->YAddress,state->CAddress,&layout))return FALSE;
     state->FrameSof=sof;state->FrameEof=state->Eof;
     state->Stage|=16;
+    if(!CamIspFdFrameRegisters(c->Base[CamCsid],c->Base[CamTfe],state)||state->AtFrameMismatch) {
+        *status=STATUS_DATA_ERROR;state->Status=(ULONG)*status;return TRUE;
+    }
+    if(state->CompletedFrames<state->WarmupFrames) {
+        /* Requeue only after fresh paired completion/EOF and exact live
+           controls. No CPU access to any active or discarded pixel buffer. */
+        if(!c->IspFdOwned||!c->RxActive||c->CdmPending||c->ScmPending||c->TbuPending||c->CrmPending) {
+            *status=STATUS_DEVICE_NOT_READY;state->Status=(ULONG)*status;return TRUE;
+        }
+        NTSTATUS queued=CamIspFdRequeueWarmup(c->Base[CamCsid],c->Base[CamTfe],state);
+        if(!NT_SUCCESS(queued)) {
+            *status=queued;state->Status=(ULONG)*status;return TRUE;
+        }
+        return FALSE;
+    }
+    state->CompletedFrames++;
     /* Bounded raw observations before sensor/bus shutdown. Only the
        explicitly uncached diagnostic allocation has this visibility claim;
        the production path gains no CPU pixel processing or cache operation. */
@@ -293,9 +321,6 @@ BOOLEAN CamIspFdPoll(CAM *c,NTSTATUS *status) {
                 (plane?state->Stride*state->Height:0)+block*256);
             for(ULONG i=0;i<8;i++){state->AtFrameSamples[plane][block][i]=sample[i];state->AtFrameSampleCount++;}
         }
-    }
-    if(!CamIspFdFrameRegisters(c->Base[CamCsid],c->Base[CamTfe],state)||state->AtFrameMismatch) {
-        *status=STATUS_DATA_ERROR;state->Status=(ULONG)*status;return TRUE;
     }
     *status=STATUS_SUCCESS;return TRUE;
 }
@@ -337,10 +362,21 @@ static NTSTATUS FdStop(CAM *c) {
     RtlCopyMemory(state->ChangedBlockParity,coverage.BlockParity,sizeof(coverage.BlockParity));
     for(ULONG i=0;i<state->BufferOffset;i++)if(((PUCHAR)c->Frame)[i]!=0xa5)state->GuardChanged++;
     for(ULONG i=0;i<4096;i++)if(((PUCHAR)c->Frame)[state->BufferOffset+state->ImageBytes+i]!=0xa5)state->GuardChanged++;
+    for(ULONG frame=0;frame<state->WarmupFrames;frame++) {
+        CAM_ISP_NV12_OUTPUT layout;ULONG displacement;
+        if(!CamIspFdFrameLayout(&layout,state,frame,&displacement))return STATUS_INVALID_PARAMETER;
+        for(ULONG i=0;i<4096;i++) {
+            if(((PUCHAR)c->Frame)[displacement-4096+i]!=0xa5)state->GuardChanged++;
+            if(((PUCHAR)c->Frame)[displacement+state->ImageBytes+i]!=0xa5)state->GuardChanged++;
+        }
+    }
     c->DmaActive=FALSE;c->RxActive=FALSE;c->Configured=FALSE;
     status=CamIspFdRestore(c);
     if(NT_SUCCESS(status)&&state->GuardChanged)status=STATUS_DATA_ERROR;
     if(NT_SUCCESS(status)&&(state->Stage&16)&&!state->ImageChanged)status=STATUS_DATA_ERROR;
+    if(NT_SUCCESS(status)&&(state->Stage&16)&&state->CompletedFrames!=state->WarmupFrames+1)status=STATUS_DATA_ERROR;
+    if(NT_SUCCESS(status)&&(state->Stage&16)&&state->DiscardFrames&&
+       (state->DiscardSofCount!=state->DiscardFrames||state->DiscardStatus))status=STATUS_DATA_ERROR;
     if(NT_SUCCESS(status)&&(state->Stage&16)&&!CamIspNv12CoverageValid(&coverage))status=STATUS_DATA_ERROR;
     if(NT_SUCCESS(status)&&(state->Stage&16))for(ULONG plane=0;plane<2;plane++)
         if(!state->ChangedBlockParity[plane][0]||!state->ChangedBlockParity[plane][1])status=STATUS_DATA_ERROR;

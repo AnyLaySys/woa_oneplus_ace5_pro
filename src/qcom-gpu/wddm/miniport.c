@@ -84,7 +84,10 @@ NTSTATUS A830AdapterStop(PVOID context) {
     if(!NT_SUCCESS(display))return display;
     NTSTATUS copied=QcomGpuScanoutStop(a);if(!NT_SUCCESS(copied))return copied;
     A830BridgeDetach(a);
-    GpuStop(&a->Hardware);A830MemoryStop(a);GpuUnbind(&a->Hardware);A830DisplayStop(a);return STATUS_SUCCESS;
+    GpuStop(&a->Hardware);A830MemoryStop(a);
+    NTSTATUS rails=GpuMultimediaPower(&a->Hardware,GPU_MULTIMEDIA_DISPLAY,FALSE);
+    if(!NT_SUCCESS(rails))return rails;
+    GpuUnbind(&a->Hardware);A830DisplayStop(a);return STATUS_SUCCESS;
 }
 static NTSTATUS Start(PVOID context,PDXGK_START_INFO start,PDXGKRNL_INTERFACE dxgk,PULONG sources,PULONG children) {
     UNREFERENCED_PARAMETER(start);
@@ -109,6 +112,8 @@ static NTSTATUS Start(PVOID context,PDXGK_START_INFO start,PDXGKRNL_INTERFACE dx
     a->GpuRegisters=registers;a->GpuRegisterSize=length;
 
     status=GpuBind(&a->Hardware,registers,length);
+
+    if(NT_SUCCESS(status))status=GpuMultimediaPower(&a->Hardware,GPU_MULTIMEDIA_DISPLAY,TRUE);
 
     if(NT_SUCCESS(status))status=GpuStart(&a->Hardware);
 
@@ -231,8 +236,18 @@ static NTSTATUS APIENTRY Present(HANDLE context,DXGKARG_PRESENT *p) {
 }
 static NTSTATUS APIENTRY ControlInterrupt(HANDLE adapter,DXGK_INTERRUPT_TYPE type,BOOLEAN enabled) {
     A830_ADAPTER *a=adapter;
-    if(type==DXGK_INTERRUPT_CRTC_VSYNC) {
-        InterlockedExchange(&a->VsyncEnabled,enabled);A830DpuEnableVsync(a,enabled);A830WakeDisplay(a);
+    if(type==DXGK_INTERRUPT_CRTC_VSYNC || type==DXGK_INTERRUPT_CRTC_VSYNC_WITH_MULTIPLANE_OVERLAY ||
+       type==DXGK_INTERRUPT_CRTC_VSYNC_WITH_MULTIPLANE_OVERLAY2) {
+        LONG bit=1L<<type;
+        LONG mask=enabled?(InterlockedOr(&a->VsyncMask,bit)|bit):(InterlockedAnd(&a->VsyncMask,~bit)&~bit);
+        if(mask) {
+            DXGK_INTERRUPT_TYPE notification=(mask&(1L<<DXGK_INTERRUPT_CRTC_VSYNC_WITH_MULTIPLANE_OVERLAY2))?
+                DXGK_INTERRUPT_CRTC_VSYNC_WITH_MULTIPLANE_OVERLAY2:(mask&(1L<<DXGK_INTERRUPT_CRTC_VSYNC_WITH_MULTIPLANE_OVERLAY))?
+                DXGK_INTERRUPT_CRTC_VSYNC_WITH_MULTIPLANE_OVERLAY:DXGK_INTERRUPT_CRTC_VSYNC;
+            InterlockedExchange(&a->VsyncNotificationType,notification);
+        }
+        BOOLEAN active=mask!=0;
+        InterlockedExchange(&a->VsyncEnabled,active);A830DpuEnableVsync(a,active);A830WakeDisplay(a);
         return STATUS_SUCCESS;
     }
     return STATUS_SUCCESS;

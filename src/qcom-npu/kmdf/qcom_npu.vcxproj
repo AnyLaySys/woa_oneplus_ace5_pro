@@ -20,13 +20,13 @@
   <PropertyGroup>
     <TargetName>qcom_npu</TargetName>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
-    <OutDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\ARM64\Release\bin\</OutDir>
-    <IntDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\ARM64\Release\obj\</IntDir>
+    <OutDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\driver\build\ARM64\Release\bin\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\driver\build\ARM64\Release\obj\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><PreprocessorDefinitions>POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><Optimization>MinSpace</Optimization><DebugInformationFormat>None</DebugInformationFormat></ClCompile>
     <Link><GenerateDebugInformation>false</GenerateDebugInformation><Profile>false</Profile></Link>
-    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>11/27/2026</DateStamp><TimeStamp>26.11.27.71</TimeStamp></Inf>
+    <Inf><SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate><SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion><DateStamp>11/28/2026</DateStamp><TimeStamp>26.11.28.1</TimeStamp></Inf>
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="..\driver.c" />
     <ClCompile Include="..\client.c" /><ClCompile Include="..\link.c" /><ClCompile Include="..\memory.c" /><ClCompile Include="..\iommu.c" /><ClCompile Include="..\rpc.c" /><ClCompile Include="..\heap.c" /><ClCompile Include="..\scheduler.c" /><ResourceCompile Include="qcom_npu.rc" /><Inf Include="qcom_npu.inx" /><FilesToPackage Include="$(TargetPath)" /></ItemGroup>
@@ -36,18 +36,18 @@
     </FilesToPackage>
   </ItemGroup>
   <ItemGroup>
-    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\inference\runner\qcom_npu_rpc.dll;$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\inference\ggml\GGML-LICENSE.txt" />
-    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\inference\ggml\libggml-htp-v79.so"><PackageRelativeDirectory>DSP250</PackageRelativeDirectory></FilesToPackage>
-    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\inference\runner\qcom_npu_ep.dll;$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\inference\runner\QNN-LICENSE.pdf;$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\inference\runner\FastRPC-LICENSE.txt;$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\inference\runner\ONNX-Runtime-LICENSE.txt" />
+    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\driver\build\inference\runner\qcom_npu_rpc.dll;$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\ggml\runtime\GGML-LICENSE.txt" />
+    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\ggml\runtime\libggml-htp-v79.so"><PackageRelativeDirectory>DSP250</PackageRelativeDirectory></FilesToPackage>
+    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\driver\build\inference\runner\qcom_npu_ep.dll;$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\driver\build\inference\runner\QNN-LICENSE.pdf;$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\driver\build\inference\runner\FastRPC-LICENSE.txt;$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\driver\build\inference\runner\ONNX-Runtime-LICENSE.txt" />
     <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\fw\cdsp\user\fastrpc_shell_unsigned_3;$(MSBuildThisFileDirectory)..\..\..\fw\cdsp\user\libc++.so.1;$(MSBuildThisFileDirectory)..\..\..\fw\cdsp\user\libc++abi.so.1">
       <PackageRelativeDirectory>DSP250</PackageRelativeDirectory>
     </FilesToPackage>
-    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\inference\sdk\lib\hexagon-v79\unsigned\libQnnHtpV79Skel.so;$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\inference\sdk\lib\hexagon-v79\unsigned\libQnnHtpV79.so">
+    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\driver\build\inference\sdk\lib\hexagon-v79\unsigned\libQnnHtpV79Skel.so;$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\driver\build\inference\sdk\lib\hexagon-v79\unsigned\libQnnHtpV79.so">
       <PackageRelativeDirectory>DSP250</PackageRelativeDirectory>
     </FilesToPackage>
   </ItemGroup>
   <ItemGroup>
-    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\chat-build\package\GGML\*.dll"><PackageRelativeDirectory>GGML</PackageRelativeDirectory></FilesToPackage>
+    <FilesToPackage Include="$(MSBuildThisFileDirectory)..\..\..\out\qcom-npu\ggml\package\*.dll"><PackageRelativeDirectory>GGML</PackageRelativeDirectory></FilesToPackage>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

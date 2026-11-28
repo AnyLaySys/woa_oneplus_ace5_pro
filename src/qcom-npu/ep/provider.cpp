@@ -1,17 +1,11 @@
-#define ORT_API_MANUAL_INIT
 #include <onnxruntime_c_api.h>
 #include "../runtime/context.h"
 #include "../runtime/installed.h"
 #include "graph.h"
 #include <stdexcept>
-#include <limits>
 #include <cstring>
 
 static constexpr const char* Name = "QcomHtpExecutionProvider";
-static void Check(const OrtApi& api, OrtStatus* status) {
-    if (!status) return;
-    std::string message = api.GetErrorMessage(status); api.ReleaseStatus(status); throw std::runtime_error(message);
-}
 static std::filesystem::path DspDirectory() {
     return qcom_npu::InstalledDirectory() / L"DSP250";
 }

@@ -25,6 +25,19 @@ static inline BOOLEAN CamIspChannelGainReference(ULONG words[14],ULONG bayer) {
     return CamIspChannelGainBuild(words,data);
 }
 
+/* Main RGGB mode11 first black-level leaf {0,1024,1026,1026,1024}.
+   Original IQ1fdc90 with actual980/14-bit input, packer cb8a0 and emitter
+   cb2e0 agree on every word. Native IQ packet SHA256
+   f5935a51cad35c9a686f1fb790f94776dfca30b9dec97c0a9a259f27f02afcb5.
+   This is a bounded reference, not production AEC region selection. */
+static inline BOOLEAN CamIspChannelGainMainBlacklevelReference(ULONG words[14]) {
+    static const ULONG data[22]={
+        1,0,172,0,201,0,1092,1092,1092,1092,
+        0,1026,0,1026,0,1024,0,1024,1024,0,0,0,
+    };
+    return CamIspChannelGainBuild(words,data);
+}
+
 /* CC131 matrix is row-major Q(7+q); hardware packs columns, not rows. */
 static BOOLEAN CamIspCcBuild(ULONG words[11],const LONG matrix[9],const LONG offsets[3],ULONG q) {
     if(!words||!matrix||!offsets||q>3)return FALSE;

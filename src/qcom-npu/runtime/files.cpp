@@ -6,7 +6,7 @@
 #include <cstring>
 #include <map>
 #include <iostream>
-#include <limits>
+#include <climits>
 
 extern "C" int apps_std_skel_invoke(uint32_t scalar, remote_arg* args);
 extern "C" int apps_mem_skel_invoke(uint32_t scalar, remote_arg* args);
@@ -137,16 +137,27 @@ int apps_mem_share_map(int fd, int size, uint64_t* host, uint64_t* dsp) {
     if (!runtime || !host || !dsp) return AEE_EBADPARM;
     *host = 0; return runtime->FileAddress(fd, size, dsp);
 }
+int apps_std_freopen(apps_std_FILE, const char*, const char*, apps_std_FILE*) { return AEE_EUNSUPPORTED; }
+int apps_std_fwrite(apps_std_FILE, const unsigned char*, int, int*, int*) { return AEE_EUNSUPPORTED; }
+int apps_std_setenv(const char*, const char*, int) { return AEE_EUNSUPPORTED; }
+int apps_std_unsetenv(const char*) { return AEE_EUNSUPPORTED; }
+int apps_std_fgets(apps_std_FILE, unsigned char*, int, int*) { return AEE_EUNSUPPORTED; }
+int apps_std_fsync(apps_std_FILE) { return AEE_EUNSUPPORTED; }
+int apps_std_fremove(const char*) { return AEE_EUNSUPPORTED; }
+int apps_std_fdopen_decrypt(apps_std_FILE, apps_std_FILE*) { return AEE_EUNSUPPORTED; }
+int apps_std_opendir(const char*, apps_std_DIR*) { return AEE_EUNSUPPORTED; }
+int apps_std_closedir(const apps_std_DIR*) { return AEE_EUNSUPPORTED; }
+int apps_std_readdir(const apps_std_DIR*, apps_std_DIRENT*, int*) { return AEE_EUNSUPPORTED; }
+int apps_std_mkdir(const char*, int) { return AEE_EUNSUPPORTED; }
+int apps_std_rmdir(const char*) { return AEE_EUNSUPPORTED; }
+int apps_std_ftrunc(apps_std_FILE, int) { return AEE_EUNSUPPORTED; }
+int apps_std_frename(const char*, const char*) { return AEE_EUNSUPPORTED; }
 int apps_mem_share_unmap(uint64_t, int) { return AEE_EUNSUPPORTED; }
 int apps_mem_dma_handle_map(int, int, int) { return AEE_EUNSUPPORTED; }
 int apps_mem_dma_handle_unmap(int, int) { return AEE_EUNSUPPORTED; }
 }
 int NpuHostInvoke(uint32_t handle, uint32_t scalar, remote_arg* args) {
-    if (handle == 100) {
-        int result = apps_std_skel_invoke(scalar, args);
-        if (result) std::cerr << "DSP file RPC method " << ((scalar >> 24) & 31) << " failed: " << result << '\n';
-        return result;
-    }
+    if (handle == 100) return apps_std_skel_invoke(scalar, args);
     if (handle == 101) return apps_mem_skel_invoke(scalar, args);
     if (handle == 0 && scalar == 0x20200 && args[0].buf.nLen >= 8 && args[2].buf.nLen >= 8) {
         uint32_t length; std::memcpy(&length, args[0].buf.pv, 4);
@@ -167,6 +178,5 @@ int NpuHostInvoke(uint32_t handle, uint32_t scalar, remote_arg* args) {
         if (args[2].buf.nLen) std::memset(args[2].buf.pv, 0, args[2].buf.nLen);
         return 0;
     }
-    std::cerr << "Unsupported host RPC handle=" << handle << " scalar=" << std::hex << scalar << std::dec << '\n';
     return AEE_EUNSUPPORTED;
 }

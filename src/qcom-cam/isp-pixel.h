@@ -78,6 +78,18 @@ static BOOLEAN CamIspPixelReferenceProfile(CAM_ISP_PIXEL_PLAN *plan,ULONG width,
     return CamIspPixelReferenceOutput(plan,width,height,1280,720,nativeGeometry);
 }
 
+static inline BOOLEAN CamIspPixelMainBlacklevelReference(CAM_ISP_PIXEL_PLAN *plan) {
+    ULONG words[14],found=0;
+    if(!plan||plan->Count!=CAM_ISP_PIXEL_REGS||!CamIspChannelGainMainBlacklevelReference(words))return FALSE;
+    for(ULONG i=0;i<plan->Count;i++) {
+        ULONG offset=plan->Registers[i].Offset;
+        if(offset==0xdbf4){plan->Registers[i].Value=words[0];found++;}
+        else if(offset==0xda60){plan->Registers[i].Value=words[1];found++;}
+        else if(offset>=0xda68&&offset<=0xda94){plan->Registers[i].Value=words[2+(offset-0xda68)/4];found++;}
+    }
+    return found==14;
+}
+
 /* Historical input-offset diagnostic, retained for direct comparison.
    With a zero matrix this group did not generate nonzero pixel values.
    The separately selected CstBiasDiagnostic is the verified fixed output. */

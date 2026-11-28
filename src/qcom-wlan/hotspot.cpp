@@ -86,7 +86,7 @@ NTSTATUS HotspotCapabilities(PWCN_DEVICE D)
     auto H=Hs(D);if(!H)return STATUS_DEVICE_NOT_READY;RtlCopyMemory(H->Mac,D->Ce.MacAddress,6);H->Mac[0]|=2;H->Mac[5]^=1;
     RtlCopyMemory(H->DeviceMac,H->Mac,6);H->DeviceMac[5]^=2;
     auto &C=H->Caps;WIFI_WIFIDIRECT_CAPABILITIES_INIT(&C);C.WFDRoleCount=C.ConcurrentGOCount=C.ConcurrentClientCount=1;
-    // Native WiFi requires device/GO/client capability bits together; client MLME is not yet verified.
+    C.ServiceDiscoverySupported=C.BackgroundDiscoverySupported=C.PassiveAvailabilityListenStateSupported=TRUE;
     C.GOClientTableSize=(UCHAR)WCN_HOTSPOT_CLIENTS;C.AssociationTableSize=WCN_HOTSPOT_CLIENTS;C.DiscoveryFilterListSize=C.DesiredSSIDListSize=C.PrivacyExemptionListSize=1;C.ScanSSIDListSize=4; // Native ExtAP attach requires at least four scan SSIDs.
     C.DefaultKeyTableSize=4;C.MaxVendorSpecificExtensionIESize=512;C.GOon5GHzBandSupported=TRUE;
     RtlCopyMemory(C.DeviceAddress,H->DeviceMac,6);RtlCopyMemory(H->RoleAddress.Address,H->Mac,6);C.NumInterfaceAddresses=1;C.InterfaceAddressList=&H->RoleAddress;
@@ -316,6 +316,7 @@ bool HotspotCommand(S8 *S,WIFIREQUEST R,const WDI_MESSAGE_HEADER &Header,UINT16 
     if(H->Failed&&Id!=WDI_TASK_STOP_AP&&Id!=WDI_TASK_DOT11_RESET){S8Complete(R,STATUS_DEVICE_HARDWARE_ERROR);return true;}
     switch(Id){
     case WDI_SET_ADAPTER_CONFIGURATION:St=S8Configure(Role?H->Go:S,P,N,Role?H->Mac:H->DeviceMac);break;
+    case WDI_SET_CONNECTION_QUALITY:return false; // Use the shared port-generic parser.
     case WDI_TASK_START_AP:{
         WDI_TASK_START_AP_PARAMETERS A;auto Ns=ParseWdiTaskStartApToIhv(N,P,&S->Tlv,&A);St=STATUS_INVALID_PARAMETER;
         bool Psk=false,Sae=false,Security=Ns==NDIS_STATUS_SUCCESS&&A.AuthenticationAlgorithms.ElementCount>0&&A.AuthenticationAlgorithms.ElementCount<=2;

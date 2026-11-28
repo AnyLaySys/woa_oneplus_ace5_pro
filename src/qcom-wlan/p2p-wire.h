@@ -39,3 +39,18 @@ static __inline ULONG P2pFrameType(UCHAR Subtype)
 
 static __inline BOOLEAN P2pAttributesValid(const UCHAR *P,ULONG N)
 {ULONG L;return P2pAttr(P,N,256,NULL,0,&L);}
+
+// A legacy Provision Discovery Response may contain only the WPS Config
+// Methods IE (hostap p2p_build_prov_disc_resp). Other action exchanges still
+// require P2P attributes. Validate any P2P attributes present in either form.
+static __inline BOOLEAN P2pActionIesValid(ULONG Action,const UCHAR *P,ULONG N)
+{
+    static const UCHAR P2pOui[]={0x50,0x6f,0x9a,9},WpsOui[]={0,0x50,0xf2,4};
+    return P2pAttributesValid(P,N)&&
+        (P2pVendor(P,N,P2pOui)||(Action==7&&P2pVendor(P,N,WpsOui)));
+}
+
+// Windows manages EAPOL key IP address allocation (Group Capability bit 7).
+// Preserve its requested flag; intra-BSS forwarding (bit 3) is unsupported.
+static __inline UCHAR P2pGroupCapability(ULONG Capability)
+{return (UCHAR)(Capability&0xf7u);}

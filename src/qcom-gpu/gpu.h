@@ -2,13 +2,15 @@
 #include <ntifs.h>
 #include "uapi.h"
 #include "../qcom-dvfs.h"
+#include "multimedia-power.h"
 
 #define GPU_TAG '083G'
 #define GPU_WINDOW 0xE0000
-#define GPU_BUFFER_LIMIT 0x20000000
+#define GPU_BUFFER_LIMIT GPU_MAX_BUFFER_SIZE
 #define GPU_MAX_COMMANDS 256
 #define GPU_PERF_LEVELS 16
-typedef struct { PMDL Mdl; PUCHAR Cpu; ULONGLONG Physical,Address; ULONG Size; BOOLEAN Contiguous,Cached; } GPU_BO;
+typedef struct GPU_BO GPU_BO;
+struct GPU_BO { PMDL Mdl; PUCHAR Cpu; ULONGLONG Physical,Address; ULONG Size; BOOLEAN Contiguous,Cached; };
 typedef struct { GPU_BO Tables; ULONG Used,Bank; } GPU_VM;
 typedef struct { GPU_BO *Buffer; ULONG Offset,Words; } GPU_COMMAND;
 typedef struct { ULONGLONG Address; ULONG Words; } GPU_IB;
@@ -35,6 +37,7 @@ typedef struct {
     ULONGLONG LastContextCookie;
     ULONGLONG LastRoot;
     ULONGLONG LastSubmitTime,PendingSince,PendingCompleted,RaisedAt;
+    GPU_MULTIMEDIA_RAIL MultimediaRails[2];
 } GPU;
 VOID GpuInitialize(GPU *gpu,GPU_SYNCHRONIZE synchronize,PVOID host);
 NTSTATUS GpuBind(GPU *gpu,PHYSICAL_ADDRESS registers,ULONG length);
@@ -59,6 +62,7 @@ NTSTATUS GpuPower(GPU *gpu,BOOLEAN enable);
 NTSTATUS GpuDb(GPU *gpu,PCSTR name,PULONG address,PULONG auxiliary,PULONG length);
 NTSTATUS GpuArc(GPU *gpu,PCSTR primary,PCSTR secondary,ULONG level,PULONG vote);
 NTSTATUS GpuRscWrite(GPU *gpu,ULONG address,ULONG value);
+NTSTATUS GpuMultimediaPower(GPU *gpu,ULONG owner,BOOLEAN enable);
 NTSTATUS GpuFirmware(HANDLE directory,PCWSTR name,ULONG maximum,PUCHAR *data,PULONG size);
 NTSTATUS GpuStart(GPU *gpu);
 VOID GpuStop(GPU *gpu);

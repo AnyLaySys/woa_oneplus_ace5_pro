@@ -14,6 +14,7 @@ bool check(Device *d,VkResult result) {
 VkFormat format(DXGI_FORMAT f) {
  switch(f) {
  case DXGI_FORMAT_NV12:return VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+ case DXGI_FORMAT_P010:return VK_FORMAT_G16_B16R16_2PLANE_420_UNORM;
  case DXGI_FORMAT_R32G32B32A32_FLOAT:return VK_FORMAT_R32G32B32A32_SFLOAT;
  case DXGI_FORMAT_R32G32B32A32_UINT:return VK_FORMAT_R32G32B32A32_UINT;
  case DXGI_FORMAT_R32G32B32A32_SINT:return VK_FORMAT_R32G32B32A32_SINT;
@@ -79,6 +80,7 @@ VkFormat format(DXGI_FORMAT f) {
 }
 unsigned pixel_bytes(DXGI_FORMAT f) {
  if(f==DXGI_FORMAT_NV12)return 1;
+ if(f==DXGI_FORMAT_P010)return 2;
  if(f>=DXGI_FORMAT_R32G32B32A32_TYPELESS && f<=DXGI_FORMAT_R32G32B32A32_SINT)return 16;
  if(f>=DXGI_FORMAT_R32G32B32_TYPELESS && f<=DXGI_FORMAT_R32G32B32_SINT)return 12;
  if(f>=DXGI_FORMAT_R16G16B16A16_TYPELESS && f<=DXGI_FORMAT_R32G32_SINT)return 8;
@@ -213,7 +215,7 @@ void access(Device *d,Storage &s,VkPipelineStageFlags stages,VkAccessFlags mask,
      end_pass(d);
      if(s.image) {
        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.srcAccessMask=previous;b.dstAccessMask=mask;
-       b.oldLayout=transition?(s.external?VK_IMAGE_LAYOUT_PREINITIALIZED:VK_IMAGE_LAYOUT_UNDEFINED):VK_IMAGE_LAYOUT_GENERAL;b.newLayout=VK_IMAGE_LAYOUT_GENERAL;
+       b.oldLayout=transition?(s.address?VK_IMAGE_LAYOUT_PREINITIALIZED:VK_IMAGE_LAYOUT_UNDEFINED):VK_IMAGE_LAYOUT_GENERAL;b.newLayout=VK_IMAGE_LAYOUT_GENERAL;
        b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=s.image;b.subresourceRange=range;
        barriers.push_back(b);sources|=source?source:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;state.initialized=true;
      } else {
@@ -233,7 +235,7 @@ void access(Device *d,Storage &s,VkPipelineStageFlags stages,VkAccessFlags mask,
  } else {
    AccessState state{s.stages,s.access,s.used,s.initialized};AccessState *shared=s.external?&d->shared_access[s.address]:nullptr;
    if(shared){state.stages=shared->stages;state.mask=shared->mask;state.used=shared->used;}
-   barrier(state,{s.aspects,0,VK_REMAINING_MIP_LEVELS,0,VK_REMAINING_ARRAY_LAYERS},shared && shared->used!=d->next_submit);
+   barrier(state,{s.aspects,0,VK_REMAINING_MIP_LEVELS,0,VK_REMAINING_ARRAY_LAYERS},shared && (shared->used!=d->next_submit || (s.aspects&VK_IMAGE_ASPECT_PLANE_0_BIT)));
    s.stages=state.stages;s.access=state.mask;s.initialized=state.initialized;if(shared)*shared=state;
  }
  if(!barriers.empty())d->vk.CmdPipelineBarrier(d->cmd,sources,stages,0,0,nullptr,0,nullptr,(UINT)barriers.size(),barriers.data());
@@ -272,7 +274,7 @@ static VkImageCreateInfo image_info(Resource *r,bool linear) {
  ci.format=r->vkformat;ci.extent={r->width,r->height,r->depth};ci.mipLevels=r->levels;ci.arrayLayers=r->layers;ci.samples=VK_SAMPLE_COUNT_1_BIT;
  ci.tiling=linear?VK_IMAGE_TILING_LINEAR:VK_IMAGE_TILING_OPTIMAL;
  ci.usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
- if(r->format==DXGI_FORMAT_NV12) {
+ if(planar(r->format)) {
    ci.flags|=VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT|VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
    ci.extent.width=(ci.extent.width+127)&~127u;ci.extent.height=(ci.extent.height+63)&~63u;
    if(r->bind&D3D10_DDI_BIND_RENDER_TARGET)ci.usage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
@@ -287,14 +289,15 @@ bool image_layout(Device *d,Resource *r,UINT *pitch,UINT *size) {
  auto ci=image_info(r,true);VkImage image=VK_NULL_HANDLE;
  if(!check(d,d->vk.CreateImage(d->device,&ci,nullptr,&image)))return false;
  VkMemoryRequirements req{};d->vk.GetImageMemoryRequirements(d->device,image,&req);
- VkImageSubresource sub{};sub.aspectMask=r->format==DXGI_FORMAT_NV12?VK_IMAGE_ASPECT_PLANE_0_BIT:VK_IMAGE_ASPECT_COLOR_BIT;
+ VkImageSubresource sub{};sub.aspectMask=planar(r->format)?VK_IMAGE_ASPECT_PLANE_0_BIT:VK_IMAGE_ASPECT_COLOR_BIT;
  VkSubresourceLayout layout{};d->vk.GetImageSubresourceLayout(d->device,image,&sub,&layout);
  d->vk.DestroyImage(d->device,image,nullptr);
- if(req.size>0x4000000 || layout.rowPitch>UINT_MAX || layout.offset){error(d,E_OUTOFMEMORY);return false;}
+ if(req.size>(r->format==DXGI_FORMAT_P010?0x8000000u:0x4000000u) || layout.rowPitch>UINT_MAX || layout.offset){error(d,E_OUTOFMEMORY);return false;}
  *pitch=(UINT)layout.rowPitch;*size=(UINT)req.size;return true;
 }
 bool image_create(Device *d,Resource *r,uint64_t address,unsigned size) {
- auto ci=image_info(r,address!=0);
+ bool decoder=(r->bind&D3D11_DDI_BIND_DECODER)!=0;
+ auto ci=image_info(r,address!=0 || decoder);
  if(!check(d,d->vk.CreateImage(d->device,&ci,nullptr,&r->storage.image)))return false;
  VkMemoryRequirements req;d->vk.GetImageMemoryRequirements(d->device,r->storage.image,&req);
  UINT type=memory_type(d,req.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);if(type==~0u)type=memory_type(d,req.memoryTypeBits,0);
@@ -314,8 +317,12 @@ bool image_create(Device *d,Resource *r,uint64_t address,unsigned size) {
  }
  if(!r->storage.memory && !check(d,d->vk.AllocateMemory(d->device,&ai,nullptr,&r->storage.memory)))return false;
  if(!check(d,d->vk.BindImageMemory(d->device,r->storage.image,r->storage.memory,0)))return false;
+ if(decoder && !address) {
+   VkDeviceMemoryOpaqueCaptureAddressInfo info{VK_STRUCTURE_TYPE_DEVICE_MEMORY_OPAQUE_CAPTURE_ADDRESS_INFO};info.memory=r->storage.memory;
+   r->storage.address=d->vk.GetDeviceMemoryOpaqueCaptureAddress(d->device,&info);
+ }
  if(address) {
-   VkImageSubresource sub{};sub.aspectMask=r->format==DXGI_FORMAT_NV12?VK_IMAGE_ASPECT_PLANE_0_BIT:VK_IMAGE_ASPECT_COLOR_BIT;VkSubresourceLayout layout{};
+   VkImageSubresource sub{};sub.aspectMask=planar(r->format)?VK_IMAGE_ASPECT_PLANE_0_BIT:VK_IMAGE_ASPECT_COLOR_BIT;VkSubresourceLayout layout{};
    d->vk.GetImageSubresourceLayout(d->device,r->storage.image,&sub,&layout);
    if(layout.rowPitch!=r->pitch || layout.offset){error(d,E_INVALIDARG);return false;}
  }
@@ -348,9 +355,10 @@ bool view_create(Device *d,View *v,bool sampled,bool flat) {
    if(sampled && r->dimension==D3D10DDIRESOURCE_TEXTURECUBE)ci.viewType=VK_IMAGE_VIEW_TYPE_CUBE;
    if(flat)ci.viewType=VK_IMAGE_VIEW_TYPE_2D;
    ci.subresourceRange={aspects(v->format),v->level,v->levels,v->layer,v->layers};
-   if(r->format==DXGI_FORMAT_NV12) {
-     if(v->format!=DXGI_FORMAT_R8_UNORM && v->format!=DXGI_FORMAT_R8G8_UNORM){error(d,DXGI_ERROR_UNSUPPORTED);return false;}
-     ci.subresourceRange.aspectMask=v->format==DXGI_FORMAT_R8_UNORM?VK_IMAGE_ASPECT_PLANE_0_BIT:VK_IMAGE_ASPECT_PLANE_1_BIT;
+   if(planar(r->format)) {
+     DXGI_FORMAT y=r->format==DXGI_FORMAT_P010?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R8_UNORM,uv=r->format==DXGI_FORMAT_P010?DXGI_FORMAT_R16G16_UNORM:DXGI_FORMAT_R8G8_UNORM;
+     if(v->format!=y && v->format!=uv){error(d,DXGI_ERROR_UNSUPPORTED);return false;}
+     ci.subresourceRange.aspectMask=v->format==y?VK_IMAGE_ASPECT_PLANE_0_BIT:VK_IMAGE_ASPECT_PLANE_1_BIT;
    }
    if(!check(d,d->vk.CreateImageView(d->device,&ci,nullptr,&v->image)))return false;
  }

@@ -3,7 +3,6 @@
 #include <cstring>
 #include <stdexcept>
 #include <iostream>
-#include <algorithm>
 #include "../ggml/htp_iface.h"
 
 #define NPU_RPC_EXPORT extern "C"

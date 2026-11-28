@@ -12,11 +12,6 @@
 #include <string>
 #include <vector>
 
-static void Check(const OrtApi& api, OrtStatus* status) {
-    if (!status) return;
-    std::string error = api.GetErrorMessage(status); api.ReleaseStatus(status);
-    throw std::runtime_error(error);
-}
 struct Tensor {
     std::string Name;
     std::vector<int64_t> Dims;

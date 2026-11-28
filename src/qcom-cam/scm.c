@@ -104,11 +104,8 @@ static NTSTATUS Qos(CAM *c,BOOLEAN diagnostic,BOOLEAN complete) {
     c->Diag.Phase=complete?1:2;RtlCopyMemory(c->Diag.Resource,"scm-qos",8);
     c->StaticQosReady=FALSE;c->ScmPending=TRUE;
     RtlCopyMemory(c->ScmResumeArgs,registers,sizeof(registers));c->ScmResumeValid=TRUE;
-    status=CamScmAudit(c,1,registers,STATUS_SUCCESS);
-    if(!NT_SUCCESS(status)){c->ScmPending=FALSE;c->ScmResumeValid=FALSE;c->Diag.Status=status;return status;}
     if(complete)CamScmSlow(registers);else CamScmOnce(registers);
     RtlCopyMemory(c->Trace.ScmReturn,registers,sizeof(registers));
-    CamScmAudit(c,2,registers,(NTSTATUS)registers[0]);
     if(complete)status=Complete(c,registers,c->ScmFastWaitq);
     else {
         c->ScmPending=registers[0]==1||registers[0]==2||registers[0]==3;
@@ -131,10 +128,8 @@ NTSTATUS CamScmContinue(CAM *c) {
         ULONGLONG cookie=registers[6];RtlCopyMemory(registers,c->ScmResumeArgs,sizeof(registers));
         registers[0]=1;registers[6]=cookie;
     }
-    NTSTATUS written=CamScmAudit(c,4,registers,STATUS_SUCCESS);if(!NT_SUCCESS(written))return written;
-    if(prior==1){CamScmSlow(registers);CamScmAudit(c,5,registers,(NTSTATUS)registers[0]);}
+    if(prior==1)CamScmSlow(registers);
     NTSTATUS status=Complete(c,registers,c->ScmFastWaitq);
-    if(prior!=1)CamScmAudit(c,5,c->Trace.ScmReturn,status);
     if(c->ScmResumeArgs[0]==0x4200180a&&!c->ScmResumeArgs[2]&&!c->ScmResumeArgs[3]&&!c->ScmResumeArgs[4])
         c->StaticQosReady=NT_SUCCESS(status);
     c->ScmResumeValid=c->ScmPending;c->Diag.Observed=(ULONG)c->Trace.ScmReturn[0];

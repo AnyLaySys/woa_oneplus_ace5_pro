@@ -93,6 +93,78 @@ NTSTATUS GpuRscWrite(GPU *g,ULONG address,ULONG value) {
     }
     return status;
 }
+/* Read back the Apps DRV2 resource vote before borrowing it. All commands and
+   the software owner update are serialized with camera's use of this DRV. */
+static NTSTATUS MultimediaTransferLocked(GPU *g,ULONG address,BOOLEAN write,PULONG value) {
+    ULONG config=GpuRead(g->Rsc,0xc),count=(config>>27)&31u,slot=MAXULONG;
+    if(((GpuRead(g->Rsc,0)>>16)&255u)!=3 || !count)return STATUS_REVISION_MISMATCH;
+    for(ULONG i=0;i<3;i++) {
+        ULONG base=0xd00+i*0x2a0,enabled=GpuRead(g->Rsc,base+0x2c);
+        for(ULONG j=0;j<count;j++)if((enabled&(1u<<j)) && GpuRead(g->Rsc,base+0x38+j*24)==address)
+            return STATUS_DEVICE_BUSY;
+        if(slot==MAXULONG && !enabled && !GpuRead(g->Rsc,base+0x24) &&
+           !GpuRead(g->Rsc,base+0x20) && (GpuRead(g->Rsc,base+0x28)&1) &&
+           !(GpuRead(g->Rsc,0xd04)&(1u<<i)))slot=i;
+    }
+    if(slot==MAXULONG)return STATUS_DEVICE_BUSY;
+    ULONG base=0xd00+slot*0x2a0,irq=GpuRead(g->Rsc,0xd00),bit=1u<<slot;
+    GpuWrite(g->Rsc,0xd00,irq&~bit);
+    GpuWrite(g->Rsc,base+0x34,8u|0x100u|(write?0x10000u:0));
+    GpuWrite(g->Rsc,base+0x38,address);GpuWrite(g->Rsc,base+0x3c,write?*value:0);
+    GpuWrite(g->Rsc,base+0x20,1);GpuWrite(g->Rsc,base+0x2c,1);
+    GpuWrite(g->Rsc,base+0x24,1u<<16);
+    NTSTATUS status=STATUS_IO_DEVICE_ERROR;BOOLEAN triggered=FALSE;
+    if(!(GpuRead(g->Rsc,base+0x40)&0x10100u)) {
+        triggered=TRUE;GpuWrite(g->Rsc,base+0x24,(1u<<16)|(1u<<24));
+        status=GpuPoll(g->Rsc,base+0x40,0x10100,0x10100,100000);
+        if(NT_SUCCESS(status) && !write)*value=GpuRead(g->Rsc,base+0x44);
+    }
+    if(!triggered || NT_SUCCESS(status)) {
+        GpuWrite(g->Rsc,base+0x24,1u<<16);GpuWrite(g->Rsc,base+0x24,0);
+        GpuWrite(g->Rsc,base+0x2c,0);GpuWrite(g->Rsc,base+0x20,0);GpuWrite(g->Rsc,0xd08,bit);
+        NTSTATUS cleared=GpuPoll(g->Rsc,0xd04,bit,0,10000);
+        if(NT_SUCCESS(cleared))GpuWrite(g->Rsc,0xd00,irq);
+        else status=cleared;
+    }
+    return status;
+}
+static int MultimediaTransfer(void *context,unsigned address,int write,unsigned *value) {
+    ULONG data=*value;NTSTATUS status=MultimediaTransferLocked(context,address,write!=0,&data);
+    if(NT_SUCCESS(status))*value=data;
+    return (int)status;
+}
+NTSTATUS GpuMultimediaPower(GPU *g,ULONG owner,BOOLEAN enable) {
+    if(!g || (owner!=GPU_MULTIMEDIA_DISPLAY && owner!=GPU_MULTIMEDIA_VIDEO) ||
+       KeGetCurrentIrql()!=PASSIVE_LEVEL)return STATUS_INVALID_PARAMETER;
+    if(!enable && !(g->MultimediaRails[0].Owners&owner) && !(g->MultimediaRails[1].Owners&owner))return STATUS_SUCCESS;
+    if(!g->Db || !g->Rsc)return STATUS_DEVICE_NOT_READY;
+    PLATFORM_LOCK_GUARD guard={0};NTSTATUS status=PlatformLockAcquire(&guard,FALSE);
+    if(status!=STATUS_SUCCESS)return status;
+    __try {
+        static const PCSTR names[]={"mxc.lvl","mmcx.lvl"};
+        for(ULONG n=0;n<2;n++) {
+            ULONG i=enable?n:1-n,address=0,aux=0,length=0;
+            GPU_MULTIMEDIA_RAIL *rail=g->MultimediaRails+i;
+            if(!enable && !(rail->Owners&owner))continue;
+            status=GpuDb(g,names[i],&address,&aux,&length);
+            if(!NT_SUCCESS(status))break;
+            if(((address>>16)&15u)!=3 || !length || (length&1) || length>64) {
+                status=STATUS_DEVICE_CONFIGURATION_ERROR;break;
+            }
+            ULONG minimum=MAXULONG;
+            for(ULONG j=0;j<length/2;j++)if(Half(g,aux+j*2)>=256){minimum=j;break;}
+            if(minimum==MAXULONG){status=STATUS_NOT_SUPPORTED;break;}
+            if(rail->Saved && rail->Address!=address){status=STATUS_DEVICE_CONFIGURATION_ERROR;break;}
+            rail->Address=address;
+            status=(NTSTATUS)GpuMultimediaRailChange(rail,owner,enable,minimum,g,MultimediaTransfer);
+            if(!NT_SUCCESS(status))break;
+        }
+    } __finally {
+        NTSTATUS released=PlatformLockRelease(&guard);
+        if(NT_SUCCESS(status) && !NT_SUCCESS(released))status=released;
+    }
+    return status;
+}
 static const ULONG Clocks[]={0x9004,0x9008,0x9064,0x90CC,0x93A4,0x93A8,0x93E8,0x90BC,0x90E4,0x90E8,0x90D4,0x7000};
 static NTSTATUS Rcg(PUCHAR cc,ULONG command,ULONG cfg) {
     GpuWrite(cc,command+4,cfg);GpuWrite(cc,command,GpuRead(cc,command)|1);

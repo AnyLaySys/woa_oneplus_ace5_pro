@@ -77,7 +77,7 @@ static BOOLEAN CamIspNv12Output(CAM_ISP_NV12_OUTPUT *layout,ULONG width,ULONG he
    flat luma. Real-input image diagnostics cannot pass on a constant plane.
    Variance alone still does not establish a recognizable scene. */
 static inline BOOLEAN CamIspFdSignalValid(ULONG profile,ULONG minimum,ULONG maximum) {
-    if(profile>32||minimum>maximum||maximum>255)return FALSE;
+    if(profile>33||minimum>maximum||maximum>255)return FALSE;
     if(profile==4||profile==5||profile==6||profile==12||
        (profile>=17&&profile<=21)||profile==24||profile==25||profile==26||profile==28||profile==29)return TRUE;
     return minimum<maximum;

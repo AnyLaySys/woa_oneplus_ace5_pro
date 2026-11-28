@@ -22,11 +22,12 @@ static BOOLEAN CamIspFdBuildMode(QCAM_ISP_FD_STATE *state,ULONG width,ULONG heig
     BOOLEAN half=profile==1,exact=profile==2;
     ULONG outWidth=exact?1024:QCAM_ISP_FD_WIDTH,outHeight=exact?768:QCAM_ISP_FD_HEIGHT;
     if(!state||!CamIspRaw10Input(&input,0,0,0,0,width,height)||
-       profile>32||((exact||profile>=7)&&(width!=4096||height!=3072))||
+       profile>33||((exact||profile>=7)&&(width!=4096||height!=3072))||
        !(((profile>=17&&profile<=21)||profile==24||profile==25)?CamIspPixelLumaDiagnostic(&pixel,width,height,profile>=24?profile-19:profile-17):(profile==13||profile==16||profile==23)?CamIspPixelBds2Reference(&pixel):profile==6?CamIspPixelCstBiasDiagnostic(&pixel,width,height):profile==5?CamIspPixelChromaDiagnostic(&pixel,width,height):profile==4?CamIspPixelConstant(&pixel,width,height):half?CamIspPixelReference(&pixel,width>>1,height>>1):
            CamIspPixelReferenceOutput(&pixel,width,height,outWidth,outHeight,!exact))||
        !(profile==3?CamIspFdPlanPacked(&bus,outWidth,outHeight,address,capacity,1):
            CamIspFdPlan(&bus,outWidth,outHeight,address,capacity)))return FALSE;
+    if(profile==33&&!CamIspPixelMainBlacklevelReference(&pixel))return FALSE;
     RtlZeroMemory(state,sizeof(*state));state->Size=sizeof(*state);state->Abi=QCAM_ABI;
     state->Width=outWidth;state->Height=outHeight;
     state->Stride=bus.Output.Stride;state->ImageBytes=bus.Output.Bytes;state->Address=address;
@@ -92,14 +93,14 @@ static BOOLEAN CamIspFdBuildMode(QCAM_ISP_FD_STATE *state,ULONG width,ULONG heig
 }
 
 static inline BOOLEAN CamIspFdValidPlan(const QCAM_ISP_FD_STATE *state) {
-    return state&&state->Profile<=32&&state->Count==QCAM_ISP_FD_PROFILE_REG_COUNT(state->Profile);
+    return state&&state->Profile<=33&&state->Count==QCAM_ISP_FD_PROFILE_REG_COUNT(state->Profile);
 }
 
 /* Load only the bank inactive before FD configuration. Before[] retains
    the original selection until stop/drain restores it; the overwritten
    inactive LUT is never silently substituted for the original active one. */
 static inline BOOLEAN CamIspFdGammaBank(const QCAM_ISP_FD_STATE *state,ULONG *bank) {
-    if(!bank||!CamIspFdValidPlan(state)||(state->Profile!=8&&(state->Profile<15||state->Profile>32))||(state->Stage&3)!=3)return FALSE;
+    if(!bank||!CamIspFdValidPlan(state)||(state->Profile!=8&&(state->Profile<15||state->Profile>33))||(state->Stage&3)!=3)return FALSE;
     ULONG before[3]={0},found=0;
     for(ULONG i=0;i<state->Count;i++)if(state->Region[i]==CamTfe&&state->Offset[i]>=0x6b58&&state->Offset[i]<=0x6b60) {
         ULONG n=(state->Offset[i]-0x6b58)/4;

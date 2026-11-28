@@ -60,8 +60,7 @@ NTSTATUS NpuQueueExecution(NPU_CLIENT *s, const QCOM_NPU_PACKET *q, ULONG input,
         call->Packet = ExAllocatePool2(POOL_FLAG_NON_PAGED, input, NPU_TAG);
         if (!call->Packet) return STATUS_INSUFFICIENT_RESOURCES;
         RtlCopyMemory(call->Packet, q, input); call->Bytes = input; call->Owner = s->Pid;
-        PIRP irp = WdfRequestWdmGetIrp(request);
-        call->Thread = irp->Tail.Overlay.Thread ? HandleToUlong(PsGetThreadId(irp->Tail.Overlay.Thread)) : 0;
+        call->Thread = NpuRequestThreadId(request);
         call->Token = (++n->Sequence << 16) | 0xe0 | i; call->State = 1;
         *ticket = (QCOM_NPU_TICKET){1, 0, call->Token}; return STATUS_SUCCESS;
     }
@@ -70,11 +69,8 @@ NTSTATUS NpuQueueExecution(NPU_CLIENT *s, const QCOM_NPU_PACKET *q, ULONG input,
 typedef struct { ULONG Offset, Length, ReadOffset, WriteOffset; } NPU_QUEUE_RANGE;
 typedef struct { ULONG Version, Error, Flags; NPU_QUEUE_RANGE Request, Response; ULONG Count; } NPU_QUEUE_HEADER;
 static NPU_ALLOCATION *SharedAllocation(NPU_CLIENT *s, ULONG id) {
-    for (ULONG i = 0; i < NPU_ALLOCATIONS; i++) {
-        NPU_ALLOCATION *a = &s->Allocations[i];
-        if (a->Id == id && a->Buffer && !a->Detached && a->Flags == QCOM_NPU_SHARED && a->Owner && HandleToUlong(PsGetProcessId(a->Owner)) == s->Pid) return a;
-    }
-    return NULL;
+    NPU_ALLOCATION *a = NpuAllocation(s, id);
+    return a && a->Flags == QCOM_NPU_SHARED && a->Owner && HandleToUlong(PsGetProcessId(a->Owner)) == s->Pid ? a : NULL;
 }
 static BOOLEAN QueueRange(ULONG offset, ULONG bytes, ULONG capacity) {
     return offset >= 64 && offset <= capacity && bytes <= capacity - offset;
@@ -161,8 +157,7 @@ NTSTATUS NpuQueueDispatch(NPU_CLIENT *s, const QCOM_NPU_QUEUE_DISPATCH *q, WDFRE
         NTSTATUS status = CaptureBuffers(s, call, q, queue, &header);
         if (!NT_SUCCESS(status)) { ExFreePoolWithTag(call->Packet, NPU_TAG); RtlZeroMemory(call, sizeof(*call)); return status; }
         RtlCopyMemory(call->Packet, q, sizeof(*q)); call->Bytes = sizeof(*q); call->Owner = s->Pid;
-        PIRP irp = WdfRequestWdmGetIrp(request);
-        call->Thread = irp->Tail.Overlay.Thread ? HandleToUlong(PsGetThreadId(irp->Tail.Overlay.Thread)) : 0;
+        call->Thread = NpuRequestThreadId(request);
         call->Kind = 2; call->WriteOffset = header.Request.WriteOffset; call->ResponseOffset = header.Response.WriteOffset + 4;
         call->Token = (++n->Sequence << 16) | 0xe0 | i; call->State = 1;
         *ticket = (QCOM_NPU_TICKET){1, 0, call->Token}; return STATUS_SUCCESS;

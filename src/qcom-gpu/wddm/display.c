@@ -26,14 +26,30 @@ static ULONG SignalRate(A830_ADAPTER *a,const D3DKMDT_VIDEO_SIGNAL_INFO *s) {
     }
     return 0;
 }
+static BOOLEAN SourceModeValid(const A830_ADAPTER *a,const D3DKMDT_VIDPN_SOURCE_MODE *m) {
+    if(m->Type!=D3DKMDT_RMT_GRAPHICS)return FALSE;
+    const D3DKMDT_GRAPHICS_RENDERING_FORMAT *g=&m->Format.Graphics;
+    /* Virtual desktop resolution is handled by DWM. The allocation presented
+       to this physical source must still cover the native panel scanout. */
+    return g->PrimSurfSize.cx==a->DisplayInfo.Width && g->PrimSurfSize.cy==a->DisplayInfo.Height &&
+        g->VisibleRegionSize.cx==g->PrimSurfSize.cx && g->VisibleRegionSize.cy==g->PrimSurfSize.cy &&
+        g->Stride>=a->DisplayInfo.Width*4 && g->Stride<=A830_SEGMENT_BYTES/a->DisplayInfo.Height &&
+        A830ScanoutFormat(g->PixelFormat);
+}
+static BOOLEAN PathValid(const D3DKMDT_VIDPN_PRESENT_PATH *path,BOOLEAN unpinned) {
+    return !path->VidPnSourceId && !path->VidPnTargetId &&
+        (A830RotationSupported(path->ContentTransformation.Rotation) ||
+         (unpinned && path->ContentTransformation.Rotation==D3DKMDT_VPPR_UNPINNED)) &&
+        (path->ContentTransformation.Scaling==D3DKMDT_VPPS_IDENTITY ||
+         (unpinned && path->ContentTransformation.Scaling==D3DKMDT_VPPS_UNPINNED));
+}
 static NTSTATUS SourceModes(A830_ADAPTER *a,D3DKMDT_HVIDPN h,const DXGK_VIDPN_INTERFACE *v) {
     D3DKMDT_HVIDPNSOURCEMODESET set;const DXGK_VIDPNSOURCEMODESET_INTERFACE *i;
     NTSTATUS acquired=v->pfnAcquireSourceModeSet(h,0,&set,&i);
     if(NT_SUCCESS(acquired)) {
         const D3DKMDT_VIDPN_SOURCE_MODE *pinned=NULL;NTSTATUS pinnedStatus=i->pfnAcquirePinnedModeInfo(set,&pinned);
         if(NT_SUCCESS(pinnedStatus) && pinned) {
-            BOOLEAN valid=pinned->Type==D3DKMDT_RMT_GRAPHICS && pinned->Format.Graphics.PrimSurfSize.cx==a->DisplayInfo.Width &&
-                pinned->Format.Graphics.PrimSurfSize.cy==a->DisplayInfo.Height && A830ScanoutFormat(pinned->Format.Graphics.PixelFormat);
+            BOOLEAN valid=SourceModeValid(a,pinned);
             i->pfnReleaseModeInfo(set,pinned);v->pfnReleaseSourceModeSet(h,set);
             return valid?STATUS_SUCCESS:STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_SOURCE_MODE;
         }
@@ -85,9 +101,7 @@ static NTSTATUS APIENTRY Supported(HANDLE adapter,DXGKARG_ISSUPPORTEDVIDPN *p) {
     if(!count){p->IsVidPnSupported=TRUE;return STATUS_SUCCESS;}if(count!=1)return STATUS_SUCCESS;
     const D3DKMDT_VIDPN_PRESENT_PATH *path;
     status=t->pfnAcquireFirstPathInfo(topology,&path);if(!NT_SUCCESS(status))return status;
-    p->IsVidPnSupported=!path->VidPnSourceId && !path->VidPnTargetId &&
-        (A830RotationSupported(path->ContentTransformation.Rotation) || path->ContentTransformation.Rotation==D3DKMDT_VPPR_UNPINNED) &&
-        (path->ContentTransformation.Scaling==D3DKMDT_VPPS_IDENTITY || path->ContentTransformation.Scaling==D3DKMDT_VPPS_UNPINNED);
+    p->IsVidPnSupported=PathValid(path,TRUE);
 
     t->pfnReleasePathInfo(topology,path);return STATUS_SUCCESS;
 }
@@ -123,9 +137,10 @@ static NTSTATUS APIENTRY Commit(HANDLE adapter,const DXGKARG_COMMITVIDPN *p) {
     SIZE_T count=0;status=t->pfnGetNumPaths(topology,&count);if(!NT_SUCCESS(status))return status;
 
     if(!count){a->Visible=FALSE;a->ScanoutPitch=0;return STATUS_SUCCESS;}
+    if(count!=1)return STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED;
     const D3DKMDT_VIDPN_PRESENT_PATH *path=NULL;
     status=t->pfnAcquireFirstPathInfo(topology,&path);if(!NT_SUCCESS(status))return status;
-    BOOLEAN valid=A830RotationSupported(path->ContentTransformation.Rotation);
+    BOOLEAN valid=PathValid(path,FALSE);
 
     t->pfnReleasePathInfo(topology,path);
     if(!valid)return STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED;
@@ -134,8 +149,7 @@ static NTSTATUS APIENTRY Commit(HANDLE adapter,const DXGKARG_COMMITVIDPN *p) {
     const D3DKMDT_VIDPN_SOURCE_MODE *m=NULL;status=i->pfnAcquirePinnedModeInfo(set,&m);
     if(status==STATUS_GRAPHICS_MODE_NOT_PINNED && !m)status=STATUS_SUCCESS;
     if(NT_SUCCESS(status) && m) {
-        if(m->Type!=D3DKMDT_RMT_GRAPHICS || m->Format.Graphics.PrimSurfSize.cx!=a->DisplayInfo.Width ||
-            m->Format.Graphics.PrimSurfSize.cy!=a->DisplayInfo.Height || !A830ScanoutFormat(m->Format.Graphics.PixelFormat))
+        if(!SourceModeValid(a,m))
             status=STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_SOURCE_MODE;
         if(NT_SUCCESS(status))a->SourceFormat=m->Format.Graphics.PixelFormat;
         i->pfnReleaseModeInfo(set,m);
@@ -183,7 +197,7 @@ static NTSTATUS APIENTRY Timings(HANDLE adapter,DXGKARG_SETTIMINGSFROMVIDPN *p) 
 static NTSTATUS APIENTRY Colorimetry(HANDLE adapter,UINT target,DXGK_COLORIMETRY color) {
     UNREFERENCED_PARAMETER(adapter);UNREFERENCED_PARAMETER(color);return target?STATUS_INVALID_PARAMETER:STATUS_SUCCESS;
 }
-static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDRESS *p) {
+static NTSTATUS SetAddress(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDRESS *p,ULONGLONG presentId) {
     A830_ADAPTER *a=adapter;
 
     if(p->VidPnSourceId || !a->FramebufferSize || !a->Memory.Segment.Cpu)return STATUS_INVALID_PARAMETER;
@@ -201,16 +215,16 @@ static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDR
         if(A830DpuEnabled(a)) {
             if(QcomGpuScanoutBusy(a) || !allocation->Buffer.Contiguous || allocation->Buffer.Physical>MAXULONG ||
                bytes-1>MAXULONG-allocation->Buffer.Physical)
-                return QcomGpuScanoutQueue(a,allocation,0,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
+                return QcomGpuScanoutQueue(a,allocation,0,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart,presentId);
             /* Bridge teardown sees either this transient pin or the published
                pending/active physical address; there is no unowned window. */
             InterlockedIncrement(&allocation->ScanoutReferences);
-            NTSTATUS status=A830DpuQueue(a,allocation->Buffer.Physical,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart,format,a->HdrEnabled!=0);
+            NTSTATUS status=A830DpuQueue(a,allocation->Buffer.Physical,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart,format,a->HdrEnabled!=0,presentId);
             InterlockedDecrement(&allocation->ScanoutReferences);return status;
         }
         if(QcomGpuScanoutEnabled(a)) {
             a->ScanoutPitch=pitch;
-            return QcomGpuScanoutQueue(a,allocation,0,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
+            return QcomGpuScanoutQueue(a,allocation,0,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart,presentId);
         }
         return STATUS_DEVICE_NOT_READY;
     }
@@ -219,14 +233,17 @@ static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDR
     if(A830DpuEnabled(a)) {
         ULONGLONG physical=a->Memory.Segment.Physical+offset;
         if(QcomGpuScanoutBusy(a) || physical>MAXULONG || bytes-1>MAXULONG-physical)
-            return QcomGpuScanoutQueue(a,NULL,offset,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
-        return A830DpuQueue(a,physical,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart,format,a->HdrEnabled!=0);
+            return QcomGpuScanoutQueue(a,NULL,offset,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart,presentId);
+        return A830DpuQueue(a,physical,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart,format,a->HdrEnabled!=0,presentId);
     }
     if(QcomGpuScanoutEnabled(a)) {
         a->ScanoutPitch=pitch;
-        return QcomGpuScanoutQueue(a,NULL,offset,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart);
+        return QcomGpuScanoutQueue(a,NULL,offset,pitch,(ULONGLONG)p->PrimaryAddress.QuadPart,presentId);
     }
     return STATUS_DEVICE_NOT_READY;
+}
+static NTSTATUS APIENTRY Address(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDRESS *p) {
+    return SetAddress(adapter,p,0);
 }
 static NTSTATUS APIENTRY OverlayAddress(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEADDRESSWITHMULTIPLANEOVERLAY *p) {
     if(p->VidPnSourceId || p->PlaneCount>1 || (p->PlaneCount && (!p->pPlanes || p->pPlanes[0].LayerIndex)))return STATUS_INVALID_PARAMETER;
@@ -250,13 +267,25 @@ static NTSTATUS APIENTRY OverlayAddress3(HANDLE adapter,DXGKARG_SETVIDPNSOURCEAD
         (p->PlaneCount && (!p->ppPlanes || !p->ppPlanes[0] || p->ppPlanes[0]->LayerIndex)))return STATUS_INVALID_PARAMETER;
     if(!p->PlaneCount)return STATUS_SUCCESS;
     DXGK_MULTIPLANE_OVERLAY_PLANE3 *plane=p->ppPlanes[0];plane->OutputFlags.Value=0;
-    if(!plane->InputFlags.Enabled)return STATUS_SUCCESS;
+    if(!plane->InputFlags.Enabled) {
+        A830_ADAPTER *a=adapter;
+        /* Stop scanning Windows' primary before acknowledging its disable.
+           The inherited firmware framebuffer is permanently owned by UEFI. */
+        NTSTATUS status=QcomGpuScanoutEnabled(a)?QcomGpuScanoutQueueFirmware(a,plane->PresentId):
+            A830DpuQueue(a,(ULONGLONG)a->DisplayInfo.PhysicAddress.QuadPart,a->DisplayInfo.Pitch,
+                0,a->DisplayInfo.ColorFormat,FALSE,plane->PresentId);
+        if(NT_SUCCESS(status))InterlockedExchange(&a->VsyncNotificationType,DXGK_INTERRUPT_CRTC_VSYNC_WITH_MULTIPLANE_OVERLAY2);
+        return status;
+    }
     if(!plane->ContextCount || !plane->ppContextData || !plane->ppContextData[0])return STATUS_INVALID_PARAMETER;
     const DXGK_PRIMARYCONTEXTDATA *primary=plane->ppContextData[0];
     DXGKARG_SETVIDPNSOURCEADDRESS address={0};address.PrimarySegment=primary->SegmentId;
     address.PrimaryAddress=primary->SegmentAddress;address.hAllocation=primary->hAllocation;
     address.Flags.FlipImmediate=plane->InputFlags.FlipImmediate;address.Flags.FlipOnNextVSync=plane->InputFlags.FlipOnNextVSync;
-    return Address(adapter,&address);
+    NTSTATUS status=SetAddress(adapter,&address,plane->PresentId);
+    if(NT_SUCCESS(status))InterlockedExchange(&((A830_ADAPTER *)adapter)->VsyncNotificationType,
+        DXGK_INTERRUPT_CRTC_VSYNC_WITH_MULTIPLANE_OVERLAY2);
+    return status;
 }
 static NTSTATUS APIENTRY OverlayCaps(HANDLE adapter,DXGKARG_GETMULTIPLANEOVERLAYCAPS *p) {
     UNREFERENCED_PARAMETER(adapter);if(p->VidPnSourceId)return STATUS_INVALID_PARAMETER;
@@ -280,8 +309,7 @@ static NTSTATUS APIENTRY Visible(HANDLE adapter,const DXGKARG_SETVIDPNSOURCEVISI
 static NTSTATUS APIENTRY Update(HANDLE adapter,const DXGKARG_UPDATEACTIVEVIDPNPRESENTPATH *p) {
     UNREFERENCED_PARAMETER(adapter);
     if(p->VidPnPresentPathInfo.VidPnSourceId || p->VidPnPresentPathInfo.VidPnTargetId)return STATUS_INVALID_PARAMETER;
-    if(!A830RotationSupported(p->VidPnPresentPathInfo.ContentTransformation.Rotation) ||
-        p->VidPnPresentPathInfo.ContentTransformation.Scaling!=D3DKMDT_VPPS_IDENTITY)return STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED;
+    if(!PathValid(&p->VidPnPresentPathInfo,FALSE))return STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED;
 
     return STATUS_SUCCESS;
 }

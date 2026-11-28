@@ -12,6 +12,7 @@
 typedef struct {
     A830_ALLOCATION *Allocation;
     ULONGLONG Source,Address;
+    ULONGLONG PresentId;
     ULONG Size,Pitch,Format;
     BOOLEAN Valid,Hdr;
 } COPY_REQUEST;
@@ -25,11 +26,11 @@ typedef struct {
     COPY_REQUEST Queued,Active;
 } GPU_SCANOUT;
 typedef struct { A830_ADAPTER *Adapter;COPY_REQUEST Request;BOOLEAN Take,Release; } REQUEST_ACCESS;
-typedef struct { A830_ADAPTER *Adapter;GPU_BO *Frame;ULONGLONG Address;ULONG Format;BOOLEAN Hdr;NTSTATUS Status; } DPU_COPY_ACCESS;
+typedef struct { A830_ADAPTER *Adapter;GPU_BO *Frame;ULONGLONG Address;ULONG Format;BOOLEAN Hdr;NTSTATUS Status;ULONGLONG PresentId; } DPU_COPY_ACCESS;
 static BOOLEAN QueueCopiedFrame(PVOID context) {
     DPU_COPY_ACCESS *access=context;
     access->Status=A830DpuQueue(access->Adapter,access->Frame->Physical,
-        (access->Adapter->DisplayInfo.Width*4+255)&~255u,access->Address,access->Format,access->Hdr);
+        (access->Adapter->DisplayInfo.Width*4+255)&~255u,access->Address,access->Format,access->Hdr,access->PresentId);
     return TRUE;
 }
 static VOID DropRequest(COPY_REQUEST *r) {
@@ -56,11 +57,12 @@ static NTSTATUS SynchronizeRequest(REQUEST_ACCESS *access) {
     BOOLEAN result=FALSE;A830_ADAPTER *a=access->Adapter;
     return a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,AccessRequest,access,0,&result);
 }
-NTSTATUS QcomGpuScanoutQueue(PVOID context,PVOID allocation,ULONGLONG offset,ULONG pitch,ULONGLONG address) {
+NTSTATUS QcomGpuScanoutQueue(PVOID context,PVOID allocation,ULONGLONG offset,ULONG pitch,ULONGLONG address,ULONGLONG presentId) {
     A830_ADAPTER *a=context;A830_ALLOCATION *bo=allocation;
     if(!a->GpuScanout)return STATUS_DEVICE_NOT_READY;
     REQUEST_ACCESS access={0};access.Adapter=a;
     access.Request.Allocation=bo;access.Request.Pitch=pitch;access.Request.Address=address;access.Request.Valid=TRUE;
+    access.Request.PresentId=presentId;
     access.Request.Format=bo?bo->Resource.Format:a->SourceFormat;
     access.Request.Hdr=a->HdrEnabled!=0;
     if(bo && bo->Buffer.Mdl) {
@@ -74,6 +76,17 @@ NTSTATUS QcomGpuScanoutQueue(PVOID context,PVOID allocation,ULONGLONG offset,ULO
     NTSTATUS status=SynchronizeRequest(&access);
     if(!NT_SUCCESS(status))DropRequest(&access.Request);
     else A830WakeDisplay(a);
+    return status;
+}
+NTSTATUS QcomGpuScanoutQueueFirmware(PVOID context,ULONGLONG presentId) {
+    A830_ADAPTER *a=context;GPU_SCANOUT *s=a->GpuScanout;
+    if(!s || !s->Frame.Address || s->ByteOffset>=s->Frame.Size)return STATUS_DEVICE_NOT_READY;
+    REQUEST_ACCESS access={0};access.Adapter=a;
+    access.Request.Source=s->Frame.Address+s->ByteOffset;access.Request.Size=s->Frame.Size-s->ByteOffset;
+    access.Request.Pitch=a->DisplayInfo.Pitch;access.Request.Format=a->DisplayInfo.ColorFormat;
+    access.Request.PresentId=presentId;access.Request.Valid=TRUE;
+    NTSTATUS status=SynchronizeRequest(&access);
+    if(NT_SUCCESS(status))A830WakeDisplay(a);
     return status;
 }
 BOOLEAN QcomGpuScanoutStagingReady(PVOID context) {
@@ -191,13 +204,14 @@ NTSTATUS QcomGpuScanoutRetire(PVOID context) {
     if((ULONGLONG)*(volatile ULONG *)a->Hardware.Memory.Cpu<s->Fence)return STATUS_PENDING;
     if(A830DpuEnabled(a)) {
         GPU_BO *frame=s->Staging+s->StagingIndex;
-        DPU_COPY_ACCESS access={a,frame,s->Address,s->Format,s->Hdr,STATUS_UNSUCCESSFUL};BOOLEAN result=FALSE;
+        DPU_COPY_ACCESS access={a,frame,s->Address,s->Format,s->Hdr,STATUS_UNSUCCESSFUL,s->Active.PresentId};BOOLEAN result=FALSE;
         NTSTATUS status=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,QueueCopiedFrame,&access,0,&result);
         if(!NT_SUCCESS(status))return status;
         if(!NT_SUCCESS(access.Status))return access.Status;
         /* WDDM scanout address is acknowledged only by DPU's TE callback. */
     } else {
         InterlockedExchange64((volatile LONG64 *)&a->ScanoutAddress,(LONG64)s->Address);
+        InterlockedExchange64((volatile LONG64 *)&a->ScanoutPresentId,(LONG64)s->Active.PresentId);
 
     }
     s->Pending=FALSE;

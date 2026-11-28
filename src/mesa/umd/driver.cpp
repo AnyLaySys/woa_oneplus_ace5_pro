@@ -11,11 +11,13 @@ template<class T> static void device_functions(T *f) {
 }
 void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE,D3D10DDI_DEVICEFUNCS *f){device_functions(f);}
 void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE,D3D11_1DDI_DEVICEFUNCS *f){device_functions(f);d3d11_functions(f);}
-BOOL APIENTRY Flush(D3D10DDI_HDEVICE h,UINT){return flush(dev(h));}
-void APIENTRY Flush(D3D10DDI_HDEVICE h){flush(dev(h));}
+static void process(Device *d){if(d->amortized && !d->processing){d->processing=true;d->amortized(d->core);d->processing=false;}}
+BOOL APIENTRY Flush(D3D10DDI_HDEVICE h,UINT){Device *d=dev(h);BOOL result=flush(d);if(result)process(d);return result;}
+void APIENTRY Flush(D3D10DDI_HDEVICE h){Device *d=dev(h);if(flush(d))process(d);}
 void APIENTRY CheckFormatSupport(D3D10DDI_HDEVICE h,DXGI_FORMAT f,UINT *caps) {
  *caps=0;VkFormat vk=format(f);if(vk==VK_FORMAT_UNDEFINED){*caps=D3D10_DDI_FORMAT_SUPPORT_NOT_SUPPORTED;return;}
- if(f==DXGI_FORMAT_NV12){*caps=D3D11_1DDI_FORMAT_SUPPORT_VIDEO_PROCESSOR_INPUT|D3D11_1DDI_FORMAT_SUPPORT_VIDEO_PROCESSOR_OUTPUT|D3D10_DDI_FORMAT_SUPPORT_RENDERTARGET|D3D11_1DDI_FORMAT_SUPPORT_CAPTURE;return;}
+ if(f==DXGI_FORMAT_P010){*caps=D3D11_1DDI_FORMAT_SUPPORT_DECODER_OUTPUT|D3D11_1DDI_FORMAT_SUPPORT_VIDEO_PROCESSOR_INPUT|D3D10_DDI_FORMAT_SUPPORT_SHADER_SAMPLE;return;}
+ if(f==DXGI_FORMAT_NV12){*caps=D3D11_1DDI_FORMAT_SUPPORT_DECODER_OUTPUT|D3D11_1DDI_FORMAT_SUPPORT_VIDEO_PROCESSOR_INPUT|D3D11_1DDI_FORMAT_SUPPORT_VIDEO_PROCESSOR_OUTPUT|D3D10_DDI_FORMAT_SUPPORT_RENDERTARGET|D3D11_1DDI_FORMAT_SUPPORT_CAPTURE;return;}
  if(f==DXGI_FORMAT_B8G8R8A8_UNORM || f==DXGI_FORMAT_R8G8B8A8_UNORM)*caps|=D3D11_1DDI_FORMAT_SUPPORT_VIDEO_PROCESSOR_INPUT|D3D11_1DDI_FORMAT_SUPPORT_VIDEO_PROCESSOR_OUTPUT|D3D11_1DDI_FORMAT_SUPPORT_CAPTURE;
  Device *d=dev(h);VkFormatProperties properties{};d->vk.GetPhysicalDeviceFormatProperties(d->physical,vk,&properties);
  if(properties.optimalTilingFeatures&VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)*caps|=D3D10_DDI_FORMAT_SUPPORT_RENDERTARGET;
@@ -29,6 +31,7 @@ HRESULT APIENTRY CreateDevice(D3D10DDI_HADAPTER ha,D3D10DDIARG_CREATEDEVICE *p) 
  if(p->Interface!=D3D10_0_DDI_INTERFACE_VERSION && p->Interface!=D3D10_0_x_DDI_INTERFACE_VERSION && p->Interface!=D3D10_0_7_DDI_INTERFACE_VERSION && p->Interface!=D3D11_1_DDI_INTERFACE_VERSION)return E_NOINTERFACE;
  auto *a=object<Adapter>(ha);auto *d=new(p->hDrvDevice.pDrvPrivate) Device{};
  d->runtime=p->hRTDevice.handle;d->adapter=a->runtime;d->core=p->hRTCoreLayer;d->callbacks=*p->pKTCallbacks;d->errors=*p->pUMCallbacks;d->present=p->DXGIBaseDDI.pDXGIBaseCallbacks;
+ if(p->Interface==D3D11_1_DDI_INTERFACE_VERSION)d->amortized=p->p11UMCallbacks->pfnPerformAmortizedProcessingCb;
  InitializeCriticalSection(&d->lock);
  if(!initialize(d)){HRESULT hr=FAILED(d->failure)?d->failure:E_FAIL;destroy(d);d->~Device();return hr;}
  if(p->Interface==D3D11_1_DDI_INTERFACE_VERSION) {

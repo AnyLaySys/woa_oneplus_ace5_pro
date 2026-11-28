@@ -17,9 +17,7 @@
 
 using namespace Microsoft::WRL;
 static const CLSID EncoderClass={0xa9d65645,0x996b,0x4af7,{0x8e,0x31,0x6e,0x1d,0xcd,0x74,0xa5,0x29}};
-static const wchar_t EncoderName[]=L"Qualcomm Iris H.264 Encoder";
 static std::atomic<long> Objects,Locks;
-static HMODULE EncoderModule;
 static HRESULT Kernel(NTSTATUS status){return status<0?HRESULT_FROM_NT(status):S_OK;}
 static HRESULT Io(HANDLE handle,DWORD code,const void *input,DWORD size,void *output=nullptr,DWORD capacity=0) {
  DWORD used=0;return DeviceIoControl(handle,code,const_cast<void *>(input),size,output,capacity,&used,nullptr)?S_OK:HRESULT_FROM_WIN32(GetLastError());
@@ -30,7 +28,7 @@ static GPU_VIDEO_CONFIG Config(IMFMediaType *type) {
  c.Bitrate=MFGetAttributeUINT32(type,MF_MT_AVG_BITRATE,3000000);
  UINT32 profile=MFGetAttributeUINT32(type,MF_MT_MPEG2_PROFILE,eAVEncH264VProfile_Base),level=MFGetAttributeUINT32(type,MF_MT_MPEG2_LEVEL,42);
  c.Profile=profile==eAVEncH264VProfile_Base?0:profile==eAVEncH264VProfile_ConstrainedBase?1:profile==eAVEncH264VProfile_Main?2:profile==eAVEncH264VProfile_High?4:3;
- const UINT32 levels[]={30,31,32,40,41,42};for(UINT32 i=0;i<6;i++)if(levels[i]==level)c.Level=i+8;
+ const UINT32 levels[]={30,31,32,40,41,42,50,51};for(UINT32 i=0;i<8;i++)if(levels[i]==level)c.Level=i+8;
  return c;
 }
 static HRESULT Type(IMFMediaType *type,bool output) {
@@ -38,10 +36,9 @@ static HRESULT Type(IMFMediaType *type,bool output) {
  GUID major{},subtype{};UINT32 w=0,h=0,n=0,d=0;
  if(FAILED(type->GetGUID(MF_MT_MAJOR_TYPE,&major)) || major!=MFMediaType_Video ||
     FAILED(type->GetGUID(MF_MT_SUBTYPE,&subtype)) ||
-    (output?subtype!=MFVideoFormat_H264:subtype!=MFVideoFormat_NV12 && subtype!=MFVideoFormat_ARGB32))return MF_E_INVALIDMEDIATYPE;
+    (output?subtype!=MFVideoFormat_H264:subtype!=MFVideoFormat_NV12))return MF_E_INVALIDMEDIATYPE;
  if(FAILED(MFGetAttributeSize(type,MF_MT_FRAME_SIZE,&w,&h)) || !w || !h || ((w|h)&1) || w>4096 || h>4096)return MF_E_INVALIDMEDIATYPE;
- if(output && (w<128 || h<128 || w>1920 || h>1920 || w*h>1920*1080))return MF_E_INVALIDMEDIATYPE;
- if(FAILED(MFGetAttributeRatio(type,MF_MT_FRAME_RATE,&n,&d)) || !n || !d || (UINT64)n>60ULL*d)return MF_E_INVALIDMEDIATYPE;
+ if(output && (FAILED(MFGetAttributeRatio(type,MF_MT_FRAME_RATE,&n,&d)) || !n || !d || (UINT64)n>60ULL*d))return MF_E_INVALIDMEDIATYPE;
  if(output){auto config=Config(type);if(!GpuVideoConfigValid(&config))return MF_E_INVALIDMEDIATYPE;}
  return S_OK;
 }
@@ -141,7 +138,7 @@ class Encoder final:public RuntimeClass<RuntimeClassFlags<ClassicCom>,IMFTransfo
   UINT32 n=0,d=0,iw=0,ih=0;
   MFGetAttributeRatio(output_.Get(),MF_MT_FRAME_RATE,&n,&d);config_=Config(output_.Get());config_.Bitrate=bitrate_;config_.Gop=gop_;
   if(!GpuVideoConfigValid(&config_))return MF_E_INVALIDMEDIATYPE;
-  try{data_.resize(4*1024*1024);}catch(const std::bad_alloc &){return E_OUTOFMEMORY;}
+  try{data_.resize(sizeof(GPU_VIDEO_OUTPUT)+GpuVideoOutputSize(config_.Width,config_.Height));}catch(const std::bad_alloc &){return E_OUTOFMEMORY;}
   MFGetAttributeSize(input_.Get(),MF_MT_FRAME_SIZE,&iw,&ih);
   HRESULT hr=manager_->OpenDeviceHandle(&deviceHandle_);if(FAILED(hr))return hr;
   hr=manager_->LockDevice(deviceHandle_,IID_PPV_ARGS(&device_),TRUE);if(FAILED(hr))return hr;
@@ -210,6 +207,8 @@ public:
  HRESULT Initialize() {
   HRESULT hr=MFCreateAttributes(&attributes_,8);if(FAILED(hr))return hr;
   attributes_->SetUINT32(MF_TRANSFORM_ASYNC,TRUE);attributes_->SetUINT32(MF_SA_D3D11_AWARE,TRUE);attributes_->SetUINT32(MFT_SUPPORT_DYNAMIC_FORMAT_CHANGE,TRUE);attributes_->SetString(MFT_ENUM_HARDWARE_URL_Attribute,L"ACPI\\HMRG0830");
+  // Windows uses this limit to filter the receiver's codec profiles. Omitting it bypasses that filter.
+  attributes_->SetUINT32(MF_VIDEO_MAX_MB_PER_SEC,GpuVideoLimits[5][1]);
   hr=MFCreateAttributes(&inputAttributes_,4);if(FAILED(hr))return hr;
   hr=MFCreateAttributes(&outputAttributes_,4);if(FAILED(hr))return hr;
   hr=MFCreateEventQueue(&events_);if(FAILED(hr))return hr;
@@ -229,11 +228,11 @@ public:
  STDMETHODIMP GetInputAvailableType(DWORD id,DWORD index,IMFMediaType **out) override {return Available(id,index,false,out);}
  STDMETHODIMP GetOutputAvailableType(DWORD id,DWORD index,IMFMediaType **out) override {return Available(id,index,true,out);}
  HRESULT Available(DWORD id,DWORD index,bool output,IMFMediaType **out) {
-  if(id)return MF_E_INVALIDSTREAMNUMBER;if(!out)return E_POINTER;if(index>=(output?1u:2u))return MF_E_NO_MORE_TYPES;
+  if(id)return MF_E_INVALIDSTREAMNUMBER;if(!out)return E_POINTER;if(index>=(output?2u:1u))return MF_E_NO_MORE_TYPES;
   ComPtr<IMFMediaType> type;HRESULT hr=MFCreateMediaType(&type);if(FAILED(hr))return hr;
-  type->SetGUID(MF_MT_MAJOR_TYPE,MFMediaType_Video);type->SetGUID(MF_MT_SUBTYPE,output?MFVideoFormat_H264:index?MFVideoFormat_ARGB32:MFVideoFormat_NV12);
+  type->SetGUID(MF_MT_MAJOR_TYPE,MFMediaType_Video);type->SetGUID(MF_MT_SUBTYPE,output?MFVideoFormat_H264:MFVideoFormat_NV12);
   type->SetUINT32(MF_MT_INTERLACE_MODE,MFVideoInterlace_Progressive);
-  if(output){type->SetUINT32(MF_MT_MPEG2_PROFILE,eAVEncH264VProfile_Base);type->SetUINT32(MF_MT_MPEG2_LEVEL,42);type->SetUINT32(MF_MT_AVG_BITRATE,bitrate_);}
+  if(output){type->SetUINT32(MF_MT_MPEG2_PROFILE,eAVEncH264VProfile_Base);type->SetUINT32(MF_MT_MPEG2_LEVEL,index?51:42);type->SetUINT32(MF_MT_AVG_BITRATE,bitrate_);}
   *out=type.Detach();return S_OK;
  }
  STDMETHODIMP SetInputType(DWORD id,IMFMediaType *type,DWORD flags) override {return SetType(id,type,flags,false);}
@@ -330,37 +329,6 @@ public:
  STDMETHODIMP CreateInstance(IUnknown *outer,REFIID iid,void **out) override {if(outer)return CLASS_E_NOAGGREGATION;if(!out)return E_POINTER;*out=nullptr;auto encoder=Make<Encoder>();if(!encoder)return E_OUTOFMEMORY;HRESULT hr=encoder->Initialize();return FAILED(hr)?hr:encoder->QueryInterface(iid,out);}
  STDMETHODIMP LockServer(BOOL lock) override {if(lock)Locks++;else Locks--;return S_OK;}
 };
-extern "C" BOOL WINAPI DllMain(HINSTANCE module,DWORD reason,void *){if(reason==DLL_PROCESS_ATTACH){EncoderModule=module;DisableThreadLibraryCalls(module);}return TRUE;}
+extern "C" BOOL WINAPI DllMain(HINSTANCE module,DWORD reason,void *){if(reason==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(module);}return TRUE;}
 extern "C" HRESULT WINAPI DllCanUnloadNow(){return Objects==0&&Locks==0?S_OK:S_FALSE;}
 extern "C" HRESULT WINAPI DllGetClassObject(REFCLSID clsid,REFIID iid,void **out){if(clsid!=EncoderClass)return CLASS_E_CLASSNOTAVAILABLE;auto factory=Make<Factory>();return factory?factory->QueryInterface(iid,out):E_OUTOFMEMORY;}
-static HRESULT Registration(bool add) {
- wchar_t clsid[40];StringFromGUID2(EncoderClass,clsid,40);std::wstring key=L"Software\\Classes\\CLSID\\";key+=clsid;
- if(!add){MFTUnregister(EncoderClass);LSTATUS status=RegDeleteTreeW(HKEY_LOCAL_MACHINE,key.c_str());return status==ERROR_FILE_NOT_FOUND?S_OK:HRESULT_FROM_WIN32(status);}
- wchar_t path[MAX_PATH];DWORD length=GetModuleFileNameW(EncoderModule,path,MAX_PATH);if(!length||length>=MAX_PATH)return E_FAIL;
- std::wstring file(path);file.resize(file.find_last_of(L"\\")+1);file+=L"a830_encoder.dll";
- key+=L"\\InprocServer32";HKEY registry=nullptr;LSTATUS status=RegCreateKeyExW(HKEY_LOCAL_MACHINE,key.c_str(),0,nullptr,0,KEY_WRITE,nullptr,&registry,nullptr);
- if(status!=ERROR_SUCCESS)return HRESULT_FROM_WIN32(status);
- status=RegSetValueExW(registry,nullptr,0,REG_SZ,(const BYTE *)file.c_str(),(DWORD)((file.size()+1)*sizeof(wchar_t)));
- if(status==ERROR_SUCCESS)status=RegSetValueExW(registry,L"ThreadingModel",0,REG_SZ,(const BYTE *)L"Both",10);RegCloseKey(registry);if(status!=ERROR_SUCCESS)return HRESULT_FROM_WIN32(status);
- HRESULT hr=MFStartup(MF_VERSION);if(FAILED(hr))return hr;
- ComPtr<IMFAttributes> attributes;hr=MFCreateAttributes(&attributes,4);
- if(SUCCEEDED(hr)) {
-  ComPtr<IDXGIFactory1> factory;hr=CreateDXGIFactory1(IID_PPV_ARGS(&factory));
-  if(SUCCEEDED(hr)) {
-   hr=MF_E_NOT_FOUND;
-   for(UINT i=0;;i++) {
-    ComPtr<IDXGIAdapter1> adapter;if(factory->EnumAdapters1(i,&adapter)==DXGI_ERROR_NOT_FOUND)break;
-    DXGI_ADAPTER_DESC1 desc{};if(FAILED(adapter->GetDesc1(&desc)) || (desc.Flags&DXGI_ADAPTER_FLAG_SOFTWARE) || !wcsstr(desc.Description,L"Adreno"))continue;
-    wchar_t vendor[16];swprintf_s(vendor,L"VEN_%04X",desc.VendorId);
-    attributes->SetString(MFT_ENUM_HARDWARE_VENDOR_ID_Attribute,vendor);
-    hr=S_OK;break;
-   }
-  }
-  attributes->SetString(MFT_ENUM_HARDWARE_URL_Attribute,L"ACPI\\HMRG0830");attributes->SetUINT32(MF_TRANSFORM_ASYNC,TRUE);attributes->SetUINT32(MF_SA_D3D11_AWARE,TRUE);attributes->SetUINT32(MFT_SUPPORT_DYNAMIC_FORMAT_CHANGE,TRUE);
-  MFT_REGISTER_TYPE_INFO input[]={{MFMediaType_Video,MFVideoFormat_NV12},{MFMediaType_Video,MFVideoFormat_ARGB32}},output={MFMediaType_Video,MFVideoFormat_H264};
-  if(SUCCEEDED(hr))hr=MFTRegister(EncoderClass,MFT_CATEGORY_VIDEO_ENCODER,(LPWSTR)EncoderName,MFT_ENUM_FLAG_ASYNCMFT|MFT_ENUM_FLAG_HARDWARE,2,input,1,&output,attributes.Get());
- }
- MFShutdown();return hr;
-}
-extern "C" HRESULT WINAPI DllRegisterServer(){return Registration(true);}
-extern "C" HRESULT WINAPI DllUnregisterServer(){return Registration(false);}

@@ -217,8 +217,7 @@ NTSTATUS NpuAllocateShared(NPU_CLIENT *s, QCOM_NPU_SHARED_ALLOCATION *q, WDFREQU
     if (!NT_SUCCESS(status)) return status;
     status = NpuAllocate(s, &q->Allocation, request);
     if (!NT_SUCCESS(status)) { ObDereferenceObject(process); return status; }
-    NPU_ALLOCATION *a = NULL;
-    for (ULONG i = 0; i < NPU_ALLOCATIONS; i++) if (s->Allocations[i].Id == q->Allocation.Id) { a = &s->Allocations[i]; break; }
+    NPU_ALLOCATION *a = NpuAllocation(s, q->Allocation.Id);
     if (!a) { ObDereferenceObject(process); return STATUS_INTERNAL_ERROR; }
     if (!a->Mdl) {
         a->Mdl = IoAllocateMdl(a->Buffer, a->Bytes, FALSE, FALSE, NULL);

@@ -4,7 +4,7 @@
 #include <ntstrsafe.h>
 #include "../scheduler-abi.h"
 #define TAG 'mnNQ'
-#define MEMORY_BYTES 0x200000u
+#define MEMORY_BYTES (231u * PAGE_SIZE)
 #define QUEUE_COUNT 16u
 #define NPU_ALLOCATIONS 256u
 #define VA_BITS 36u

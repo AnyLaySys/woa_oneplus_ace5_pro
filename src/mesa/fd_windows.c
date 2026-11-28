@@ -16,7 +16,7 @@ static const struct fd_bo_funcs bo_funcs = {
    .dmabuf=bo_dmabuf,.destroy=fd_bo_fini_common,
 };
 static struct fd_bo *bo_new(struct fd_device *dev, uint32_t size, uint32_t flags) {
-   struct fd_bo *bo=calloc(1,sizeof(*bo));GPU_ALLOCATION allocation;
+   struct fd_bo *bo=calloc(1,sizeof(struct fd_bo));GPU_ALLOCATION allocation;
    if(!bo)return NULL;
    if(!a830_ioctl(to_windows_device(dev)->handle,GPU_IOCTL_ALLOC,&size,sizeof(size),&allocation,sizeof(allocation))) {
       free(bo);return NULL;

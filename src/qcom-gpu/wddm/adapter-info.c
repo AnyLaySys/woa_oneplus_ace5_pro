@@ -101,6 +101,9 @@ NTSTATUS APIENTRY A830Query(HANDLE adapter,const DXGKARG_QUERYADAPTERINFO *q) {
     if(q->Type==DXGKQAITYPE_DISPLAY_DRIVERCAPS_EXTENSION) {
         if(q->OutputDataSize<sizeof(DXGK_DISPLAY_DRIVERCAPS_EXTENSION))return STATUS_BUFFER_TOO_SMALL;
         DXGK_DISPLAY_DRIVERCAPS_EXTENSION *c=q->pOutputData;RtlZeroMemory(c,sizeof(*c));
+        /* DWM maps virtual desktop modes onto the native scanout primary.
+           The panel's physical timing and single VidPN path stay native. */
+        c->VirtualModeSupport=1;
         c->HdrARGB10ScanoutSupport=A830DpuEnabled(a);return STATUS_SUCCESS;
     }
     if(q->Type==DXGKQAITYPE_INTEGRATED_DISPLAY_DESCRIPTOR2 || q->Type==DXGKQAITYPE_QUERYCOLORIMETRYOVERRIDES) {

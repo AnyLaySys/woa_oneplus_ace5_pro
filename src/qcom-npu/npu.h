@@ -160,6 +160,7 @@ NTSTATUS NpuExecutionResult(NPU_CLIENT *s, const QCOM_NPU_TICKET *ticket, QCOM_N
 VOID NpuCancelScheduled(NPU_CLIENT *s);
 
 NPU_CLIENT *NpuClientGet(NPU *n, WDFREQUEST request, PNTSTATUS status);
+ULONG NpuRequestThreadId(WDFREQUEST request);
 VOID NpuClientClose(NPU_CLIENT *s);
 VOID NpuClientRetire(NPU_CLIENT *s);
 VOID NpuClientSweep(NPU *n);

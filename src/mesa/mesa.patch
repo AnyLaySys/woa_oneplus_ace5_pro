@@ -2717,13 +2717,30 @@ diff --git a/src/vulkan/wsi/wsi_common_win32.cpp b/src/vulkan/wsi/wsi_common_win
     chain->base.acquire_next_image = wsi_win32_acquire_next_image;
     chain->base.release_images = wsi_win32_release_images;
     chain->base.queue_present = wsi_win32_queue_present;
-+   if (wsi_device->win32.get_d3d11_device) {
++   if (supports_dxgi && wsi_device->win32.get_d3d11_device) {
 +      chain->base.prepare_present = wsi_win32_prepare_present;
 +      chain->base.finish_present = wsi_win32_finish_present;
 +   }
     chain->base.present_mode = wsi_swapchain_get_present_mode(wsi_device, create_info);
     chain->extent = create_info->imageExtent;
 
+@@ -1099,12 +1265,10 @@
+          goto fail;
+       }
+       wsi->dxgi.dcomp = dcomp_get_device();
+-      if (!wsi->dxgi.dcomp) {
+-         wsi->dxgi.factory->Release();
+-         vk_free(alloc, wsi);
+-         result = VK_ERROR_INITIALIZATION_FAILED;
+-         goto fail;
+-      }
++      /* Service sessions may not provide DirectComposition. Rendering and
++       * video encoding still work without a composition swapchain; the
++       * swapchain path already checks both the factory and dcomp device.
++       */
+    }
+
+    wsi->base.get_support = wsi_win32_surface_get_support;
 diff --git a/src/vulkan/wsi/wsi_common_private.h b/src/vulkan/wsi/wsi_common_private.h
 --- a/src/vulkan/wsi/wsi_common_private.h
 +++ b/src/vulkan/wsi/wsi_common_private.h
@@ -2757,3 +2774,25 @@ diff --git a/src/vulkan/wsi/wsi_common_private.h b/src/vulkan/wsi/wsi_common_pri
     VK_FROM_HANDLE(tu_instance, instance, _instance);
     return vk_instance_get_proc_addr(instance != NULL ? &instance->vk : NULL,
                                      &tu_instance_entrypoints,
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -10,6 +10,7 @@
+ #include "tu_device.h"
+ #ifdef TU_HAS_WINDOWS
+ #include <io.h>
++#include "qcom_gpu_uapi.h"
+ extern const void *VKAPI_CALL tu_windows_get_composition_api();
+ #define close _close
+ #endif
+@@ -977,7 +978,11 @@
+     */
+    p->maxPerSetDescriptors = MAX_SET_SIZE / (2 * FDL6_TEX_CONST_DWORDS * 4);
+    /* Our buffer size fields allow only this much */
++#ifdef TU_HAS_WINDOWS
++   p->maxMemoryAllocationSize = GPU_MAX_BUFFER_SIZE;
++#else
+    p->maxMemoryAllocationSize = 0xFFFFFFFFull;
++#endif
+ 
+ }
+ 

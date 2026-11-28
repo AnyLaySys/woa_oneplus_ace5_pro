@@ -1,4 +1,5 @@
 #include "adapter.h"
+#include "vsync-notification.h"
 
 /* Only Rendered records are on the context token table. Submit removes a
    record atomically and transfers its owned refs to A830_JOB (Queued/Issued).
@@ -401,11 +402,11 @@ VOID A830Retire(A830_ADAPTER *a) {
         A830FinishJob(job,TRUE);A830RecycleJob(a,job);
     }
 }
-static BOOLEAN NotifyVsync(PVOID context) {
-    A830_ADAPTER *a=context;DXGKARGCB_NOTIFY_INTERRUPT_DATA notification={0};
-    notification.InterruptType=DXGK_INTERRUPT_CRTC_VSYNC;
-    notification.Flags.ValidPhysicalAdapterMask=1;notification.CrtcVsync.PhysicalAdapterMask=1;
-    notification.CrtcVsync.PhysicalAddress.QuadPart=(LONGLONG)a->ScanoutAddress;
+BOOLEAN A830NotifyVsync(PVOID context) {
+    A830_ADAPTER *a=context;DXGKARGCB_NOTIFY_INTERRUPT_DATA notification;
+    DXGK_MULTIPLANE_OVERLAY_VSYNC_INFO legacy;DXGK_MULTIPLANE_OVERLAY_VSYNC_INFO2 modern;
+    A830BuildVsyncNotification((DXGK_INTERRUPT_TYPE)ReadAcquire(&a->VsyncNotificationType),
+        a->ScanoutAddress,a->ScanoutPresentId,&notification,&legacy,&modern);
     a->Dxgk.DxgkCbNotifyInterrupt(a->Dxgk.DeviceHandle,&notification);
     InterlockedExchange(&a->SchedulerDpcPending,1);
     return a->Dxgk.DxgkCbQueueDpc(a->Dxgk.DeviceHandle);
@@ -482,7 +483,7 @@ VOID A830Worker(PVOID context) {
         if(QcomGpuScanoutEnabled(a))QcomGpuScanoutPump(a);
         if(tick && a->ScanoutPitch) {
             BOOLEAN result=FALSE;
-            NTSTATUS status=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,NotifyVsync,a,0,&result);
+            NTSTATUS status=a->Dxgk.DxgkCbSynchronizeExecution(a->Dxgk.DeviceHandle,A830NotifyVsync,a,0,&result);
             if(!NT_SUCCESS(status))InterlockedExchange(&a->Failed,status);
         }
         InterlockedExchange(&a->WorkerBusy,1);

@@ -40,6 +40,9 @@ typedef struct {
     BOOLEAN IspFdWbBypass;
     BOOLEAN IspFdCoherent;
     BOOLEAN IspFdCommonBuffer;
+    BOOLEAN IspFdCommonBuffer32;
+    BOOLEAN IspFdSettled;
+    BOOLEAN IspFdDiscard;
     BOOLEAN IspFdDmi64;
     ULONG IspFdAddressOffset;
     BOOLEAN IspFdPrecisionChain;
@@ -57,7 +60,6 @@ typedef struct {
     BOOLEAN StaticQosReady;
     BOOLEAN ScmResumeValid;
     ULONGLONG ScmResumeArgs[8];
-    ULONG ScmAuditSequence;
     BOOLEAN CdmPending;
     BOOLEAN TbuPending;
     BOOLEAN ScmWaitqKnown,ScmFastWaitq;
@@ -117,6 +119,7 @@ typedef struct {
     WDFINTERRUPT CsidInterrupt,TfeInterrupt;
     ULONGLONG Deadline;
     WDFDMAENABLER DmaEnabler;
+    WDFDMAENABLER DmaEnabler32;
     WDFCOMMONBUFFER FrameBuffer;
     BOOLEAN FrameContiguous;
     BOOLEAN FrameUncached;
@@ -198,7 +201,6 @@ NTSTATUS CamScmWaitqProbe(CAM *c);
 NTSTATUS CamScmWaitqContext(CAM *c);
 NTSTATUS CamScmQosRaw(CAM *c);
 NTSTATUS CamScmContinue(CAM *c);
-NTSTATUS CamScmAudit(CAM *c,ULONG phase,const ULONGLONG *registers,NTSTATUS result);
 NTSTATUS CamScmQosSmart(CAM *c);
 NTSTATUS CamScmQosRdi(CAM *c);
 NTSTATUS CamScmQosCdm(CAM *c);

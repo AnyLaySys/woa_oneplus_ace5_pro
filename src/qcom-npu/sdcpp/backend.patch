@@ -1,0 +1,73 @@
+--- a/src/core/ggml_extend.cpp
++++ b/src/core/ggml_extend.cpp
+@@ -817,12 +817,46 @@
+         b = ggml_reshape_4d(ctx, b, 1, 1, b->ne[0], 1);
+     }
+ 
+-    x = ggml_group_norm(ctx, x, num_groups, eps);
++    if (sd_backend_is(runner_ctx->backend, "HTP") && num_groups > 0 && x->ne[2] % num_groups == 0) {
++        const int64_t width = x->ne[0], height = x->ne[1], channels = x->ne[2], batch = x->ne[3];
++        x = ggml_reshape_2d(ctx, ggml_cont(ctx, x), width * height * channels / num_groups, num_groups * batch);
++        auto normalized = ggml_norm(ctx, x, eps);
++        if (ggml_backend_supports_op(runner_ctx->backend, normalized)) {
++            x = normalized;
++        } else {
++            const float scale = 1.f / float(x->ne[0]);
++            const int64_t size = x->ne[0], groups = x->ne[1];
++            int64_t chunk = std::min<int64_t>(1024, size);
++            while (size % chunk) chunk /= 2;
++            auto mean = ggml_scale(ctx, ggml_sum_rows(ctx, x), scale);
++            auto tiles = ggml_reshape_3d(ctx, x, chunk, size / chunk, groups);
++            auto centered = ggml_sub(ctx, tiles, ggml_reshape_3d(ctx, mean, 1, 1, groups));
++            auto squares = ggml_reshape_2d(ctx, ggml_sqr(ctx, centered), size, groups);
++            auto variance = ggml_scale_bias(ctx, ggml_sum_rows(ctx, squares), scale, eps);
++            x = ggml_div(ctx, centered, ggml_reshape_3d(ctx, ggml_sqrt(ctx, variance), 1, 1, groups));
++        }
++        x = ggml_reshape_4d(ctx, x, width, height, channels, batch);
++    } else {
++        x = ggml_group_norm(ctx, x, num_groups, eps);
++    }
+     if (w != nullptr && b != nullptr) {
+         x = ggml_mul_inplace(ctx, x, w);
+         x = ggml_add_inplace(ctx, x, b);
+     }
+     return x;
++}
++
++static ggml_tensor* htp_cosine(ggml_context* ctx, ggml_tensor* x) {
++    constexpr float pi = 3.14159265358979323846f;
++    // Reduce the phase before evaluating the even polynomial on [-pi, pi].
++    auto turns = ggml_ceil(ctx, ggml_scale_bias(ctx, x, 1.f / (2.f * pi), -0.5f));
++    x = ggml_sub(ctx, x, ggml_scale(ctx, turns, 2.f * pi));
++    auto square = ggml_sqr(ctx, x);
++    constexpr float c[] = {1.f, -0.5f, 1.f/24.f, -1.f/720.f, 1.f/40320.f,
++                           -1.f/3628800.f, 1.f/479001600.f, -1.f/87178291200.f};
++    auto result = ggml_scale_bias(ctx, square, c[7], c[6]);
++    for (int i = 5; i >= 0; --i) result = ggml_scale_bias(ctx, ggml_mul(ctx, result, square), 1.f, c[i]);
++    return result;
+ }
+ 
+ ggml_tensor* ggml_ext_timestep_embedding(GGMLRunnerContext* runner_ctx,
+@@ -832,6 +866,22 @@
+                                          float time_factor) {
+     auto ctx  = runner_ctx->ggml_ctx;
+     timesteps = ggml_ext_scale(runner_ctx, timesteps, time_factor);
++    if (sd_backend_is(runner_ctx->backend, "HTP") && dim > 1 && dim % 2 == 0) {
++        const int half = dim / 2;
++        // Input bindings borrow their data until execution completes.
++        static thread_local std::map<int, std::vector<float>> indices;
++        auto& values = indices[half];
++        if (values.empty()) { values.resize(half); for (int i = 0; i < half; ++i) values[i] = float(i); }
++        auto index = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, half);
++        runner_ctx->bind_backend_tensor_data(index, values.data());
++        auto frequency = ggml_exp(ctx, ggml_scale(ctx, index, -std::log(float(max_period)) / half));
++        const auto count = ggml_nelements(timesteps);
++        auto shape = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, half, count);
++        auto phase = ggml_mul(ctx, ggml_repeat(ctx, frequency, shape), ggml_reshape_2d(ctx, timesteps, 1, count));
++        auto cosine = htp_cosine(ctx, phase);
++        auto sine = htp_cosine(ctx, ggml_scale_bias(ctx, phase, 1.f, -1.57079632679489661923f));
++        return ggml_concat(ctx, cosine, sine, 0);
++    }
+     return ggml_timestep_embedding(ctx, timesteps, dim, max_period);
+ }
+ 

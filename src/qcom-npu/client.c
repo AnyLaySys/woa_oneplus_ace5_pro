@@ -1,6 +1,13 @@
 #include <ntifs.h>
 #include "npu.h"
 
+ULONG NpuRequestThreadId(WDFREQUEST request) {
+    if (!request) return 0;
+    // KMDF's worker may differ from the original FastRPC caller.
+    PIRP irp = WdfRequestWdmGetIrp(request);
+    return irp->Tail.Overlay.Thread ? HandleToUlong(PsGetThreadId(irp->Tail.Overlay.Thread)) : 0;
+}
+
 BOOLEAN NpuBusy(NPU *n) {
     if (n->Pending || n->Running) return TRUE;
     for (PLIST_ENTRY p = n->Clients.Flink; p != &n->Clients; p = p->Flink) {
@@ -28,8 +35,7 @@ NPU_CLIENT *NpuClientGet(NPU *n, WDFREQUEST request, PNTSTATUS status) {
     NPU_CLIENT *s = ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*s), NPU_TAG);
     if (!s) { *status = STATUS_INSUFFICIENT_RESOURCES; return NULL; }
     s->Device = n; s->Pid = pid; s->File = file;
-    PIRP irp = WdfRequestWdmGetIrp(request);
-    s->Thread = irp->Tail.Overlay.Thread ? HandleToUlong(PsGetThreadId(irp->Tail.Overlay.Thread)) : 0;
+    s->Thread = NpuRequestThreadId(request);
     WdfObjectReference(file); InsertTailList(&n->Clients, &s->Entry); n->ClientCount++;
     context->Client = s; *status = STATUS_SUCCESS; return s;
 }

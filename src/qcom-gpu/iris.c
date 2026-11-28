@@ -1,5 +1,7 @@
 #include "iris.h"
 #include "video-config.h"
+#include "decode-buffers.h"
+#include "iris-memory.h"
 
 #define IRIS_QUEUE_WORDS 262144u
 #define IRIS_QUEUE_BYTES (IRIS_QUEUE_WORDS*4u)
@@ -17,22 +19,33 @@ typedef struct { ULONG Size,Type,Flags,Payload,Port,Id,Reserved[2]; } IRIS_PACKE
 typedef struct {
     ULONG Type,Index;ULONGLONG Address;ULONG Offset,Size,DataOffset,DataSize;ULONGLONG Time;ULONG Flags,Reserved[5];
 } IRIS_BUFFER;
-typedef struct { GPU_BO Buffer;ULONG Offset,Size,Picture;ULONGLONG Time;BOOLEAN Ready; } IRIS_OUTPUT;
+typedef struct { GPU_BO Buffer;ULONG Offset,Size,Picture;ULONGLONG Time,Order,Source;BOOLEAN Ready,Queued; } IRIS_OUTPUT;
 struct IRIS {
+    IRIS *Core,*Next;
     GPU *Gpu;
     PDRIVER_OBJECT Driver;
     PUCHAR Registers,Clocks,Smmu;
     GPU_BO Queues,Arp,Metadata;
+    IRIS_MEMORY Memory[2];
     GPU_BO Internal[6];
-    IRIS_OUTPUT Output[4];
+    IRIS_OUTPUT Output[20];
+    GPU_BO DecodeInput;
+    GPU_BO Dpb[20];
     ULONGLONG InputAddress;
     ULONG Width,Height,Bitrate,MaxBitrate,Session,Started,Picture;
     NTSTATUS Error;
     BOOLEAN InputDone;
+    ULONG OutputCount,DpbCount,Codec,BitDepth,Stride,Scanline;
+    BOOLEAN SettingsChanged,DecodeDrained;
+    ULONG Settings[12][2],SettingsMask;
+    ULONGLONG OutputSequence;
+    BOOLEAN Surfaces,QueuedSurfaces;
+    ULONG Selected;
     ULONG SavedClocks[9],SavedExtra[4],SavedPll[9],SavedRcg[2],SavedGcc[2],ClockMask,VoteMask,HeaderId,PacketId;
     BOOLEAN PasStarted,FirmwareReady,Prepared,PllChanged,RcgChanged,ScmPending;
     PEX_TIMER Timer;
 };
+static IRIS *SharedCore;
 static const ULONG ClockRegisters[]={0x80a4,0x80f8,0x80d4,0x8034,0x8068,0x805c,0x804c,0x808c,0x807c};
 static const ULONG ExtraRegisters[]={0x8040,0x8074,0x9f24,0x8090},ExtraMasks[]={0x3e00000,0x3e00000,1,8};
 static const ULONG PllRegisters[]={0,4,0x10,0x14,0x18,0x1c,0x20,0x24,0x28};
@@ -48,25 +61,15 @@ static NTSTATUS Pas(IRIS *v,ULONG function,ULONGLONG a,ULONGLONG b,ULONG count) 
     ULONGLONG result=0;NTSTATUS status=Smc(v,function,count,9,a,b,0,&result);
     return NT_SUCCESS(status) && result?STATUS_DEVICE_HARDWARE_ERROR:status;
 }
-static NTSTATUS Arc(IRIS *v,PCSTR name,ULONG level) {
-    ULONG address,aux,length;NTSTATUS status=GpuDb(v->Gpu,name,&address,&aux,&length);
-    if(!NT_SUCCESS(status))return status;
-    for(ULONG i=0;i<length/2;i++) {
-        ULONG offset=aux+i*2;
-        USHORT value=(USHORT)(GpuRead(v->Gpu->Db,offset&~3u)>>((offset&3)*8));
-        if(value>=level)return GpuRscWrite(v->Gpu,address,i);
-    }
-    return STATUS_NOT_SUPPORTED;
-}
 static NTSTATUS Branch(IRIS *v,ULONG index) {
     ULONG offset=ClockRegisters[index],value=GpuRead(v->Clocks,offset);
     if(!(value&1)){v->ClockMask|=1u<<index;GpuWrite(v->Clocks,offset,value|1);}
     return GpuPoll(v->Clocks,offset,0x80000000,0,2000);
 }
 static NTSTATUS Power(IRIS *v) {
-    NTSTATUS status=Arc(v,"mxc.lvl",256);
-    if(NT_SUCCESS(status)){v->VoteMask|=1;status=Arc(v,"mmcx.lvl",256);}
-    if(NT_SUCCESS(status))v->VoteMask|=2;
+    /* Also clean up a partially acquired pair if the second vote fails. */
+    v->VoteMask=3;
+    NTSTATUS status=GpuMultimediaPower(v->Gpu,GPU_MULTIMEDIA_VIDEO,TRUE);
     if(!NT_SUCCESS(status))return status;
     for(ULONG i=0;i<RTL_NUMBER_OF(ClockRegisters);i++)v->SavedClocks[i]=GpuRead(v->Clocks,ClockRegisters[i]);
     for(ULONG i=0;i<RTL_NUMBER_OF(ExtraRegisters);i++)v->SavedExtra[i]=GpuRead(v->Clocks,ExtraRegisters[i]);
@@ -112,17 +115,6 @@ static NTSTATUS Power(IRIS *v) {
     if(NT_SUCCESS(status))status=Branch(v,8);
     return status;
 }
-static NTSTATUS Translation(IRIS *v) {
-    ULONG id=GpuRead(v->Smmu,0x20),count=min(id&255u,128u),found=0;
-    if(!(id&(1u<<27)) || !count)return STATUS_DEVICE_CONFIGURATION_ERROR;
-    for(ULONG i=0;i<count;i++) {
-        ULONG smr=GpuRead(v->Smmu,0x800+i*4);if(!(smr&0x80000000u))continue;
-        ULONG mask=(smr>>16)&0x7fff;
-        if(mask>7)continue;
-        for(ULONG j=0;j<2;j++)if(!((smr^(j?0x1947u:0x1940u))&0x7fffu&~mask))found|=1u<<j;
-    }
-    return found==3?STATUS_SUCCESS:STATUS_DEVICE_NOT_READY;
-}
 static NTSTATUS Firmware(IRIS *v) {
     HANDLE directory=NULL;NTSTATUS status=IoGetDriverDirectory(v->Driver,DriverDirectoryImage,0,&directory);
     if(!NT_SUCCESS(status))return status;
@@ -166,11 +158,12 @@ done:if(memory)MmUnmapIoSpace(memory,IRIS_FIRMWARE_BYTES);if(!v->ScmPending)GpuF
 }
 static ULONG Packet(IRIS *v,IRIS_HEADER *header,ULONG type,ULONG flags,ULONG payload,ULONG port,const VOID *data,ULONG bytes) {
     IRIS_PACKET *p=(IRIS_PACKET *)((PUCHAR)header+header->Size);
-    p->Size=sizeof(*p)+bytes;p->Type=type;p->Flags=flags;p->Payload=payload;p->Port=port;p->Id=++v->PacketId;
+    p->Size=sizeof(*p)+bytes;p->Type=type;p->Flags=flags;p->Payload=payload;p->Port=port;p->Id=++v->Core->PacketId;
     if(bytes)RtlCopyMemory(p+1,data,bytes);
     header->Size+=p->Size;header->Count++;return p->Id;
 }
 static NTSTATUS WriteCommand(IRIS *v,IRIS_HEADER *header) {
+    v=v->Core;
     IRIS_QUEUE *q=&((IRIS_QUEUES *)v->Queues.Cpu)->Queue[0];ULONG write=q->Write,read=q->Read,words=header->Size/4;
     if(write>=IRIS_QUEUE_WORDS || read>=IRIS_QUEUE_WORDS)return STATUS_DEVICE_DATA_ERROR;
     ULONG available=(read+IRIS_QUEUE_WORDS-write-1)%IRIS_QUEUE_WORDS;
@@ -183,69 +176,107 @@ static NTSTATUS WriteCommand(IRIS *v,IRIS_HEADER *header) {
 static NTSTATUS Send(IRIS *v,ULONG type,ULONG flags,ULONG payload,ULONG session,ULONG port,const VOID *data,ULONG bytes,PULONG id) {
     ULONG packet[256]={0};
     if((bytes&3) || bytes>sizeof(packet)-sizeof(IRIS_HEADER)-sizeof(IRIS_PACKET))return STATUS_INVALID_BUFFER_SIZE;
-    IRIS_HEADER *header=(IRIS_HEADER *)packet;header->Size=sizeof(*header);header->Session=session;header->Id=++v->HeaderId;
+    IRIS_HEADER *header=(IRIS_HEADER *)packet;header->Size=sizeof(*header);header->Session=session;header->Id=++v->Core->HeaderId;
     ULONG next=Packet(v,header,type,flags,payload,port,data,bytes);if(id)*id=next;
     return WriteCommand(v,header);
 }
+static NTSTATUS DecodeOutputStart(IRIS *v);
+static const ULONG DecodeProperties[]={0x03000103,0x03000105,0x0300010f,0x03000124,0x03000120,0x03000128,
+    0x03000107,0x03000108,0x03000109,0x03000155,0x03000180,0x03000181};
+#define IRIS_WAIT_INPUT MAXULONG
+#define IRIS_POLL_OUTPUT (MAXULONG-1)
+#define IRIS_WAIT_OUTPUT (MAXULONG-2)
 static NTSTATUS Response(IRIS *v,ULONG id) {
-    IRIS_QUEUE *q=&((IRIS_QUEUES *)v->Queues.Cpu)->Queue[1];PULONG buffer=(PULONG)(v->Queues.Cpu+sizeof(IRIS_QUEUES)+IRIS_QUEUE_BYTES);
+    IRIS *core=v->Core;
+    IRIS_QUEUE *q=&((IRIS_QUEUES *)core->Queues.Cpu)->Queue[1];
+    PULONG buffer=(PULONG)(core->Queues.Cpu+sizeof(IRIS_QUEUES)+IRIS_QUEUE_BYTES);
     ULONGLONG deadline=KeQueryInterruptTime()+10000000;
     while(KeQueryInterruptTime()<deadline) {
-        if(!id && v->InputDone)for(ULONG i=0;i<RTL_NUMBER_OF(v->Output);i++)if(v->Output[i].Ready)return STATUS_SUCCESS;
-        if(GpuRead(v->Registers,0xb000c)&8)return STATUS_DEVICE_HARDWARE_ERROR;
+        if(!NT_SUCCESS(core->Error))return core->Error;
+        if(!NT_SUCCESS(v->Error))return v->Error;
+        if(id==IRIS_WAIT_INPUT && v->InputDone)return STATUS_SUCCESS;
+        if((!id && v->InputDone) || id==IRIS_WAIT_OUTPUT)
+            for(ULONG i=0;i<v->OutputCount;i++)if(v->Output[i].Ready)return STATUS_SUCCESS;
+        if(id==IRIS_WAIT_OUTPUT && v->DecodeDrained)return STATUS_NO_MORE_ENTRIES;
+        if(GpuRead(core->Registers,0xb000c)&8){core->Error=STATUS_DEVICE_HARDWARE_ERROR;return core->Error;}
         ULONG read=q->Read,write=q->Write;KeMemoryBarrier();
         if(read>=IRIS_QUEUE_WORDS || write>=IRIS_QUEUE_WORDS)return STATUS_DEVICE_DATA_ERROR;
         if(read!=write) {
-            ULONG packet[256],bytes=buffer[read],available=(write+IRIS_QUEUE_WORDS-read)%IRIS_QUEUE_WORDS;
+            ULONG packet[1024],bytes=buffer[read],available=(write+IRIS_QUEUE_WORDS-read)%IRIS_QUEUE_WORDS;
             if((bytes&3) || bytes<sizeof(IRIS_HEADER) || bytes>sizeof(packet) || bytes/4>available)return STATUS_DEVICE_DATA_ERROR;
             for(ULONG i=0;i<bytes/4;i++)packet[i]=buffer[(read+i)%IRIS_QUEUE_WORDS];
             KeMemoryBarrier();q->Read=(read+bytes/4)%IRIS_QUEUE_WORDS;q->RxRequest=1;KeMemoryBarrier();
-            GpuWrite(v->Registers,0xa001c,1);
+            GpuWrite(core->Registers,0xa001c,1);
             IRIS_HEADER *header=(IRIS_HEADER *)packet;ULONG offset=sizeof(*header),outputs=0;BOOLEAN matched=FALSE;
+            IRIS *session=core->Next;
+            while(session && (!session->Session || session->Session!=header->Session))session=session->Next;
             for(ULONG i=0;i<header->Count;i++) {
                 if(offset>bytes || sizeof(IRIS_PACKET)>bytes-offset)return STATUS_DEVICE_DATA_ERROR;
                 IRIS_PACKET *p=(IRIS_PACKET *)((PUCHAR)packet+offset);
                 if(p->Size<sizeof(*p) || p->Size>bytes-offset || (p->Size&3))return STATUS_DEVICE_DATA_ERROR;
-                if(p->Flags&12)return STATUS_DEVICE_HARDWARE_ERROR;
-                if(id && p->Id==id){if(!(p->Flags&1))return STATUS_NOT_SUPPORTED;matched=TRUE;}
-                if(header->Session==v->Session && v->Session && p->Type==0x03000162 && p->Size>=sizeof(*p)+4)
-                    v->Picture=*(PULONG)(p+1);
-                if(header->Session==v->Session && v->Session && p->Type==0x01000009) {
+                if(p->Flags&8){core->Error=STATUS_DEVICE_HARDWARE_ERROR;return core->Error;}
+                if((p->Flags&4) && session)session->Error=STATUS_DEVICE_HARDWARE_ERROR;
+                if(id && id<IRIS_WAIT_OUTPUT && p->Id==id){if(!(p->Flags&5))return STATUS_NOT_SUPPORTED;matched=TRUE;}
+                if(session && p->Type==0x03000162 && p->Size>=sizeof(*p)+4)session->Picture=*(PULONG)(p+1);
+                if(session && session->Codec) {
+                    if(p->Type==0x0100000c && p->Port==1)session->SettingsChanged=TRUE;
+                    if(p->Port==1)for(ULONG n=0;n<RTL_NUMBER_OF(DecodeProperties);n++)if(p->Type==DecodeProperties[n]) {
+                        ULONG length=n==1?8:4;
+                        if(p->Size<sizeof(*p)+length)return STATUS_DEVICE_DATA_ERROR;
+                        RtlCopyMemory(session->Settings[n],p+1,length);session->SettingsMask|=1u<<n;
+                    }
+                    if(p->Type==0x03000103 && p->Size>=sizeof(*p)+4) {
+                        ULONG size=*(PULONG)(p+1);
+                        if((size>>16)>((session->Width+31)&~31u) || (size&65535)>session->Scanline)
+                            session->Error=STATUS_BUFFER_TOO_SMALL;
+                    }
+                    if(p->Type==0x0300010f && p->Size>=sizeof(*p)+4) {
+                        ULONG depth=*(PULONG)(p+1);
+                        if((depth>>16)>session->BitDepth || (depth&65535)>session->BitDepth)session->Error=STATUS_NOT_SUPPORTED;
+                    }
+                }
+                if(session && p->Type==0x01000009 && !(p->Flags&4)) {
                     if(p->Size<sizeof(*p)+sizeof(IRIS_BUFFER))return STATUS_DEVICE_DATA_ERROR;
                     IRIS_BUFFER *b=(IRIS_BUFFER *)(p+1);
-                    if(b->Type==2 && b->Address==v->InputAddress)v->InputDone=TRUE;
-                    if(b->Type==1) {
-                        if(b->Index>=RTL_NUMBER_OF(v->Output))return STATUS_DEVICE_DATA_ERROR;
-                        IRIS_OUTPUT *o=v->Output+b->Index;
-                        if(b->Address!=o->Buffer.Physical || b->Offset || b->DataOffset>o->Buffer.Size ||
+                    if(b->Type==(session->Codec?1u:2u) && b->Address==session->InputAddress)session->InputDone=TRUE;
+                    if(b->Type==(session->Codec?2u:1u)) {
+                        if(b->Index>=session->OutputCount)return STATUS_DEVICE_DATA_ERROR;
+                        IRIS_OUTPUT *o=session->Output+b->Index;
+                        if(b->Address!=(session->Codec?o->Buffer.Address:o->Buffer.Physical) || b->Offset || b->DataOffset>o->Buffer.Size ||
                            b->DataSize>o->Buffer.Size-b->DataOffset || o->Ready)return STATUS_DEVICE_DATA_ERROR;
-                        o->Offset=b->DataOffset;o->Size=b->DataSize;o->Time=b->Time;o->Ready=TRUE;outputs|=1u<<b->Index;
+                        o->Offset=b->DataOffset;o->Size=b->DataSize;o->Time=b->Time;o->Order=++session->OutputSequence;o->Ready=TRUE;o->Queued=FALSE;outputs|=1u<<b->Index;
+                        if(session->Codec && (b->Flags&0x10000000))session->DecodeDrained=TRUE;
                     }
                 }
                 offset+=p->Size;
             }
             if(offset!=bytes)return STATUS_DEVICE_DATA_ERROR;
-            for(ULONG i=0;i<RTL_NUMBER_OF(v->Output);i++)if(outputs&(1u<<i))v->Output[i].Picture=v->Picture;
-            if(matched)return STATUS_SUCCESS;
+            if(session)for(ULONG i=0;i<session->OutputCount;i++)if(outputs&(1u<<i))session->Output[i].Picture=session->Picture;
+            if(session && session->SettingsChanged && NT_SUCCESS(session->Error)) {
+                session->SettingsChanged=FALSE;
+                NTSTATUS status=(session->Started&2)?STATUS_NOT_SUPPORTED:DecodeOutputStart(session);
+                ULONG reason=0x0100000c;
+                if(NT_SUCCESS(status))status=Send(session,0x01000008,3,1,session->Session,1,&reason,4,NULL);
+                if(!NT_SUCCESS(status))session->Error=status;
+                /* Host allocation time is not part of the resumed firmware wait. */
+                deadline=KeQueryInterruptTime()+10000000;
+            }
+            if(matched)return session?session->Error:core->Error;
             continue;
         }
-        ExSetTimer(v->Timer,-5000,0,NULL);KeWaitForSingleObject(v->Timer,Executive,KernelMode,FALSE,NULL);
+        if(id==IRIS_POLL_OUTPUT)return STATUS_NO_MORE_ENTRIES;
+        ExSetTimer(core->Timer,-5000,0,NULL);KeWaitForSingleObject(core->Timer,Executive,KernelMode,FALSE,NULL);
     }
     return STATUS_IO_TIMEOUT;
 }
 static NTSTATUS SystemInit(IRIS *v) {
     ULONG data[80]={0},values[]={1,8,32,16,0,1,1,1};
-    IRIS_HEADER *header=(IRIS_HEADER *)data;header->Size=sizeof(*header);header->Id=++v->HeaderId;
+    IRIS_HEADER *header=(IRIS_HEADER *)data;header->Size=sizeof(*header);header->Id=++v->Core->HeaderId;
     ULONG id=Packet(v,header,0x01000001,7,1,0,values,4);
     for(ULONG i=1;i<RTL_NUMBER_OF(values);i++)Packet(v,header,0x03000002+i,0,1,0,values+i,4);
     NTSTATUS status=WriteCommand(v,header);return NT_SUCCESS(status)?Response(v,id):status;
 }
 static ULONG Align(ULONG value,ULONG alignment) {return (value+alignment-1)&~(alignment-1);}
-static ULONG OutputSize(ULONG width,ULONG height) {
-    ULONG mbs=Align(width,32)*Align(height,32)/256,bytes=width*height*3;
-    bytes=mbs<3680?bytes*2:bytes/4;
-    return Align(bytes*5/4,4096);
-}
 static VOID InternalSizes(ULONG width,ULONG height,ULONG sizes[6]) {
     ULONG w=Align(width,16),h=Align(height,16),mw=w/16,mh=h/16,n=mw*mh;
     ULONG bitstream=w*h*3;if(w*h>480*320)bitstream/=4;
@@ -268,20 +299,23 @@ static NTSTATUS Property(IRIS *v,ULONG type,ULONG payload,ULONG port,ULONG value
     return Send(v,type,0,payload,v->Session,port,&value,4,NULL);
 }
 static NTSTATUS Buffer(IRIS *v,ULONG type,ULONG index,GPU_BO *bo,ULONG port,ULONG bytes,ULONGLONG time) {
-    IRIS_BUFFER b={0};b.Type=type;b.Index=index;b.Address=bo->Physical;b.Size=bo->Size;
-    b.DataSize=bytes;b.Time=time;b.Flags=type==2 || type==6?0x2000:0x200;
-    return Send(v,0x01000009,1,5,v->Session,port,&b,sizeof(b),NULL);
+    IRIS_BUFFER b={0};b.Type=type;b.Index=index;b.Address=v->Codec?bo->Address:bo->Physical;b.Size=bo->Size;
+    b.DataSize=bytes;b.Time=time;b.Flags=v->Codec?0x200:(type==2 || type==6?0x2000:0x200);
+    NTSTATUS status=Send(v,0x01000009,1,5,v->Session,port,&b,sizeof(b),NULL);
+    if(NT_SUCCESS(status) && v->Codec && type==2)v->Output[index].Queued=TRUE;
+    return status;
 }
 static NTSTATUS Command(IRIS *v,ULONG type,ULONG port) {
     ULONG id=0;NTSTATUS status=Send(v,type,type==0x01000005?3:7,0,v->Session,port,NULL,0,&id);
     return NT_SUCCESS(status)?Response(v,id):status;
 }
 NTSTATUS IrisStart(IRIS *v,const GPU_VIDEO_CONFIG *config) {
-    if(!v || !v->FirmwareReady || v->Session || !NT_SUCCESS(v->Error))return STATUS_INVALID_DEVICE_STATE;
+    if(!v || !v->Core->FirmwareReady || v->Session || !NT_SUCCESS(v->Error))return STATUS_INVALID_DEVICE_STATE;
     if(!config || !GpuVideoConfigValid(config))return STATUS_INVALID_PARAMETER;
     ULONG width=config->Width,height=config->Height,rate=config->Rate,bitrate=config->Bitrate;
     v->MaxBitrate=GpuVideoMaxBitrate(config);
-    ULONG session=1,id=0;
+    ULONG session=++v->Core->Session,id=0;
+    v->OutputCount=4;
     NTSTATUS status=Send(v,0x01000003,3,1,0,0,&session,4,&id);
     if(!NT_SUCCESS(status))return status;
     v->Session=session;v->Width=width;v->Height=height;v->Bitrate=bitrate;
@@ -292,7 +326,7 @@ NTSTATUS IrisStart(IRIS *v,const GPU_VIDEO_CONFIG *config) {
     if(NT_SUCCESS(status))status=Buffer(v,9,0,&v->Arp,0,0,0);
     if(!NT_SUCCESS(status)){v->Error=status;return status;}
     ULONG data[256]={0},stride=Align(width,128),scanline=Align(height,64);
-    IRIS_HEADER *header=(IRIS_HEADER *)data;header->Size=sizeof(*header);header->Session=session;header->Id=++v->HeaderId;
+    IRIS_HEADER *header=(IRIS_HEADER *)data;header->Size=sizeof(*header);header->Session=session;header->Id=++v->Core->HeaderId;
     ULONG inputValues[][3]={{0x03000101,9,1},{0x03000178,10,(width<<16)|height},{0x03000155,10,0x35010101}};
     for(ULONG i=0;i<RTL_NUMBER_OF(inputValues);i++)Packet(v,header,inputValues[i][0],0,inputValues[i][1],2,inputValues[i]+2,4);
     ULONG lines[]={stride<<16|scanline,stride<<16|(scanline/2)},crop[]={0,0};
@@ -300,7 +334,7 @@ NTSTATUS IrisStart(IRIS *v,const GPU_VIDEO_CONFIG *config) {
     status=WriteCommand(v,header);
     if(NT_SUCCESS(status)){status=Command(v,0x01000005,2);if(NT_SUCCESS(status))v->Started=2;}
     if(!NT_SUCCESS(status)){v->Error=status;return status;}
-    RtlZeroMemory(data,sizeof(data));header->Size=sizeof(*header);header->Session=session;header->Id=++v->HeaderId;
+    RtlZeroMemory(data,sizeof(data));header->Size=sizeof(*header);header->Session=session;header->Id=++v->Core->HeaderId;
     ULONG values[][3]={
         {0x03000103,10,(Align(width,16)<<16)|Align(height,16)},
         {0x03000107,9,config->Profile},{0x03000108,9,config->Level},
@@ -320,10 +354,10 @@ NTSTATUS IrisStart(IRIS *v,const GPU_VIDEO_CONFIG *config) {
         status=GpuAllocateContiguous(v->Internal+i,sizes[i],MmNonCached,0xdfffffff,0);
         if(NT_SUCCESS(status))status=Buffer(v,types[i],i>3?i-4:0,v->Internal+i,1,0,0);
     }
-    for(ULONG i=0;NT_SUCCESS(status) && i<RTL_NUMBER_OF(v->Output);i++)
-        status=GpuAllocateContiguous(&v->Output[i].Buffer,OutputSize(width,height),MmNonCached,0xdfffffff,0);
+    for(ULONG i=0;NT_SUCCESS(status) && i<v->OutputCount;i++)
+        status=GpuAllocateContiguous(&v->Output[i].Buffer,GpuVideoOutputSize(width,height),MmNonCached,0xdfffffff,0);
     if(NT_SUCCESS(status)){status=Command(v,0x01000005,1);if(NT_SUCCESS(status))v->Started=3;}
-    for(ULONG i=0;NT_SUCCESS(status) && i<RTL_NUMBER_OF(v->Output);i++)
+    for(ULONG i=0;NT_SUCCESS(status) && i<v->OutputCount;i++)
         status=Buffer(v,1,i,&v->Output[i].Buffer,1,0,0);
     v->Error=status;return status;
 }
@@ -332,7 +366,7 @@ NTSTATUS IrisEncode(IRIS *v,GPU_BO *input,ULONGLONG time,BOOLEAN key,ULONG bitra
         return STATUS_INVALID_DEVICE_STATE;
     ULONG size=Align(v->Width,128)*Align(v->Height,64)*3/2;
     if(input->Physical>0xdfffffff || size>input->Size || size-1>0xdfffffff-input->Physical)return STATUS_INVALID_PARAMETER;
-    if(capacity<OutputSize(v->Width,v->Height))return STATUS_BUFFER_TOO_SMALL;
+    if(capacity<GpuVideoOutputSize(v->Width,v->Height))return STATUS_BUFFER_TOO_SMALL;
     if(bitrate && (bitrate<64000 || bitrate>v->MaxBitrate))return STATUS_INVALID_PARAMETER;
     v->InputAddress=input->Physical;v->InputDone=FALSE;v->Picture=0;*bytes=0;*keyframe=FALSE;
     NTSTATUS status=key?Property(v,0x03000145,9,1,2):STATUS_SUCCESS;
@@ -343,7 +377,7 @@ NTSTATUS IrisEncode(IRIS *v,GPU_BO *input,ULONGLONG time,BOOLEAN key,ULONG bitra
     if(NT_SUCCESS(status))status=Buffer(v,2,0,input,2,size,time);
     if(NT_SUCCESS(status))status=Response(v,0);
     if(!NT_SUCCESS(status)){v->Error=status;return status;}
-    for(ULONG i=0;i<RTL_NUMBER_OF(v->Output);i++) {
+    for(ULONG i=0;i<v->OutputCount;i++) {
         IRIS_OUTPUT *o=v->Output+i;if(!o->Ready)continue;
         if(o->Time!=time || !o->Size){v->Error=STATUS_DEVICE_DATA_ERROR;return v->Error;}
         RtlCopyMemory(output,o->Buffer.Cpu+o->Offset,o->Size);*bytes=o->Size;*keyframe=(o->Picture&9)!=0;
@@ -365,6 +399,253 @@ static NTSTATUS LowPower(IRIS *v,ULONG offset) {
     }
     return STATUS_IO_TIMEOUT;
 }
+static VOID DecodeSizes(IRIS *v,ULONG sizes[6]) {
+    ULONG alignment=v->Codec==3?32:16;
+    ULONG w=Align(v->Width,alignment),h=Align(v->Height,alignment),n=v->DpbCount+(v->Codec==7?7u:0u);
+    RtlZeroMemory(sizes,sizeof(ULONG)*6);
+    if(v->Codec==1) {
+        sizes[0]=IrisDecode_hfi_buffer_bin_h264d(w,h,4);
+        sizes[1]=IrisDecode_hfi_buffer_comv_h264d(w,h,n);
+        sizes[2]=IrisDecode_hfi_buffer_non_comv_h264d(w,h,4);
+        sizes[3]=IrisDecode_hfi_buffer_line_h264d(w,h,1,4);
+        sizes[4]=IrisDecode_hfi_buffer_persist_h264d();
+    } else if(v->Codec==3) {
+        sizes[0]=IrisDecode_hfi_buffer_bin_h265d(w,h,4);
+        sizes[1]=IrisDecode_hfi_buffer_comv_h265d(w,h,n);
+        sizes[2]=IrisDecode_hfi_buffer_non_comv_h265d(w,h,4);
+        sizes[3]=IrisDecode_hfi_buffer_line_h265d(w,h,1,4);
+        sizes[4]=IrisDecode_hfi_buffer_persist_h265d(0);
+    } else if(v->Codec==5) {
+        sizes[0]=IrisDecode_hfi_buffer_bin_vp9d(w,h,4);
+        sizes[3]=IrisDecode_hfi_buffer_line_vp9d(w,h,n,1,4);
+        sizes[4]=IrisDecode_hfi_buffer_persist_vp9d();
+    } else {
+        sizes[0]=IrisDecode_hfi_buffer_bin_av1d(w,h,4);
+        sizes[1]=IrisDecode_hfi_buffer_comv_av1d(w,h,n);
+        sizes[3]=IrisDecode_hfi_buffer_line_av1d(w,h,1,4);
+        sizes[4]=IrisDecode_hfi_buffer_persist_av1d(0,0,0);
+        sizes[5]=max(IrisDecode_size_av1d_ibc_nv12_ubwc(w,h),IrisDecode_size_av1d_ibc_tp10_ubwc(w,h));
+    }
+}
+static NTSTATUS DecodeClock(IRIS *v) {
+    if(v->Width*v->Height<=4096u*2160)return STATUS_SUCCESS;
+    IRIS *core=v->Core;
+    ULONG l=GpuRead(core->Clocks,0x10),alpha=GpuRead(core->Clocks,0x14)&65535;
+    if(((ULONGLONG)(l&65535)<<16|alpha)>=((ULONGLONG)83<<16|0x5556))return STATUS_SUCCESS;
+    GpuWrite(core->Clocks,0x10,(l&0xffff0000u)|83);GpuWrite(core->Clocks,0x14,0x5556);
+    GpuWrite(core->Clocks,0,GpuRead(core->Clocks,0)|(1u<<14));
+    KeStallExecutionProcessor(1);
+    NTSTATUS status=GpuPoll(core->Clocks,0,1u<<13,1u<<13,10000);
+    GpuWrite(core->Clocks,0,GpuRead(core->Clocks,0)&~(1u<<14));
+    if(NT_SUCCESS(status))status=GpuPoll(core->Clocks,0,0x80000000u,0x80000000u,10000);
+    if(NT_SUCCESS(status))KeStallExecutionProcessor(100);
+    else core->Error=status;
+    return status;
+}
+NTSTATUS IrisDecodeStart(IRIS *v,const GPU_DECODE_CONFIG *config) {
+    if(!v || v->Session || !v->Core->FirmwareReady || !NT_SUCCESS(v->Core->Error))return STATUS_INVALID_DEVICE_STATE;
+    if(!config)return STATUS_INVALID_PARAMETER;
+    ULONG dimension=config->Codec==3?8192:4096,pixels=config->Codec==3?8192*4320:4096*2160;
+    if(config->Width<64 || config->Height<64 || config->Width>dimension || config->Height>dimension ||
+       config->Width*config->Height>pixels || ((config->Width|config->Height)&1) ||
+       (config->Codec!=1 && config->Codec!=3 && config->Codec!=5 && config->Codec!=7) ||
+       (config->BitDepth!=8 && config->BitDepth!=10) || (config->Codec==1 && config->BitDepth!=8) ||
+       (config->Flags&~(GPU_DECODE_ORDER|GPU_DECODE_SURFACES|GPU_DECODE_QUEUED_SURFACES)) ||
+       ((config->Flags&GPU_DECODE_QUEUED_SURFACES) && !(config->Flags&GPU_DECODE_SURFACES)) ||
+       config->Reserved[0] || config->Reserved[1] || config->Reserved[2])return STATUS_INVALID_PARAMETER;
+    v->Codec=config->Codec;v->BitDepth=config->BitDepth;v->Width=config->Width;v->Height=config->Height;
+    v->Surfaces=(config->Flags&GPU_DECODE_SURFACES)!=0;
+    v->QueuedSurfaces=(config->Flags&GPU_DECODE_QUEUED_SURFACES)!=0;
+    v->OutputCount=20;v->DpbCount=v->Codec==7?11:20;
+    if(v->Codec==3) {
+        /* HEVC level 6.2 DPB limits, with four slots for the VPP pipeline. */
+        ULONG area=v->Width*v->Height;
+        v->DpbCount=4+(area<=35651584/4?16:area<=35651584/2?12:area<=35651584*3/4?8:6);
+    }
+    v->Stride=Align(v->Width*(v->BitDepth==10?2:1),v->BitDepth==10?256:128);v->Scanline=Align(v->Height,32);
+    NTSTATUS status=DecodeClock(v);if(!NT_SUCCESS(status))return status;
+    ULONG session=++v->Core->Session,id=0;
+    status=Send(v,0x01000003,3,1,0,0,&session,4,&id);
+    if(!NT_SUCCESS(status))return status;
+    v->Session=session;
+    status=Property(v,0x03000100,9,0,v->Codec);
+    if(NT_SUCCESS(status))status=Property(v,0x03000168,1,1,0);
+    if(NT_SUCCESS(status))status=Response(v,id);
+    if(NT_SUCCESS(status) && v->Codec==7)status=Property(v,0x03000189,1,1,0);
+    if(NT_SUCCESS(status) && v->Codec!=7 && (config->Flags&GPU_DECODE_ORDER))status=Property(v,0x0300015b,1,1,1);
+    ULONG resolution=Align(v->Width,v->Codec==3?32:16)<<16|Align(v->Height,v->Codec==3?32:16);
+    ULONG comvCount=v->DpbCount+(v->Codec==7?7u:0u);
+    ULONG properties[][3]={{0x03000103,1,resolution},{0x0300010f,1,v->BitDepth<<16|v->BitDepth},
+        {0x03000124,1,v->DpbCount},{0x03000193,1,comvCount},{0x0300010a,1,1},{0x0300010b,1,4}};
+    for(ULONG i=0;NT_SUCCESS(status) && i<RTL_NUMBER_OF(properties);i++)
+        status=Property(v,properties[i][0],properties[i][1],i>=4?0:1,properties[i][2]);
+    ULONG crop[2]={0,0};
+    if(NT_SUCCESS(status))status=Send(v,0x03000105,0,13,session,1,crop,sizeof(crop),NULL);
+    ULONG subscription[13]={1},count=1;
+    for(ULONG n=0;n<RTL_NUMBER_OF(DecodeProperties);n++) {
+        if((n==4 || n==5) && v->Codec!=1)continue;
+        if(n==8 && v->Codec!=3 && v->Codec!=7)continue;
+        if(n==9 && v->Codec==5)continue;
+        if(n>=10 && v->Codec!=7)continue;
+        subscription[count++]=DecodeProperties[n];
+    }
+    if(NT_SUCCESS(status))status=Send(v,0x0100000b,3,11,session,1,subscription,count*4,&id);
+    if(NT_SUCCESS(status))status=Response(v,id);
+    ULONG sizes[6],types[]={7,10,11,8,12,5};DecodeSizes(v,sizes);
+    for(ULONG i=0;NT_SUCCESS(status) && i<RTL_NUMBER_OF(v->Internal);i++)if(sizes[i]) {
+        status=IrisMemoryAllocate(&v->Core->Memory[0],v->Internal+i,sizes[i],FALSE);
+        if(NT_SUCCESS(status))status=Buffer(v,types[i],0,v->Internal+i,i==4?0:1,0,0);
+    }
+    if(NT_SUCCESS(status))status=IrisMemoryAllocate(&v->Core->Memory[0],&v->DecodeInput,Align(max(v->Width*v->Height*3/2,4*1024*1024u),4096),FALSE);
+    if(NT_SUCCESS(status)){status=Command(v,0x01000005,1);if(NT_SUCCESS(status))v->Started=1;}
+    v->Error=status;return status;
+}
+static NTSTATUS DecodeOutputStart(IRIS *v) {
+    if((v->SettingsMask&15)!=15)return STATUS_DEVICE_DATA_ERROR;
+    ULONG depth=v->Settings[2][0],coded=v->Settings[0][0],crop=v->Settings[1][1];
+    ULONG width=coded>>16,height=coded&65535;
+    if(!width || !height || width>Align(v->Width,32) || height>v->Scanline ||
+       v->Settings[1][0] || (crop>>16)>width || (crop&65535)>height ||
+       width-(crop>>16)!=v->Width || height-(crop&65535)!=v->Height ||
+       depth!=(v->BitDepth<<16|v->BitDepth) || !v->Settings[3][0] || v->Settings[3][0]>v->DpbCount)return STATUS_NOT_SUPPORTED;
+    /* Allocate the parsed stream's buffer count rather than the codec maximum. */
+    v->DpbCount=v->Settings[3][0];
+    v->OutputCount=v->Surfaces?4:min(4u,v->DpbCount);
+    ULONG session=v->Session,id=0,subscription[13]={1},count=1;
+    for(ULONG n=0;n<RTL_NUMBER_OF(DecodeProperties);n++)if(v->SettingsMask&(1u<<n))subscription[count++]=DecodeProperties[n];
+    NTSTATUS status=Send(v,0x0100000b,3,11,session,2,subscription,count*4,&id);
+    if(NT_SUCCESS(status))status=Response(v,id);
+    for(ULONG n=0;NT_SUCCESS(status) && n<RTL_NUMBER_OF(DecodeProperties);n++)if(v->SettingsMask&(1u<<n))
+        status=Send(v,DecodeProperties[n],0,n==1?13:1,session,2,v->Settings[n],n==1?8:4,NULL);
+    ULONG outputProperties[]={2,0x03000162};
+    if(NT_SUCCESS(status))status=Send(v,0x0100000b,3,11,session,2,outputProperties,sizeof(outputProperties),&id);
+    if(NT_SUCCESS(status))status=Response(v,id);
+    if(NT_SUCCESS(status))status=Property(v,0x03000184,1,2,1);
+    if(NT_SUCCESS(status))status=Property(v,0x03000101,9,2,v->BitDepth==10?3:1);
+    ULONG stride=v->Stride/(v->BitDepth==10?2:1);
+    ULONG lines[]={stride<<16|v->Scanline,stride<<16|(v->Scanline/2)};
+    if(NT_SUCCESS(status))status=Send(v,0x03000104,0,13,session,2,lines,sizeof(lines),NULL);
+    ULONG dpbSize=v->BitDepth==10?IrisDecode_size_av1d_ibc_tp10_ubwc(v->Width,v->Height):IrisDecode_size_av1d_ibc_nv12_ubwc(v->Width,v->Height);
+    for(ULONG i=0;NT_SUCCESS(status) && i<v->DpbCount;i++) {
+        status=IrisMemoryAllocate(&v->Core->Memory[1],v->Dpb+i,dpbSize,FALSE);
+    }
+    for(ULONG i=0;!v->Surfaces && NT_SUCCESS(status) && i<v->OutputCount;i++)
+        status=IrisMemoryAllocate(&v->Core->Memory[1],&v->Output[i].Buffer,Align(v->Stride*v->Scanline*3/2,4096),TRUE);
+    if(NT_SUCCESS(status)){status=Command(v,0x01000005,2);if(NT_SUCCESS(status))v->Started=3;}
+    for(ULONG i=0;NT_SUCCESS(status) && i<v->DpbCount;i++)status=Buffer(v,6,i,v->Dpb+i,2,0,0);
+    for(ULONG i=0;NT_SUCCESS(status) && i<v->OutputCount;i++)
+        if(!v->Surfaces || (v->Output[i].Buffer.Mdl && (v->QueuedSurfaces || i==v->Selected)))
+            status=Buffer(v,2,i,&v->Output[i].Buffer,2,0,0);
+    v->Error=status;return status;
+}
+NTSTATUS IrisDecodeInput(IRIS *v,const UCHAR *data,ULONG bytes,ULONGLONG time) {
+    if(!v || !v->Codec || !(v->Started&1) || !NT_SUCCESS(v->Error))return STATUS_INVALID_DEVICE_STATE;
+    if(!data || !bytes || bytes>v->DecodeInput.Size)return STATUS_INVALID_BUFFER_SIZE;
+    if(v->DecodeDrained) {
+        for(ULONG i=0;i<v->OutputCount;i++)if(v->Output[i].Ready)return STATUS_DEVICE_BUSY;
+        ULONG reason=0x01000007,id=0;NTSTATUS status=STATUS_SUCCESS;
+        for(ULONG port=1;NT_SUCCESS(status) && port<=2;port++) {
+            status=Send(v,0x01000008,3,1,v->Session,port,&reason,4,&id);
+            if(NT_SUCCESS(status))status=Response(v,id);
+        }
+        for(ULONG i=0;NT_SUCCESS(status) && i<v->OutputCount;i++)if(!v->Output[i].Queued)
+            status=Buffer(v,2,i,&v->Output[i].Buffer,2,0,0);
+        if(!NT_SUCCESS(status)){v->Error=status;return status;}
+        v->DecodeDrained=FALSE;
+    }
+    RtlCopyMemory(v->DecodeInput.Cpu,data,bytes);KeMemoryBarrier();
+    v->InputAddress=v->DecodeInput.Address;v->InputDone=FALSE;
+    NTSTATUS status=Buffer(v,1,0,&v->DecodeInput,1,bytes,time);
+    if(NT_SUCCESS(status))status=Response(v,IRIS_WAIT_INPUT);
+    v->Error=status;return status;
+}
+NTSTATUS IrisDecodeOutput(IRIS *v,GPU_DECODE_OUTPUT *output,ULONG capacity,PULONG bytes) {
+    if(!v || !v->Codec || v->Surfaces || !output || !bytes || !NT_SUCCESS(v->Error))return STATUS_INVALID_DEVICE_STATE;
+    ULONG row=v->Width*(v->BitDepth==10?2:1),size=row*(v->Height+v->Height/2);
+    if(capacity<sizeof(*output) || size>capacity-sizeof(*output))return STATUS_BUFFER_TOO_SMALL;
+    NTSTATUS status=Response(v,IRIS_POLL_OUTPUT);
+    if(status!=STATUS_NO_MORE_ENTRIES && !NT_SUCCESS(status))return status;
+    for(;;) {
+        ULONG i=v->OutputCount;ULONGLONG order=MAXULONGLONG;
+        for(ULONG n=0;n<v->OutputCount;n++)if(v->Output[n].Ready && v->Output[n].Order<order){i=n;order=v->Output[n].Order;}
+        if(i==v->OutputCount)break;
+        IRIS_OUTPUT *o=v->Output+i;
+        if(o->Size) {
+            PUCHAR dst=(PUCHAR)(output+1),src=o->Buffer.Cpu+o->Offset;
+            ULONG span=v->Stride*(v->Scanline+v->Height/2);
+            if(o->Offset>o->Buffer.Size || span>o->Buffer.Size-o->Offset)return STATUS_DEVICE_DATA_ERROR;
+            if(o->Buffer.Cached)KeFlushIoBuffers(o->Buffer.Mdl,TRUE,TRUE);
+            KeMemoryBarrier();
+            for(ULONG y=0;y<v->Height;y++)RtlCopyMemory(dst+y*row,src+y*v->Stride,row);
+            src+=v->Stride*v->Scanline;dst+=row*v->Height;
+            for(ULONG y=0;y<v->Height/2;y++)RtlCopyMemory(dst+y*row,src+y*v->Stride,row);
+            output->Time=o->Time;output->Bytes=size;output->Width=v->Width;output->Height=v->Height;output->BitDepth=v->BitDepth;
+            *bytes=sizeof(*output)+size;
+        }
+        o->Ready=FALSE;
+        if(!v->DecodeDrained) {status=Buffer(v,2,i,&o->Buffer,2,0,0);if(!NT_SUCCESS(status)){v->Error=status;return status;}}
+        if(o->Size)return STATUS_SUCCESS;
+    }
+    if(v->DecodeDrained){RtlZeroMemory(output,sizeof(*output));*bytes=sizeof(*output);return STATUS_SUCCESS;}
+    *bytes=0;return STATUS_NO_MORE_ENTRIES;
+}
+NTSTATUS IrisDecodeDrain(IRIS *v) {
+    if(!v || !v->Codec || !NT_SUCCESS(v->Error))return STATUS_INVALID_DEVICE_STATE;
+    return Command(v,0x01000007,1);
+}
+NTSTATUS IrisDecodeSurface(IRIS *v,GPU_BO *source,const GPU_DECODE_SURFACE *surface) {
+    if(!v || !v->Surfaces || !NT_SUCCESS(v->Error) || !source || !surface)return STATUS_INVALID_DEVICE_STATE;
+    if(!v->QueuedSurfaces)for(ULONG i=0;i<v->OutputCount;i++)if(v->Output[i].Ready || v->Output[i].Queued)return STATUS_DEVICE_BUSY;
+    ULONG pixel=v->BitDepth==10?2:1,pitch=surface->Pitch,lines=surface->Scanlines;
+    if(surface->Reserved || surface->Offset>MAXULONG || surface->ChromaOffset>MAXULONG || surface->Address!=source->Address ||
+       pitch<v->Width*pixel || (pitch%(pixel==2?256:128)) || pitch/pixel>65535 ||
+       lines<v->Height || (lines&31) || lines>65535 ||
+       (ULONGLONG)pitch*(lines+lines/2)!=surface->Size || ((surface->Size|surface->Offset|surface->ChromaOffset)&4095))return STATUS_INVALID_PARAMETER;
+    if((v->Started&2) && (pitch!=v->Stride || lines!=v->Scanline))return STATUS_NOT_SUPPORTED;
+    v->Stride=pitch;v->Scanline=lines;
+    ULONGLONG address=source->Address+surface->Offset;ULONG selected=4;
+    for(ULONG i=0;i<4;i++)if(v->Output[i].Source==address && v->Output[i].Buffer.Size==surface->Size){selected=i;break;}
+    if(selected<4 && (v->Output[selected].Ready || v->Output[selected].Queued))return STATUS_DEVICE_BUSY;
+    if(selected==4) {
+        ULONGLONG oldest=MAXULONGLONG;
+        for(ULONG i=0;i<4;i++)if(!v->Output[i].Ready && !v->Output[i].Queued) {
+            if(!v->Output[i].Buffer.Mdl){selected=i;break;}
+            if(v->Output[i].Order<oldest){oldest=v->Output[i].Order;selected=i;}
+        }
+        if(selected==4)return STATUS_DEVICE_BUSY;
+        NTSTATUS status=IrisMemoryReturn(&v->Core->Memory[1],&v->Output[selected].Buffer);if(!NT_SUCCESS(status))return status;
+        status=IrisMemoryBorrow(&v->Core->Memory[1],&v->Output[selected].Buffer,source,(ULONG)surface->Offset,(ULONG)surface->ChromaOffset,pitch*lines,surface->Size);
+        if(!NT_SUCCESS(status)){v->Error=status;return status;}
+        v->Output[selected].Source=address;
+    }
+    v->Selected=selected;
+    if(v->Started&2)return Buffer(v,2,selected,&v->Output[selected].Buffer,2,0,0);
+    return STATUS_SUCCESS;
+}
+NTSTATUS IrisDecodeComplete(IRIS *v,GPU_DECODE_OUTPUT *output) {
+    if(!v || !v->Surfaces || v->QueuedSurfaces || !output || !NT_SUCCESS(v->Error))return STATUS_INVALID_DEVICE_STATE;
+    NTSTATUS status=Response(v,IRIS_POLL_OUTPUT);
+    if(status!=STATUS_NO_MORE_ENTRIES && !NT_SUCCESS(status))return status;
+    IRIS_OUTPUT *o=&v->Output[v->Selected];if(!o->Ready)return STATUS_NO_MORE_ENTRIES;
+    if(!o->Size || o->Offset)return STATUS_DEVICE_DATA_ERROR;
+    KeMemoryBarrier();
+    output->Time=o->Time;output->Bytes=v->Width*v->Height*3/2*(v->BitDepth==10?2:1);
+    output->Width=v->Width;output->Height=v->Height;output->BitDepth=v->BitDepth;
+    o->Ready=FALSE;return STATUS_SUCCESS;
+}
+NTSTATUS IrisDecodeDequeue(IRIS *v,GPU_DECODE_COMPLETION *output) {
+    if(!v || !v->QueuedSurfaces || !output || !NT_SUCCESS(v->Error))return STATUS_INVALID_DEVICE_STATE;
+    NTSTATUS status=Response(v,IRIS_POLL_OUTPUT);
+    if(status!=STATUS_NO_MORE_ENTRIES && !NT_SUCCESS(status))return status;
+    ULONG selected=v->OutputCount;ULONGLONG order=MAXULONGLONG;
+    for(ULONG i=0;i<v->OutputCount;i++)if(v->Output[i].Ready && v->Output[i].Order<order){selected=i;order=v->Output[i].Order;}
+    if(selected==v->OutputCount)return STATUS_NO_MORE_ENTRIES;
+    IRIS_OUTPUT *o=v->Output+selected;if(o->Offset || (!o->Size && !v->DecodeDrained))return STATUS_DEVICE_DATA_ERROR;
+    KeMemoryBarrier();
+    output->Output.Time=o->Time;output->Output.Bytes=o->Size?v->Width*v->Height*3/2*(v->BitDepth==10?2:1):0;
+    output->Output.Width=v->Width;output->Output.Height=v->Height;output->Output.BitDepth=v->BitDepth;
+    output->SurfaceAddress=o->Source;o->Ready=FALSE;return STATUS_SUCCESS;
+}
 static NTSTATUS Drain(IRIS *v) {
     GpuWrite(v->Registers,0xa0148,0);
     GpuWrite(v->Registers,0xb0010,GpuRead(v->Registers,0xb0010)|12);
@@ -385,15 +666,10 @@ static NTSTATUS Drain(IRIS *v) {
     GpuWrite(v->Registers,0xb0054,0);
     return GpuPoll(v->Registers,0xb0058,MAXULONG,0,2000);
 }
-NTSTATUS IrisDelete(IRIS *v) {
+static NTSTATUS CoreShutdown(IRIS *v) {
     if(!v)return STATUS_SUCCESS;
+    v->Error=STATUS_DEVICE_NOT_READY;
     if(v->ScmPending)return STATUS_DEVICE_BUSY;
-    if(v->Session && NT_SUCCESS(v->Error)) {
-        for(ULONG port=2;port;port--)if(v->Started&port) {
-            v->Error=Command(v,0x01000006,port);if(!NT_SUCCESS(v->Error))break;
-        }
-        if(NT_SUCCESS(v->Error))v->Error=Command(v,0x01000004,0);
-    }
     if(v->PasStarted) {
         NTSTATUS status=Pas(v,0xc2000206,0,0,1);if(!NT_SUCCESS(status))return status;
         v->PasStarted=FALSE;
@@ -401,6 +677,9 @@ NTSTATUS IrisDelete(IRIS *v) {
     if(v->FirmwareReady) {
         NTSTATUS status=Drain(v);if(!NT_SUCCESS(status))return status;
         v->FirmwareReady=FALSE;
+    }
+    for(ULONG i=2;i--;) {
+        NTSTATUS released=IrisMemoryStop(v->Memory+i);if(!NT_SUCCESS(released))return released;
     }
     if(v->Prepared) {
         for(ULONG i=9;i-->5;)if(v->ClockMask&(1u<<i))GpuWrite(v->Clocks,ClockRegisters[i],v->SavedClocks[i]);
@@ -420,30 +699,40 @@ NTSTATUS IrisDelete(IRIS *v) {
         for(ULONG i=3;i--;)if(v->ClockMask&(1u<<i))GpuWrite(v->Clocks,ClockRegisters[i],v->SavedClocks[i]);
         GpuWrite(v->Gpu->Gcc,0x32018,v->SavedGcc[0]);GpuWrite(v->Gpu->Gcc,0x32028,v->SavedGcc[1]);
     }
-    if(v->VoteMask&2){NTSTATUS status=Arc(v,"mmcx.lvl",0);if(!NT_SUCCESS(status))return status;v->VoteMask&=~2u;}
-    if(v->VoteMask&1){NTSTATUS status=Arc(v,"mxc.lvl",0);if(!NT_SUCCESS(status))return status;v->VoteMask&=~1u;}
+    v->Prepared=FALSE;
+    if(v->VoteMask) {
+        NTSTATUS status=GpuMultimediaPower(v->Gpu,GPU_MULTIMEDIA_VIDEO,FALSE);
+        if(!NT_SUCCESS(status))return status;
+        v->VoteMask=0;
+    }
+    return STATUS_SUCCESS;
+}
+static NTSTATUS CoreDelete(IRIS *v) {
+    NTSTATUS status=CoreShutdown(v);if(!NT_SUCCESS(status))return status;
     if(v->Timer)ExDeleteTimer(v->Timer,TRUE,TRUE,NULL);
     for(ULONG i=0;i<RTL_NUMBER_OF(v->Internal);i++)GpuFree(v->Internal+i);
-    for(ULONG i=0;i<RTL_NUMBER_OF(v->Output);i++)GpuFree(&v->Output[i].Buffer);
+    for(ULONG i=0;i<v->OutputCount;i++)GpuFree(&v->Output[i].Buffer);
+    for(ULONG i=0;i<v->DpbCount;i++)GpuFree(v->Dpb+i);
     GpuFree(&v->Metadata);GpuFree(&v->Arp);GpuFree(&v->Queues);
     if(v->Registers)MmUnmapIoSpace(v->Registers,0xf0000);
     if(v->Clocks)MmUnmapIoSpace(v->Clocks,0xa000);
-    if(v->Smmu)MmUnmapIoSpace(v->Smmu,4096);
+    if(v->Smmu)MmUnmapIoSpace(v->Smmu,0x100000);
     ExFreePoolWithTag(v,GPU_TAG);return STATUS_SUCCESS;
 }
-NTSTATUS IrisCreate(GPU *gpu,PDRIVER_OBJECT driver,IRIS **out) {
+static NTSTATUS CoreCreate(GPU *gpu,PDRIVER_OBJECT driver,IRIS **out) {
     if(!gpu || !gpu->Online || !out || *out)return STATUS_INVALID_DEVICE_STATE;
     IRIS *v=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*v),GPU_TAG);if(!v)return STATUS_INSUFFICIENT_RESOURCES;
-    v->Gpu=gpu;v->Driver=driver;
+    v->Core=v;v->Gpu=gpu;v->Driver=driver;
     PHYSICAL_ADDRESS p;p.QuadPart=0xaa00000;v->Registers=MmMapIoSpaceEx(p,0xf0000,PAGE_READWRITE|PAGE_NOCACHE);
     p.QuadPart=0xaaf0000;v->Clocks=MmMapIoSpaceEx(p,0xa000,PAGE_READWRITE|PAGE_NOCACHE);
-    p.QuadPart=0x15000000;v->Smmu=MmMapIoSpaceEx(p,4096,PAGE_READONLY|PAGE_NOCACHE);
+    p.QuadPart=0x15000000;v->Smmu=MmMapIoSpaceEx(p,0x100000,PAGE_READWRITE|PAGE_NOCACHE);
     NTSTATUS status=v->Registers && v->Clocks && v->Smmu?STATUS_SUCCESS:STATUS_INSUFFICIENT_RESOURCES;
     ULONGLONG supported=0;
     if(NT_SUCCESS(status))status=Smc(v,0xc2000207,1,9,0,0,0,&supported);
     if(NT_SUCCESS(status) && !supported)status=STATUS_NOT_SUPPORTED;
-    if(NT_SUCCESS(status))status=Translation(v);
     if(NT_SUCCESS(status))status=Power(v);
+    if(NT_SUCCESS(status))status=IrisMemoryStart(v->Memory,v->Smmu,0x1940);
+    if(NT_SUCCESS(status))status=IrisMemoryStart(v->Memory+1,v->Smmu,0x1947);
     if(NT_SUCCESS(status))GpuWrite(v->Registers,0xb0088,0);
     if(NT_SUCCESS(status))status=GpuAllocateContiguous(&v->Queues,0x400000,MmNonCached,0xdfffffff,0x400000);
     v->Queues.Address=v->Queues.Physical;
@@ -477,9 +766,66 @@ NTSTATUS IrisCreate(GPU *gpu,PDRIVER_OBJECT driver,IRIS **out) {
     }
     if(NT_SUCCESS(status))status=SystemInit(v);
     if(!NT_SUCCESS(status)) {
-        NTSTATUS released=IrisDelete(v);
-        if(!NT_SUCCESS(released)){*out=v;return released;}
+        NTSTATUS released=CoreDelete(v);
+        if(!NT_SUCCESS(released)){v->Error=status;*out=v;return released;}
         return status;
     }
     *out=v;return STATUS_SUCCESS;
+}
+
+NTSTATUS IrisCreate(GPU *gpu,PDRIVER_OBJECT driver,IRIS **out) {
+    if(!out || *out || !gpu || !gpu->Online)return STATUS_INVALID_DEVICE_STATE;
+    if(SharedCore && !SharedCore->Next && (!SharedCore->FirmwareReady || !NT_SUCCESS(SharedCore->Error))) {
+        NTSTATUS status=CoreDelete(SharedCore);if(!NT_SUCCESS(status))return status;SharedCore=NULL;
+    }
+    if(!SharedCore) {
+        NTSTATUS status=CoreCreate(gpu,driver,&SharedCore);if(!NT_SUCCESS(status))return status;
+    }
+    if(SharedCore->Gpu!=gpu || !SharedCore->FirmwareReady || !NT_SUCCESS(SharedCore->Error))return STATUS_DEVICE_NOT_READY;
+    IRIS *v=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*v),GPU_TAG);if(!v)return STATUS_INSUFFICIENT_RESOURCES;
+    v->Core=SharedCore;v->Gpu=gpu;v->Driver=driver;
+    v->Next=SharedCore->Next;SharedCore->Next=v;*out=v;return STATUS_SUCCESS;
+}
+NTSTATUS IrisDelete(IRIS *v) {
+    if(!v) {
+        if(!SharedCore || SharedCore->Next)return STATUS_SUCCESS;
+        NTSTATUS status=CoreDelete(SharedCore);if(NT_SUCCESS(status))SharedCore=NULL;return status;
+    }
+    IRIS *core=v->Core;
+    if(core->ScmPending)return STATUS_DEVICE_BUSY;
+    if(v->Session && core->FirmwareReady) {
+        NTSTATUS previous=v->Error,status=core->Error;v->Error=STATUS_SUCCESS;
+        for(ULONG port=2;NT_SUCCESS(status) && NT_SUCCESS(previous) && port;port--)if(v->Started&port) {
+            status=Command(v,0x01000006,port);if(NT_SUCCESS(status))v->Started&=~port;
+        }
+        if(NT_SUCCESS(status))status=Command(v,0x01000004,0);
+        if(!NT_SUCCESS(status)) {
+            /* A failed session must not leave DMA running while its owner exits.
+               Shut down the shared firmware; other sessions observe device loss. */
+            status=CoreShutdown(core);if(!NT_SUCCESS(status))return status;
+            core->Error=STATUS_DEVICE_NOT_READY;
+        }
+    }
+    v->Session=0;
+    /* Free mappings only after close or PAS shutdown has stopped session DMA. */
+    for(ULONG i=0;i<RTL_NUMBER_OF(v->Internal);i++) {
+        NTSTATUS status=IrisMemoryFree(&core->Memory[0],v->Internal+i);if(!NT_SUCCESS(status))return status;
+    }
+    for(ULONG i=0;i<v->OutputCount;i++) {
+        NTSTATUS status=v->Surfaces?IrisMemoryReturn(&core->Memory[1],&v->Output[i].Buffer):IrisMemoryFree(&core->Memory[1],&v->Output[i].Buffer);if(!NT_SUCCESS(status))return status;
+    }
+    for(ULONG i=0;i<v->DpbCount;i++) {
+        NTSTATUS status=IrisMemoryFree(&core->Memory[1],v->Dpb+i);if(!NT_SUCCESS(status))return status;
+    }
+    NTSTATUS freed=IrisMemoryFree(&core->Memory[0],&v->DecodeInput);if(!NT_SUCCESS(freed))return freed;
+    GpuFree(&v->Arp);
+    if(core->Next==v && !v->Next) {
+        NTSTATUS status=CoreDelete(core);if(!NT_SUCCESS(status))return status;
+        SharedCore=NULL;
+    } else {
+        IRIS **entry=&core->Next;while(*entry && *entry!=v)entry=&(*entry)->Next;
+        if(!*entry)return STATUS_INVALID_HANDLE;
+        *entry=v->Next;
+    }
+    ExFreePoolWithTag(v,GPU_TAG);return STATUS_SUCCESS;
 }

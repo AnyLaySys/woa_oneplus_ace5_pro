@@ -7,9 +7,9 @@ typedef ULONGLONG GPU_U64;
 typedef uint32_t GPU_U32;
 typedef uint64_t GPU_U64;
 #endif
-#define GPU_UAPI_VERSION 4
+#define GPU_UAPI_VERSION 5
 #define GPU_MAX_BUFFERS 1024
-#define GPU_MAX_BUFFER_SIZE 0x20000000
+#define GPU_MAX_BUFFER_SIZE 0x7ffff000u
 #define GPU_CLIENT_VA_BASE 0x100000000ULL
 #define GPU_CLIENT_VA_SIZE 0x200000000ULL
 #define GPU_CLIENT_VA_END (GPU_CLIENT_VA_BASE+GPU_CLIENT_VA_SIZE)
@@ -39,6 +39,25 @@ typedef struct { GPU_U64 Address,Size; } GPU_SHARED_IMPORT;
 typedef struct { GPU_U32 Width,Height,Rate,Bitrate,Profile,Level,Gop,Reserved; } GPU_VIDEO_CONFIG;
 typedef struct { GPU_U64 Address,Time; GPU_U32 Keyframe,Bitrate; } GPU_VIDEO_INPUT;
 typedef struct { GPU_U32 Bytes,Keyframe; GPU_U64 Time; } GPU_VIDEO_OUTPUT;
+#define GPU_IOCTL_DECODE_OPEN CTL_CODE(FILE_DEVICE_UNKNOWN,0x819,METHOD_BUFFERED,FILE_READ_DATA|FILE_WRITE_DATA)
+#define GPU_IOCTL_DECODE_INPUT CTL_CODE(FILE_DEVICE_UNKNOWN,0x81A,METHOD_BUFFERED,FILE_READ_DATA|FILE_WRITE_DATA)
+#define GPU_IOCTL_DECODE_OUTPUT CTL_CODE(FILE_DEVICE_UNKNOWN,0x81B,METHOD_OUT_DIRECT,FILE_READ_DATA|FILE_WRITE_DATA)
+#define GPU_IOCTL_DECODE_DRAIN CTL_CODE(FILE_DEVICE_UNKNOWN,0x81C,METHOD_BUFFERED,FILE_READ_DATA|FILE_WRITE_DATA)
+#define GPU_IOCTL_DECODE_SURFACE CTL_CODE(FILE_DEVICE_UNKNOWN,0x81D,METHOD_BUFFERED,FILE_READ_DATA|FILE_WRITE_DATA)
+#define GPU_IOCTL_DECODE_COMPLETE CTL_CODE(FILE_DEVICE_UNKNOWN,0x81E,METHOD_BUFFERED,FILE_READ_DATA|FILE_WRITE_DATA)
+#define GPU_IOCTL_DECODE_DEQUEUE CTL_CODE(FILE_DEVICE_UNKNOWN,0x81F,METHOD_BUFFERED,FILE_READ_DATA|FILE_WRITE_DATA)
+/* Codec uses the Iris HFI decoder values: AVC=1, HEVC=3, VP9=5, AV1=7.
+   Output is tightly packed NV12 (8-bit) or P010 (10-bit). */
+#define GPU_DECODE_ORDER 1u
+#define GPU_DECODE_SURFACES 2u
+#define GPU_DECODE_QUEUED_SURFACES 4u
+/* The decoder borrows page-aligned GPU image planes. Complete returns metadata
+   after firmware DMA; the caller must finish GPU use before submitting again. */
+typedef struct { GPU_U64 Address,Offset,ChromaOffset; GPU_U32 Size,Pitch,Scanlines,Reserved; } GPU_DECODE_SURFACE;
+typedef struct { GPU_U32 Width,Height,Codec,BitDepth,Flags,Reserved[3]; } GPU_DECODE_CONFIG;
+typedef struct { GPU_U64 Time; GPU_U32 Bytes,Reserved; } GPU_DECODE_INPUT;
+typedef struct { GPU_U64 Time; GPU_U32 Bytes,Width,Height,BitDepth; } GPU_DECODE_OUTPUT;
+typedef struct { GPU_DECODE_OUTPUT Output; GPU_U64 SurfaceAddress; } GPU_DECODE_COMPLETION;
 typedef struct { GPU_U64 Address,Size; GPU_U32 Flags,Reserved; } GPU_VA_RESERVE;
 typedef struct { GPU_U64 Address,Size; GPU_U32 Handle,Reserved; } GPU_VA_ALLOCATION;
 typedef struct { GPU_U32 Handle,Buffer; GPU_U64 Offset,BufferOffset,Size; } GPU_VA_BIND;

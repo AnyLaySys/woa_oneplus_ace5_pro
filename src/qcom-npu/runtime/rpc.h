@@ -39,7 +39,6 @@ public:
     int MapFile(const std::filesystem::path& path, int* fd, int* size);
     int CloseFile(int fd);
     int FileAddress(int fd, int size, uint64_t* address);
-    int MapBuffer(uint32_t size, uint32_t flags, QCOM_NPU_ALLOCATION* allocation);
     int MapShared(uint32_t size, QCOM_NPU_SHARED_ALLOCATION* allocation, uint32_t flags = QCOM_NPU_SHARED, bool deferred = false);
     int MapSharedFile(int fd, bool map, bool pin = false);
     int DispatchQueue(const QCOM_NPU_QUEUE_DISPATCH& dispatch);

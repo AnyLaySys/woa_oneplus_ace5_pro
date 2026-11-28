@@ -67,7 +67,7 @@ NTSTATUS APIENTRY A830CreateAllocation(HANDLE adapter,DXGKARG_CREATEALLOCATION *
             ULONG bytes=A830PixelBytes(r.Format);
             if(!bytes || !r.Width || !r.Height || r.Width>MAXULONG/bytes ||
                r.Pitch<r.Width*bytes || r.Height>r.Size/r.Pitch)break;
-            if(r.Format==A830_FORMAT_NV12 && (((r.Width|r.Height|r.Pitch)&1) ||
+            if((r.Format==A830_FORMAT_NV12 || r.Format==A830_FORMAT_P010) && (((r.Width|r.Height|r.Pitch)&1) ||
                (r.Flags&A830_RESOURCE_PRIMARY) || (ULONGLONG)r.Pitch*(r.Height+r.Height/2)>r.Size))break;
         }
         A830_ALLOCATION *allocation=ExAllocatePool2(POOL_FLAG_NON_PAGED,sizeof(*allocation),GPU_TAG);
@@ -76,7 +76,13 @@ NTSTATUS APIENTRY A830CreateAllocation(HANDLE adapter,DXGKARG_CREATEALLOCATION *
         if(r.Flags&A830_RESOURCE_OWNED) {
             status=A830SharedCreate(allocation);
             if(!NT_SUCCESS(status)){ExFreePoolWithTag(allocation,GPU_TAG);info->hAllocation=NULL;break;}
-            info->Size=(r.Flags&A830_RESOURCE_PRIMARY)?((r.Size+4095)&~4095u):4096;
+            /* SharedCreate owns and maps the complete pixel BO independently
+               of the VidMm segment. This allocation is only its handle token,
+               including for primaries. Charging the pixels here a second time
+               fills the 64 MiB segment when DWM keeps native and IDD swapchains
+               resident together during a mode change. Resource.Size and the
+               scanout BO retain the full image extent. */
+            info->Size=4096;
         }
         info->PitchAlignedSize=0;info->HintedBank.Value=0;info->PhysicalAdapterIndex=0;
         info->pAllocationUsageHint=NULL;info->AllocationPriority=D3DDDI_ALLOCATIONPRIORITY_NORMAL;

@@ -7,6 +7,7 @@ template<class R,class... A> struct Unsupported<R (APIENTRY *)(D3D10DDI_HDEVICE,
    else {error(dev(h),DXGI_ERROR_UNSUPPORTED);if constexpr(!std::is_void_v<R>)return 0;}
  }
 };
+#include "decode.h"
 struct VideoProcessor {
  RECT source{},destination{},target{};
  D3D11_1DDI_VIDEO_PROCESSOR_COLOR_SPACE input{},output{};
@@ -24,20 +25,27 @@ static bool video_shader(Device *d) {
 cbuffer Params : register(b0) { float4 row0,row1,destination,source,flags,input,output,background; };
 Texture2D<float4> image : register(t0);
 Texture2D<float2> chroma : register(t1);
-float3 yuv(float3 color,float2 space) {
+float3 yuv(float3 color,float2 space,bool ten) {
+ if(ten) {
+   color*=65535.0/64;
+   float y=space.x?(color.x-64)/876:color.x/1023;
+   float2 uv=(color.yz-512)/(space.x?896:1023);
+   return space.y?float3(y+1.5748*uv.y,y-0.187324*uv.x-0.468124*uv.y,y+1.8556*uv.x):
+                  float3(y+1.402*uv.y,y-0.344136*uv.x-0.714136*uv.y,y+1.772*uv.x);
+ }
  float y=space.x?(color.x-16.0/255)*255/219:color.x;
  float2 uv=(color.yz-128.0/255)*(space.x?255.0/224:1);
  return space.y?float3(y+1.5748*uv.y,y-0.187324*uv.x-0.468124*uv.y,y+1.8556*uv.x):
                 float3(y+1.402*uv.y,y-0.344136*uv.x-0.714136*uv.y,y+1.772*uv.x);
 }
 float3 color_at(float2 position) {
- float3 color=flags.z?yuv(background.xyz,output.xy):background.xyz;
+ float3 color=flags.z?yuv(background.xyz,output.xy,false):background.xyz;
  float2 uv=(position-destination.xy)/destination.zw;
  if(flags.y && all(uv>=0) && all(uv<1)) {
    float2 rotated=float2(dot(float3(uv,1),row0.xyz),dot(float3(uv,1),row1.xyz));
    int2 pixel=int2(source.xy+min(source.zw-1,floor(rotated*source.zw)));
    float4 texel=image.Load(int3(pixel,0));
-   if(flags.x)color=yuv(float3(texel.x,chroma.Load(int3(pixel>>1,0))),input.xy);
+   if(flags.x)color=yuv(float3(texel.x,chroma.Load(int3(pixel>>1,0))),input.xy,flags.x>1);
    else color=input.z?(texel.xyz-16.0/255)*255/219:texel.xyz;
  }
  return color;
@@ -67,9 +75,6 @@ float4 main(float4 position : SV_Position) : SV_Target {
    for(size_t i=0;i<desc.section_count;i++)if(desc.sections[i].tag==0x52444853 || desc.sections[i].tag==0x58454853){okay=shader_create(d,&d->video_pixel,(const UINT *)desc.sections[i].data.code,&io,1);break;}
  vkd3d_shader_free_dxbc(&desc);vkd3d_shader_free_shader_code(&code);if(!okay && SUCCEEDED(d->failure))error(d,E_FAIL);return okay;
 }
-static void APIENTRY GetVideoDecoderProfileCount(D3D10DDI_HDEVICE,UINT *count){*count=0;}
-static void APIENTRY CheckVideoDecoderFormat(D3D10DDI_HDEVICE,const GUID *,DXGI_FORMAT,BOOL *supported){*supported=FALSE;}
-static void APIENTRY GetVideoDecoderConfigCount(D3D10DDI_HDEVICE,const D3D11_1DDI_VIDEO_DECODER_DESC *,UINT *count){*count=0;}
 static SIZE_T APIENTRY CalcPrivateVideoProcessorEnumSize(D3D10DDI_HDEVICE,const D3D11_1DDIARG_CREATEVIDEOPROCESSORENUM *){return sizeof(D3D11_1DDI_VIDEO_PROCESSOR_CONTENT_DESC);}
 static HRESULT APIENTRY CreateVideoProcessorEnum(D3D10DDI_HDEVICE,const D3D11_1DDIARG_CREATEVIDEOPROCESSORENUM *p,D3D11_1DDI_HVIDEOPROCESSORENUM h,D3D11_1DDI_HRTVIDEOPROCESSORENUM) {
  if(p->Desc.InputFrameFormat!=D3D11_1DDI_VIDEO_FRAME_FORMAT_PROGRESSIVE)return DXGI_ERROR_UNSUPPORTED;
@@ -77,7 +82,7 @@ static HRESULT APIENTRY CreateVideoProcessorEnum(D3D10DDI_HDEVICE,const D3D11_1D
  new(h.pDrvPrivate) D3D11_1DDI_VIDEO_PROCESSOR_CONTENT_DESC(p->Desc);return S_OK;
 }
 static void APIENTRY DestroyVideoProcessorEnum(D3D10DDI_HDEVICE,D3D11_1DDI_HVIDEOPROCESSORENUM){}
-static void APIENTRY CheckVideoProcessorFormat(D3D10DDI_HDEVICE,D3D11_1DDI_HVIDEOPROCESSORENUM,DXGI_FORMAT f,UINT *caps){*caps=rgb(f)||f==DXGI_FORMAT_NV12?3:0;}
+static void APIENTRY CheckVideoProcessorFormat(D3D10DDI_HDEVICE,D3D11_1DDI_HVIDEOPROCESSORENUM,DXGI_FORMAT f,UINT *caps){*caps=rgb(f)||f==DXGI_FORMAT_NV12?3:f==DXGI_FORMAT_P010?D3D11_1DDI_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT:0;}
 static void APIENTRY GetVideoProcessorCaps(D3D10DDI_HDEVICE,D3D11_1DDI_HVIDEOPROCESSORENUM,D3D11_1DDI_VIDEO_PROCESSOR_CAPS *p) {
  *p={};p->DeviceCaps=D3D11_1DDI_VIDEO_PROCESSOR_DEVICE_CAPS_YCbCr_MATRIX_CONVERSION|D3D11_1DDI_VIDEO_PROCESSOR_DEVICE_CAPS_NOMINAL_RANGE|D3D11_1DDI_VIDEO_PROCESSOR_DEVICE_CAPS_RGB_RANGE_CONVERSION;
  p->FeatureCaps=D3D11_1DDI_VIDEO_PROCESSOR_FEATURE_CAPS_ROTATION;p->RateConversionCapsCount=p->MaxInputStreams=p->MaxStreamStates=1;
@@ -107,14 +112,14 @@ static void APIENTRY VideoProcessorSetStreamAutoProcessingMode(D3D10DDI_HDEVICE 
 static void APIENTRY VideoProcessorSetStreamFilter(D3D10DDI_HDEVICE h,D3D11_1DDI_HVIDEOPROCESSOR,UINT stream,D3D11_1DDI_VIDEO_PROCESSOR_FILTER,BOOL enabled,int){if(stream || enabled)error(dev(h),DXGI_ERROR_UNSUPPORTED);}
 static void APIENTRY VideoProcessorSetStreamRotation(D3D10DDI_HDEVICE h,D3D11_1DDI_HVIDEOPROCESSOR p,UINT stream,BOOL enabled,D3D11_1DDI_VIDEO_PROCESSOR_ROTATION rotation){if(stream || rotation>D3D11_1DDI_VIDEO_PROCESSOR_ROTATION_270){error(dev(h),E_INVALIDARG);return;}object<VideoProcessor>(p)->rotation=enabled?rotation:D3D11_1DDI_VIDEO_PROCESSOR_ROTATION_IDENTITY;}
 template<class P,class H> static HRESULT create_view(Device *d,const P *p,H h) {
- Resource *r=res(p->hDrvResource);if(!r || p->MipSlice>=r->levels || p->FirstArraySlice>=r->layers || p->ArraySize!=1 || (!rgb(r->format) && r->format!=DXGI_FORMAT_NV12))return DXGI_ERROR_UNSUPPORTED;
+ Resource *r=res(p->hDrvResource);if(!r || p->MipSlice>=r->levels || p->FirstArraySlice>=r->layers || p->ArraySize!=1 || (!rgb(r->format) && !planar(r->format)))return DXGI_ERROR_UNSUPPORTED;
  auto *v=new(h.pDrvPrivate) View{};v->resource=r;v->format=r->format;v->level=p->MipSlice;v->layer=p->FirstArraySlice;
  return FAILED(d->failure)?d->failure:S_OK;
 }
 static SIZE_T APIENTRY CalcPrivateVideoProcessorInputViewSize(D3D10DDI_HDEVICE,const D3D11_1DDIARG_CREATEVIDEOPROCESSORINPUTVIEW *){return sizeof(VideoView);}
 static HRESULT APIENTRY CreateVideoProcessorInputView(D3D10DDI_HDEVICE h,const D3D11_1DDIARG_CREATEVIDEOPROCESSORINPUTVIEW *p,D3D11_1DDI_HVIDEOPROCESSORINPUTVIEW v,D3D11_1DDI_HRTVIDEOPROCESSORINPUTVIEW) {
  if(p->FourCC)return DXGI_ERROR_UNSUPPORTED;auto *input=new(v.pDrvPrivate) VideoView{};HRESULT hr=create_view(dev(h),p,v);
- if(SUCCEEDED(hr) && input->image.format==DXGI_FORMAT_NV12){input->image.format=DXGI_FORMAT_R8_UNORM;input->chroma=input->image;input->chroma.format=DXGI_FORMAT_R8G8_UNORM;}return hr;
+ if(SUCCEEDED(hr) && planar(input->image.format)){bool ten=input->image.format==DXGI_FORMAT_P010;input->image.format=ten?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R8_UNORM;input->chroma=input->image;input->chroma.format=ten?DXGI_FORMAT_R16G16_UNORM:DXGI_FORMAT_R8G8_UNORM;}return hr;
 }
 static void APIENTRY DestroyVideoProcessorInputView(D3D10DDI_HDEVICE h,D3D11_1DDI_HVIDEOPROCESSORINPUTVIEW v){auto *input=object<VideoView>(v);view_destroy(dev(h),&input->image);view_destroy(dev(h),&input->chroma);input->~VideoView();}
 static SIZE_T APIENTRY CalcPrivateVideoProcessorOutputViewSize(D3D10DDI_HDEVICE,const D3D11_1DDIARG_CREATEVIDEOPROCESSOROUTPUTVIEW *){return sizeof(VideoView);}
@@ -134,18 +139,18 @@ static HRESULT APIENTRY VideoProcessorBlt(D3D10DDI_HDEVICE h,D3D11_1DDI_HVIDEOPR
  Device *d=dev(h);auto *p=object<VideoProcessor>(processor);auto *out=object<VideoView>(output);auto *dst=&out->image;
  if(count>1 || !dst->resource || (!rgb(dst->resource->format) && dst->resource->format!=DXGI_FORMAT_NV12))return DXGI_ERROR_UNSUPPORTED;
  const auto *stream=count && streams[0].Enable?streams:nullptr;auto *input=stream?object<VideoView>(stream->hInputSurface):nullptr;View *src=input?&input->image:nullptr;
- if(stream && (!src || stream->PastFrames || stream->FutureFrames || src->resource==dst->resource || (!rgb(src->resource->format) && src->resource->format!=DXGI_FORMAT_NV12)))return DXGI_ERROR_UNSUPPORTED;
+ if(stream && (!src || stream->PastFrames || stream->FutureFrames || src->resource==dst->resource || (!rgb(src->resource->format) && !planar(src->resource->format))))return DXGI_ERROR_UNSUPPORTED;
  RECT target=p->target.right?p->target:full(dst->resource,dst->level),destination=p->destination.right?p->destination:full(dst->resource,dst->level);
  RECT source=src?(p->source.right?p->source:full(src->resource,src->level)):RECT{};
  RECT bounds=full(dst->resource,dst->level);
  if(!rect_valid(target,bounds.right,bounds.bottom) || !rect_valid(destination,bounds.right,bounds.bottom) || (src && !rect_valid(source,std::max(1u,src->resource->width>>src->level),std::max(1u,src->resource->height>>src->level))))return E_INVALIDARG;
  if(!video_shader(d))return d->failure;
- bool nv12=src && src->resource->format==DXGI_FORMAT_NV12;
+ bool nv12=src && planar(src->resource->format);
  if(src && (!view_create(d,src,true,true) || (nv12 && !view_create(d,&input->chroma,true,true))))return d->failure;
  float values[32]{};memcpy(values,blit_matrices[p->rotation],32);
  values[8]=(float)destination.left;values[9]=(float)destination.top;values[10]=(float)(destination.right-destination.left);values[11]=(float)(destination.bottom-destination.top);
  values[12]=(float)source.left;values[13]=(float)source.top;values[14]=(float)(source.right-source.left);values[15]=(float)(source.bottom-source.top);
- values[16]=(float)nv12;values[17]=(float)(src!=nullptr);values[18]=(float)p->background_yuv;values[19]=(float)p->output.RGB_Range;
+ values[16]=nv12?(src->resource->format==DXGI_FORMAT_P010?2.0f:1.0f):0.0f;values[17]=(float)(src!=nullptr);values[18]=(float)p->background_yuv;values[19]=(float)p->output.RGB_Range;
  values[20]=(float)(p->input.Nominal_Range!=D3D11_1DDI_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255);values[21]=(float)p->input.YCbCr_Matrix;values[22]=(float)p->input.RGB_Range;
  values[24]=(float)(p->output.Nominal_Range!=D3D11_1DDI_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255);values[25]=(float)p->output.YCbCr_Matrix;memcpy(values+28,&p->background,16);
  if(dst->resource->format!=DXGI_FORMAT_NV12)return blit(d,dst,{src,nv12?&input->chroma:nullptr},&d->video_pixel,values,sizeof(values),target);
@@ -159,20 +164,8 @@ HRESULT APIENTRY retrieve_video(D3D10DDI_HDEVICE,UINT32 id,SIZE_T size,void *inp
  if(id!=D3D11_1DDI_VIDEO_FUNCTIONS)return E_NOINTERFACE;
  if(size!=sizeof(D3D11_1DDI_VIDEO_INPUT) || !input || output_size!=sizeof(D3D11_1DDI_VIDEO_OUTPUT) || !output)return E_INVALIDARG;
  auto *f=((D3D11_1DDI_VIDEO_INPUT *)input)->p11VideoDeviceFuncs;if(!f)return E_INVALIDARG;
- f->pfnGetVideoDecoderProfileCount=GetVideoDecoderProfileCount;
- f->pfnGetVideoDecoderProfile=Unsupported<decltype(f->pfnGetVideoDecoderProfile)>::call;
- f->pfnCheckVideoDecoderFormat=CheckVideoDecoderFormat;
- f->pfnGetVideoDecoderConfigCount=GetVideoDecoderConfigCount;
- f->pfnGetVideoDecoderConfig=Unsupported<decltype(f->pfnGetVideoDecoderConfig)>::call;
- f->pfnGetVideoDecoderBufferTypeCount=Unsupported<decltype(f->pfnGetVideoDecoderBufferTypeCount)>::call;
- f->pfnGetVideoDecoderBufferInfo=Unsupported<decltype(f->pfnGetVideoDecoderBufferInfo)>::call;
- f->pfnCalcPrivateVideoDecoderSize=Unsupported<decltype(f->pfnCalcPrivateVideoDecoderSize)>::call;
- f->pfnCreateVideoDecoder=Unsupported<decltype(f->pfnCreateVideoDecoder)>::call;
- f->pfnDestroyVideoDecoder=Unsupported<decltype(f->pfnDestroyVideoDecoder)>::call;
+ VideoDecode::Functions(f);
  f->pfnVideoDecoderExtension=Unsupported<decltype(f->pfnVideoDecoderExtension)>::call;
- f->pfnVideoDecoderBeginFrame=Unsupported<decltype(f->pfnVideoDecoderBeginFrame)>::call;
- f->pfnVideoDecoderEndFrame=Unsupported<decltype(f->pfnVideoDecoderEndFrame)>::call;
- f->pfnVideoDecoderSubmitBuffers=Unsupported<decltype(f->pfnVideoDecoderSubmitBuffers)>::call;
  f->pfnCalcPrivateVideoProcessorEnumSize=CalcPrivateVideoProcessorEnumSize;
  f->pfnCreateVideoProcessorEnum=CreateVideoProcessorEnum;
  f->pfnDestroyVideoProcessorEnum=DestroyVideoProcessorEnum;
@@ -207,9 +200,6 @@ HRESULT APIENTRY retrieve_video(D3D10DDI_HDEVICE,UINT32 id,SIZE_T size,void *inp
  f->pfnVideoProcessorSetStreamExtension=Unsupported<decltype(f->pfnVideoProcessorSetStreamExtension)>::call;
  f->pfnVideoProcessorGetStreamExtension=Unsupported<decltype(f->pfnVideoProcessorGetStreamExtension)>::call;
  f->pfnVideoProcessorBlt=VideoProcessorBlt;
- f->pfnCalcPrivateVideoDecoderOutputViewSize=Unsupported<decltype(f->pfnCalcPrivateVideoDecoderOutputViewSize)>::call;
- f->pfnCreateVideoDecoderOutputView=Unsupported<decltype(f->pfnCreateVideoDecoderOutputView)>::call;
- f->pfnDestroyVideoDecoderOutputView=Unsupported<decltype(f->pfnDestroyVideoDecoderOutputView)>::call;
  f->pfnCalcPrivateVideoProcessorInputViewSize=CalcPrivateVideoProcessorInputViewSize;
  f->pfnCreateVideoProcessorInputView=CreateVideoProcessorInputView;
  f->pfnDestroyVideoProcessorInputView=DestroyVideoProcessorInputView;

@@ -66,7 +66,7 @@ bool draw(Device *d,UINT count,UINT first,INT bias,UINT instances,UINT first_ins
  for(UINT i=0;i<d->target_count;i++) {
    View *v=d->targets[i];if(!v){formats[i]=VK_FORMAT_UNDEFINED;continue;}
    if(!view_create(d,v))return false;formats[i]=format(v->format);views.push_back(v->image);
-   UINT shift=v->level+(v->resource->format==DXGI_FORMAT_NV12 && v->format==DXGI_FORMAT_R8G8_UNORM);
+   UINT shift=v->level+(planar(v->resource->format) && (v->format==DXGI_FORMAT_R8G8_UNORM || v->format==DXGI_FORMAT_R16G16_UNORM));
    width=std::min(width,std::max(1u,v->resource->width>>shift));height=std::min(height,std::max(1u,v->resource->height>>shift));
  }
  if(d->depth_view) {

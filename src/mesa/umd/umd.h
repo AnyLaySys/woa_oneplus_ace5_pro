@@ -31,7 +31,7 @@
  X(BeginCommandBuffer) X(EndCommandBuffer) X(CreateFence) X(DestroyFence) X(ResetFences) X(WaitForFences) X(GetFenceStatus) \
  X(CreateBuffer) X(DestroyBuffer) X(GetBufferMemoryRequirements) X(BindBufferMemory) \
  X(CreateImage) X(DestroyImage) X(GetImageMemoryRequirements) X(BindImageMemory) X(GetImageSubresourceLayout) \
- X(AllocateMemory) X(FreeMemory) X(MapMemory) X(UnmapMemory) X(FlushMappedMemoryRanges) X(InvalidateMappedMemoryRanges) \
+ X(AllocateMemory) X(FreeMemory) X(MapMemory) X(UnmapMemory) X(FlushMappedMemoryRanges) X(InvalidateMappedMemoryRanges) X(GetDeviceMemoryOpaqueCaptureAddress) \
  X(CreateImageView) X(DestroyImageView) X(CreateBufferView) X(DestroyBufferView) \
  X(CreateSampler) X(DestroySampler) X(CreateShaderModule) X(DestroyShaderModule) \
  X(CreateDescriptorSetLayout) X(DestroyDescriptorSetLayout) X(CreatePipelineLayout) X(DestroyPipelineLayout) \
@@ -86,7 +86,6 @@ struct Resource {
  D3DKMT_HANDLE allocation = 0, kmresource = 0;
  HANDLE runtime = nullptr;
  uint64_t generation = 1;
- bool imported = false;
  Mapping mapping;
 };
 struct View {
@@ -162,6 +161,8 @@ struct Device : Batch {
  D3D10DDI_HRTCORELAYER core{};
  D3DDDI_DEVICECALLBACKS callbacks{};
  D3D10DDI_CORELAYER_DEVICECALLBACKS errors{};
+ PFND3D11DDI_PERFORM_AMORTIZED_PROCESSING_CB amortized = nullptr;
+ bool processing = false;
  DXGI_DDI_BASE_CALLBACKS *present = nullptr;
  CRITICAL_SECTION lock{};
  void *command_buffer = nullptr;
@@ -234,6 +235,7 @@ void end_pass(Device *);
 VkRenderPass render_pass(Device *,const std::array<VkFormat,9> &,UINT,const std::array<VkImageAspectFlags,9> & = {});
 bool begin_pass(Device *,VkRenderPass,const std::vector<VkImageView> &,const std::array<VkFormat,9> &,UINT,UINT,UINT);
 void access(Device *,Storage &,VkPipelineStageFlags,VkAccessFlags,bool = false,UINT = 0,UINT = VK_REMAINING_MIP_LEVELS,UINT = 0,UINT = VK_REMAINING_ARRAY_LAYERS);
+static inline bool planar(DXGI_FORMAT f){return f==DXGI_FORMAT_NV12 || f==DXGI_FORMAT_P010;}
 VkFormat format(DXGI_FORMAT);
 unsigned pixel_bytes(DXGI_FORMAT);
 VkImageAspectFlags aspects(DXGI_FORMAT);
@@ -272,4 +274,5 @@ void WINAPI close_present_image(void *,A830_IMAGE *);
 #undef DDI
 HRESULT APIENTRY retrieve_video(D3D10DDI_HDEVICE,UINT32,SIZE_T,void *,SIZE_T,void *);
 void d3d11_functions(D3D11_1DDI_DEVICEFUNCS *);
+namespace VideoDecode {void Clear(Device *,void *,const FLOAT *,const D3D10_DDI_RECT *,UINT);}
 HRESULT APIENTRY _ResolveSharedResource(DXGI_DDI_ARG_RESOLVESHAREDRESOURCE *);

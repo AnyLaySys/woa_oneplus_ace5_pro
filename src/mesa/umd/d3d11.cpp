@@ -75,6 +75,7 @@ SHADER(Ps)
 SHADER(Gs)
 #undef SHADER
 static void APIENTRY ClearView(D3D10DDI_HDEVICE h,D3D11DDI_HANDLETYPE type,void *handle,const FLOAT color[4],const D3D10_DDI_RECT *rects,UINT count) {
+ if(type==D3D11_1DDI_HT_VIDEODECODEROUTPUTVIEW){VideoDecode::Clear(dev(h),handle,color,rects,count);return;}
  if(type!=D3D10DDI_HT_RENDERTARGETVIEW){error(dev(h),DXGI_ERROR_UNSUPPORTED);return;}
  D3D10DDI_HRENDERTARGETVIEW hv{handle};if(!count){FLOAT value[4];memcpy(value,color,sizeof(value));ClearRenderTargetView(h,hv,value);return;}
  Device *d=dev(h);auto *v=(View *)handle;Resource *r=v->resource;

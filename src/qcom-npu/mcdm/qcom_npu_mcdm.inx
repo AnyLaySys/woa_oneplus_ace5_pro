@@ -3,7 +3,7 @@ Signature="$WINDOWS NT$"
 Class=ComputeAccelerator
 ClassGuid={F01A9D53-3FF6-48D2-9F97-C8A7004BE10C}
 Provider=%Provider%
-DriverVer=11/27/2026,26.11.27.71
+DriverVer=11/28/2026,26.11.28.1
 CatalogFile=qcom_npu_mcdm.cat
 PnpLockdown=1
 [DestinationDirs]

@@ -14,6 +14,6 @@ NTSTATUS A830DpuStop(PVOID adapter);
 VOID A830DpuRestoreRegisters(PVOID adapter);
 BOOLEAN A830DpuEnabled(PVOID adapter);
 BOOLEAN A830DpuReferences(PVOID adapter,ULONGLONG physical);
-NTSTATUS A830DpuQueue(PVOID adapter,ULONGLONG physical,ULONG pitch,ULONGLONG wddmAddress,ULONG format,BOOLEAN hdr);
+NTSTATUS A830DpuQueue(PVOID adapter,ULONGLONG physical,ULONG pitch,ULONGLONG wddmAddress,ULONG format,BOOLEAN hdr,ULONGLONG presentId);
 VOID A830DpuEnableVsync(PVOID adapter,BOOLEAN enabled);
 VOID A830DpuWork(A830_ADAPTER *adapter);

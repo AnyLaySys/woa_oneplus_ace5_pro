@@ -152,7 +152,7 @@ static VOID Sample(CAM *c,ULONG phase,ULONGLONG start) {
 
 static NTSTATUS AllocateCommand(CAM *c) {
     if(c->Command&&c->CommandMdl)return STATUS_SUCCESS;
-    if(!c->DmaEnabler)return STATUS_DEVICE_NOT_READY;
+    if(!c->DmaEnabler&&!c->DmaEnabler32)return STATUS_DEVICE_NOT_READY;
     if(!c->Command) {
         PHYSICAL_ADDRESS lowest={0},highest,boundary={0};highest.QuadPart=MAXULONG;
         c->Command=MmAllocateContiguousMemorySpecifyCache(4096,lowest,highest,boundary,MmNonCached);
@@ -379,7 +379,7 @@ NTSTATUS CamCdmGamma(CAM *c,QCAM_ISP_GAMMA_STATE *state) {
    use the original mode11 reference. Command memory/routes remain owned
    through frame teardown. */
 NTSTATUS CamCdmGammaLoad(CAM *c,ULONG bank) {
-    if(!c->IspFdOwned||!c->IspFd||(c->IspFd->Profile!=8&&(c->IspFd->Profile<15||c->IspFd->Profile>32))||bank>1||
+    if(!c->IspFdOwned||!c->IspFd||(c->IspFd->Profile!=8&&(c->IspFd->Profile<15||c->IspFd->Profile>33))||bank>1||
        !c->Powered||!c->BusOn||c->DmaActive||c->RxActive||c->CdmPending||c->StreamFile||
        !CamDmaResourcesIdle(c->Base[CamCsid],c->Base[CamTfe]))return STATUS_DEVICE_BUSY;
     QCAM_ISP_FD_STATE *state=c->IspFd;
@@ -404,7 +404,7 @@ NTSTATUS CamCdmGammaLoad(CAM *c,ULONG bank) {
 }
 
 NTSTATUS CamCdmGtmLoad(CAM *c,ULONG bank) {
-    if(!c->IspFdOwned||!c->IspFd||(c->IspFd->Profile<14||c->IspFd->Profile>32)||bank>1||bank!=c->IspFd->GtmBank||
+    if(!c->IspFdOwned||!c->IspFd||(c->IspFd->Profile<14||c->IspFd->Profile>33)||bank>1||bank!=c->IspFd->GtmBank||
        !c->Powered||!c->BusOn||c->DmaActive||c->RxActive||c->CdmPending||c->StreamFile||
        !CamDmaResourcesIdle(c->Base[CamCsid],c->Base[CamTfe]))return STATUS_DEVICE_BUSY;
     QCAM_ISP_FD_STATE *state=c->IspFd;

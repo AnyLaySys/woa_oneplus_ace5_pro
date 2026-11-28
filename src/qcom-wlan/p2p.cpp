@@ -121,22 +121,23 @@ static NTSTATUS Psubmit(P2P *P)
  if(NT_SUCCESS(St)){P->TxBusy=TRUE;P->TxAt=WcnNowMs();P->TxPending=FALSE;}else D->MgmtInUse[3]=0;return St;
 }
 
-static NTSTATUS Padvert(P2P *P,const UCHAR *B,ULONG N)
+static NTSTATUS Padvert(P2P *P,const UCHAR *B,ULONG N,bool Role)
 {
  WDI_SET_ADVERTISEMENT_INFORMATION_PARAMETERS A;auto Ns=ParseWdiSetAdvertisementInformationToIhv(N,B,&Primary(P)->Tlv,&A);NTSTATUS St=Ns==NDIS_STATUS_SUCCESS?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;
  if(NT_SUCCESS(St)&&A.Optional.DeviceInformation_IsPresent){auto I=&A.DeviceInformation;auto M=HotspotDeviceMac(P->D);if(!M||!Jeq(I->DeviceInfoParameters.DeviceAddress,M,6)||!I->DeviceName.ElementCount||I->DeviceName.ElementCount>32)St=STATUS_INVALID_PARAMETER;}
  if(NT_SUCCESS(St)&&A.Optional.SecondaryDeviceTypeList_IsPresent&&A.SecondaryDeviceTypeList.ElementCount>4)St=STATUS_NOT_SUPPORTED;
- if(NT_SUCCESS(St)&&A.Optional.AdditionalIEs_IsPresent&&(!Pvendor(A.AdditionalIEs.AdditionalProbeResponseIEs.pElements,A.AdditionalIEs.AdditionalProbeResponseIEs.ElementCount)||!Pvendor(A.AdditionalIEs.AdditionalBeaconIEs.pElements,A.AdditionalIEs.AdditionalBeaconIEs.ElementCount)))St=STATUS_NOT_SUPPORTED;
- if(NT_SUCCESS(St)&&A.Optional.AdvertisedServices_IsPresent)St=STATUS_NOT_SUPPORTED; /* ASP service publication is not generic device discovery. */
+ if(NT_SUCCESS(St)&&!Role&&A.Optional.AdditionalIEs_IsPresent&&(!Pvendor(A.AdditionalIEs.AdditionalProbeResponseIEs.pElements,A.AdditionalIEs.AdditionalProbeResponseIEs.ElementCount)||!Pvendor(A.AdditionalIEs.AdditionalBeaconIEs.pElements,A.AdditionalIEs.AdditionalBeaconIEs.ElementCount)))St=STATUS_NOT_SUPPORTED;
+ if(NT_SUCCESS(St)&&A.Optional.AdvertisedServices_IsPresent&&A.AdvertisedServices.ServiceEntry.ElementCount)St=STATUS_NOT_SUPPORTED; /* ASP service publication is not generic device discovery. */
  if(NT_SUCCESS(St)){
   if(A.Optional.DeviceInformation_IsPresent){auto I=&A.DeviceInformation;RtlCopyMemory(P->Mac,I->DeviceInfoParameters.DeviceAddress,6);P->Methods=I->DeviceInfoParameters.ConfigurationMethods;P->NameLength=I->DeviceName.ElementCount;RtlCopyMemory(P->Name,I->DeviceName.pElements,P->NameLength);P2pBe16(P->DeviceType,I->DeviceInfoParameters.DeviceType.CategoryID);RtlCopyMemory(P->DeviceType+2,I->DeviceInfoParameters.DeviceType.OUI,4);P2pBe16(P->DeviceType+6,I->DeviceInfoParameters.DeviceType.SubcategoryID);}
   if(A.Optional.DeviceCapability_IsPresent)P->DeviceCap=(A.DeviceCapability.DeviceCapabilityBitmap&A.DeviceCapability.OSSetDeviceCapabilities&0x30)|4;
-  if(A.Optional.GroupOwnerCapability_IsPresent)P->GroupCap=A.GroupOwnerCapability.GroupCapabilityBitmap&A.GroupOwnerCapability.OSSetGroupCapabilities&0x77;
-  if(A.Optional.AdditionalIEs_IsPresent){P->ExtraLength=A.AdditionalIEs.AdditionalProbeResponseIEs.ElementCount;if(P->ExtraLength)RtlCopyMemory(P->Extra,A.AdditionalIEs.AdditionalProbeResponseIEs.pElements,P->ExtraLength);}
+  if(A.Optional.GroupOwnerCapability_IsPresent)P->GroupCap=P2pGroupCapability(A.GroupOwnerCapability.GroupCapabilityBitmap&A.GroupOwnerCapability.OSSetGroupCapabilities);
+  if(!Role&&A.Optional.AdditionalIEs_IsPresent){P->ExtraLength=A.AdditionalIEs.AdditionalProbeResponseIEs.ElementCount;if(P->ExtraLength)RtlCopyMemory(P->Extra,A.AdditionalIEs.AdditionalProbeResponseIEs.pElements,P->ExtraLength);}
   if(A.Optional.SecondaryDeviceTypeList_IsPresent){P->SecondaryCount=A.SecondaryDeviceTypeList.ElementCount;for(ULONG I=0;I<P->SecondaryCount;I++){auto T=&A.SecondaryDeviceTypeList.pElements[I];P2pBe16(P->SecondaryTypes+I*8,T->CategoryID);RtlCopyMemory(P->SecondaryTypes+I*8+2,T->OUI,4);P2pBe16(P->SecondaryTypes+I*8+6,T->SubcategoryID);}}
   P->LoRefresh=TRUE;
   if(!P->ListenFrequency){for(ULONG I=0;I<P->D->Scan.ChannelCount;I++)if(P->D->Scan.Channel[I].Frequency<2500&&Plegal(P,P->D->Scan.Channel[I].Frequency)){P->ListenFrequency=P->D->Scan.Channel[I].Frequency;break;}}
  }
+
  CleanupParsedWdiSetAdvertisementInformation(&A);return St;
 }
 static NTSTATUS Pdiscover(P2P *P,const WDI_MESSAGE_HEADER &H,const UCHAR *B,ULONG N,bool Background)
@@ -145,7 +146,11 @@ static NTSTATUS Pdiscover(P2P *P,const WDI_MESSAGE_HEADER &H,const UCHAR *B,ULON
  auto Ns=Background?ParseWdiSetP2pStartBackgroundDiscoveryToIhv(N,B,&Primary(P)->Tlv,&Bg):ParseWdiTaskP2pDiscoverToIhv(N,B,&Primary(P)->Tlv,&A);NTSTATUS St=Ns==NDIS_STATUS_SUCCESS?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;
  auto Type=Background?Bg.DiscoverMode.DiscoveryType:A.DiscoverMode.DiscoveryType;auto Service=Background?Bg.DiscoverMode.ServiceDiscoveryType:A.DiscoverMode.ServiceDiscoveryType;
  auto &Settings=Background?Bg.DiscoveryChannelSettings:A.DiscoveryChannelSettings;auto &Vendor=Background?Bg.VendorIEs:A.VendorIEs;
- if(NT_SUCCESS(St)&&(Type<WDI_P2P_DISCOVER_TYPE_SCAN_ONLY||Type>WDI_P2P_DISCOVER_TYPE_SCAN_SOCIAL_CHANNELS||Service!=WDI_P2P_SERVICE_DISCOVERY_TYPE_NO_SERVICE_DISCOVERY||!Pvendor(Vendor.pElements,Vendor.ElementCount)))St=STATUS_NOT_SUPPORTED;
+ // Windows also sends zero for ordinary device discovery. Accept that
+ // host encoding alongside NO_SERVICE_DISCOVERY; the service-filter checks
+ // below still reject ASP/GAS requests that this driver cannot perform.
+ bool DeviceDiscovery=Service==0||Service==WDI_P2P_SERVICE_DISCOVERY_TYPE_NO_SERVICE_DISCOVERY;
+ if(NT_SUCCESS(St)&&(Type<WDI_P2P_DISCOVER_TYPE_SCAN_ONLY||Type>WDI_P2P_DISCOVER_TYPE_SCAN_SOCIAL_CHANNELS||!DeviceDiscovery||!Pvendor(Vendor.pElements,Vendor.ElementCount)))St=STATUS_NOT_SUPPORTED;
  if(NT_SUCCESS(St)&&!Background&&(A.SSIDList.ElementCount>1||A.ServiceNameHash.ElementCount||A.ServiceInformationDiscoveryEntry.ElementCount))St=STATUS_NOT_SUPPORTED;
  if(NT_SUCCESS(St)&&Background&&(Bg.DeviceFilterList.ElementCount>4||Bg.ServiceNameHash.ElementCount))St=STATUS_NOT_SUPPORTED;
  auto Name=!Background&&A.SSIDList.ElementCount?&A.SSIDList.pElements[0]:nullptr;if(NT_SUCCESS(St)&&Name&&Name->ElementCount>32)St=STATUS_INVALID_PARAMETER;
@@ -162,7 +167,7 @@ static NTSTATUS Pdiscover(P2P *P,const WDI_MESSAGE_HEADER &H,const UCHAR *B,ULON
 }
 static NTSTATUS Paction(P2P *P,const WDI_MESSAGE_HEADER &H,const UCHAR *B,ULONG N,bool Response)
 {
- if(!Primary(P)->Radio)return STATUS_DEVICE_NOT_READY;if(P->TxPending||P->TxBusy||P->TxTask||!P->NameLength)return STATUS_DEVICE_BUSY;
+ if(!Primary(P)->Radio)return STATUS_DEVICE_NOT_READY;if(P->ModePending||P->TxPending||P->TxBusy||P->TxTask||!P->NameLength)return STATUS_DEVICE_BUSY;
  WDI_TASK_P2P_SEND_REQUEST_ACTION_FRAME_PARAMETERS A;WDI_TASK_P2P_SEND_RESPONSE_ACTION_FRAME_PARAMETERS R;
  auto Ns=Response?ParseWdiTaskP2pSendResponseActionFrameToIhv(N,B,&Primary(P)->Tlv,&R):ParseWdiTaskP2pSendRequestActionFrameToIhv(N,B,&Primary(P)->Tlv,&A);NTSTATUS St=Ns==NDIS_STATUS_SUCCESS?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;
  ULONG Type=Response?(ULONG)R.ResponseParams.ResponseFrameType:(ULONG)A.RequestParams.RequestFrameType;const UCHAR *Peer=Response?R.ResponseParams.PeerDeviceAddress.Address:A.RequestParams.PeerDeviceAddress.Address;
@@ -183,13 +188,13 @@ static NTSTATUS Paction(P2P *P,const WDI_MESSAGE_HEADER &H,const UCHAR *B,ULONG 
  UCHAR Frame[1024]={0};ULONG Length=0;
  if(NT_SUCCESS(St)){
   Frame[0]=0xd0;RtlCopyMemory(Frame+4,Peer,6);RtlCopyMemory(Frame+10,P->Mac,6);RtlFillMemory(Frame+16,6,255);Jputle16(Frame+22,(++P->Sequence&4095)<<4);UCHAR Public[]={4,9,0x50,0x6f,0x9a,9,P2pSubtype(Type),Token};RtlCopyMemory(Frame+24,Public,8);P2pWriter W(Frame+32,sizeof(Frame)-32);UCHAR T[128];UCHAR Group=P->GroupCap;
-  if(Type==1&&A.Optional.GONegotiationRequestInfo_IsPresent){auto Q=&A.GONegotiationRequestInfo.RequestParams;if(Q->GOIntent>15||Q->GOConfigTimeout>2550||Q->ClientConfigTimeout>2550||!Pmac(Q->IntendedInterfaceAddress.Address))W.Good=false;T[0]=(Q->GOIntent<<1)|(Q->TieBreaker?1:0);W.Attr(4,T,1);T[0]=(UCHAR)((Q->GOConfigTimeout+9)/10);T[1]=(UCHAR)((Q->ClientConfigTimeout+9)/10);W.Attr(5,T,2);W.Attr(9,Q->IntendedInterfaceAddress.Address,6);Group=Q->GroupCapability&0x77;}
-  else if(Type==2&&R.Optional.GONegotiationResponseInfo_IsPresent){auto Q=&R.GONegotiationResponseInfo.ResponseParams;if(Q->GOIntent>15||!Pmac(Q->IntendedInterfaceAddress.Address))W.Good=false;T[0]=Q->StatusCode;W.Attr(0,T,1);T[0]=(Q->GOIntent<<1)|(Q->TieBreaker?1:0);W.Attr(4,T,1);T[0]=(UCHAR)((Q->GOConfigTimeout+9)/10);T[1]=(UCHAR)((Q->ClientConfigTimeout+9)/10);W.Attr(5,T,2);W.Attr(9,Q->IntendedInterfaceAddress.Address,6);Group=Q->GroupCapability&0x77;if(R.GONegotiationResponseInfo.Optional.GroupID_IsPresent)Pgroup(W,R.GONegotiationResponseInfo.GroupID);}
-  else if(Type==3&&R.Optional.GONegotiationConfirmationInfo_IsPresent){T[0]=R.GONegotiationConfirmationInfo.ConfirmationParams.StatusCode;W.Attr(0,T,1);Group=R.GONegotiationConfirmationInfo.ConfirmationParams.GroupCapability&0x77;if(R.GONegotiationConfirmationInfo.Optional.GroupID_IsPresent)Pgroup(W,R.GONegotiationConfirmationInfo.GroupID);}
+  if(Type==1&&A.Optional.GONegotiationRequestInfo_IsPresent){auto Q=&A.GONegotiationRequestInfo.RequestParams;if(Q->GOIntent>15||Q->GOConfigTimeout>2550||Q->ClientConfigTimeout>2550||!Pmac(Q->IntendedInterfaceAddress.Address))W.Good=false;T[0]=(Q->GOIntent<<1)|(Q->TieBreaker?1:0);W.Attr(4,T,1);T[0]=(UCHAR)((Q->GOConfigTimeout+9)/10);T[1]=(UCHAR)((Q->ClientConfigTimeout+9)/10);W.Attr(5,T,2);W.Attr(9,Q->IntendedInterfaceAddress.Address,6);Group=P2pGroupCapability(Q->GroupCapability);}
+  else if(Type==2&&R.Optional.GONegotiationResponseInfo_IsPresent){auto Q=&R.GONegotiationResponseInfo.ResponseParams;if(Q->GOIntent>15||!Pmac(Q->IntendedInterfaceAddress.Address))W.Good=false;T[0]=Q->StatusCode;W.Attr(0,T,1);T[0]=(Q->GOIntent<<1)|(Q->TieBreaker?1:0);W.Attr(4,T,1);T[0]=(UCHAR)((Q->GOConfigTimeout+9)/10);T[1]=(UCHAR)((Q->ClientConfigTimeout+9)/10);W.Attr(5,T,2);W.Attr(9,Q->IntendedInterfaceAddress.Address,6);Group=P2pGroupCapability(Q->GroupCapability);if(R.GONegotiationResponseInfo.Optional.GroupID_IsPresent)Pgroup(W,R.GONegotiationResponseInfo.GroupID);}
+  else if(Type==3&&R.Optional.GONegotiationConfirmationInfo_IsPresent){T[0]=R.GONegotiationConfirmationInfo.ConfirmationParams.StatusCode;W.Attr(0,T,1);Group=P2pGroupCapability(R.GONegotiationConfirmationInfo.ConfirmationParams.GroupCapability);if(R.GONegotiationConfirmationInfo.Optional.GroupID_IsPresent)Pgroup(W,R.GONegotiationConfirmationInfo.GroupID);}
   else if(Type==4&&A.Optional.InvitationRequestInfo_IsPresent){auto Q=&A.InvitationRequestInfo;T[0]=(UCHAR)((Q->RequestParams.GOConfigTimeout+9)/10);T[1]=(UCHAR)((Q->RequestParams.ClientConfigTimeout+9)/10);W.Attr(5,T,2);T[0]=Q->RequestParams.InvitationFlags;W.Attr(18,T,1);Pgroup(W,Q->GroupID);if(Q->Optional.GroupBSSID_IsPresent)W.Attr(7,Q->GroupBSSID.Address,6);if(Q->Optional.OperatingChannel_IsPresent){Operating=Pchannel(Q->OperatingChannel);if(!Plegal(P,Operating))W.Good=false;}}
   else if(Type==5&&R.Optional.InvitationResponseInfo_IsPresent){auto Q=&R.InvitationResponseInfo;T[0]=Q->ResponseParams.StatusCode;W.Attr(0,T,1);if(Q->Optional.GroupBSSID_IsPresent)W.Attr(7,Q->GroupBSSID.Address,6);if(Q->Optional.OperatingChannel_IsPresent){Operating=Pchannel(Q->OperatingChannel);if(!Plegal(P,Operating))W.Good=false;}}
-  else if(Type==6&&A.Optional.ProvisionDiscoveryRequestInfo_IsPresent){auto Q=&A.ProvisionDiscoveryRequestInfo;if(Q->Optional.ServiceAttributes_IsPresent||Q->Optional.PersistentGroupID_IsPresent||Q->Optional.ServiceSessionInfo_IsPresent)W.Good=false;Group=Q->RequestParams.GroupCapability&0x77;if(Q->Optional.GroupID_IsPresent)Pgroup(W,Q->GroupID);}
-  else if(Type==7&&R.Optional.ProvisionDiscoveryResponseInfo_IsPresent)Group=R.ProvisionDiscoveryResponseInfo.ResponseParams.GroupCapability&0x77;
+  else if(Type==6&&A.Optional.ProvisionDiscoveryRequestInfo_IsPresent){auto Q=&A.ProvisionDiscoveryRequestInfo;if(Q->Optional.ServiceAttributes_IsPresent||Q->Optional.PersistentGroupID_IsPresent||Q->Optional.ServiceSessionInfo_IsPresent)W.Good=false;Group=P2pGroupCapability(Q->RequestParams.GroupCapability);if(Q->Optional.GroupID_IsPresent)Pgroup(W,Q->GroupID);}
+  else if(Type==7&&R.Optional.ProvisionDiscoveryResponseInfo_IsPresent)Group=P2pGroupCapability(R.ProvisionDiscoveryResponseInfo.ResponseParams.GroupCapability);
   else W.Good=false;
   bool IncludeOp=Type<=3||(Type==4&&(A.InvitationRequestInfo.Optional.OperatingChannel_IsPresent||A.InvitationRequestInfo.RequestParams.IsLocalGO))||(Type==5&&R.InvitationResponseInfo.Optional.OperatingChannel_IsPresent);Pcommon(P,W,Group,Operating,Remote,RemoteLength,Type<=5,IncludeOp);ULONG Ies=W.Finish();if(!Ies||Vendor.ElementCount>sizeof(Frame)-32-Ies)St=STATUS_INVALID_PARAMETER;
   else{Length=32+Ies;if(Vendor.ElementCount)RtlCopyMemory(Frame+Length,Vendor.pElements,Vendor.ElementCount);Length+=Vendor.ElementCount;if(!P2pVendor(Frame+32,Length-32,WpsOui)){P2pWriter V(Frame+Length,sizeof(Frame)-Length);V.Begin(WpsOui);T[0]=0x20;V.Wps(0x104a,T,1);P2pBe16(T,P->Methods);V.Wps(0x1008,T,2);ULONG M=V.Finish();if(!M)St=STATUS_INVALID_BUFFER_SIZE;else Length+=M;}}
@@ -231,12 +236,18 @@ bool P2pCommand(S8 *S,WIFIREQUEST R,const WDI_MESSAGE_HEADER &H,UINT16 Id,const 
  if(P->ModePending&&Role){S8Complete(R,STATUS_DEVICE_BUSY);return true;}
  switch(Id){
  case WDI_GET_NEXT_ACTION_FRAME_DIALOG_TOKEN:return S8ActionCommand(S,R,H,Id,B,N);
- case WDI_SET_ADVERTISEMENT_INFORMATION:if(HotspotAdvertBusy(D)){St=STATUS_DEVICE_BUSY;break;}St=Padvert(P,B,N);if(NT_SUCCESS(St))return false;break;
+ case WDI_SET_ADVERTISEMENT_INFORMATION:if(HotspotAdvertBusy(D)){St=STATUS_DEVICE_BUSY;break;}St=Padvert(P,B,N,Role);if(NT_SUCCESS(St))return false;break;
  case WDI_SET_P2P_WPS_ENABLED:{WDI_SET_P2P_WPS_ENABLED_PARAMETERS A;auto Ns=ParseWdiSetP2pWpsEnabledToIhv(N,B,&Primary(P)->Tlv,&A);St=Ns==NDIS_STATUS_SUCCESS&&A.WPSEnabled<=1?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;if(NT_SUCCESS(St)&&Role)S->WpsEnabled=A.WPSEnabled?TRUE:FALSE;CleanupParsedWdiSetP2pWpsEnabled(&A);break;}
  case WDI_TASK_CHANGE_OPERATION_MODE:{WDI_TASK_CHANGE_OPERATION_MODE_PARAMETERS A;auto Ns=ParseWdiTaskChangeOperationModeToIhv(N,B,&Primary(P)->Tlv,&A);ULONG Mode=A.OperationMode;St=Ns==NDIS_STATUS_SUCCESS?STATUS_SUCCESS:STATUS_INVALID_PARAMETER;
  if(NT_SUCCESS(St)&&Device&&Mode==WDI_OPERATION_MODE_P2P_DEVICE){CleanupParsedWdiTaskChangeOperationMode(&A);S8Complete(R,St);S8Indicate(S,&H,WDI_INDICATION_CHANGE_OPERATION_MODE_COMPLETE,St);return true;}
- if(NT_SUCCESS(St)&&(!Role||(Mode!=WDI_OPERATION_MODE_P2P_GO&&Mode!=WDI_OPERATION_MODE_P2P_CLIENT)||S->Connect||S->Resetting||S->AdapterGone||P->TxBusy||P->OwnScan))St=STATUS_DEVICE_BUSY;
- if(NT_SUCCESS(St)){P->ModePending=TRUE;P->ModeCancel=FALSE;P->Mode=Mode;P->ModeHeader=H;P->ModeAt=WcnNowMs();}CleanupParsedWdiTaskChangeOperationMode(&A);break;}
+ // A successful GO negotiation may finish before the off-channel scan's
+ // completion has been reconciled by the service worker. Queue the role
+ // change and drain that scan instead of rejecting Windows with DEVICE_BUSY.
+ if(NT_SUCCESS(St)&&(!Role||(Mode!=WDI_OPERATION_MODE_P2P_GO&&Mode!=WDI_OPERATION_MODE_P2P_CLIENT)||S->Connect||S->Resetting||S->AdapterGone||P->TxTask))St=STATUS_DEVICE_BUSY;
+ if(NT_SUCCESS(St)){P->ModePending=TRUE;P->ModeCancel=FALSE;P->Mode=Mode;P->ModeHeader=H;P->ModeAt=WcnNowMs();
+  // Only an unsent probe response can remain after the action task finished.
+  // Its buffer has no firmware ownership; an in-flight TX must still drain.
+  P->TxPending=FALSE;if(P->OwnScan&&!P->Cancel){P->Cancel=TRUE;P->CancelAt=P->ModeAt;}}CleanupParsedWdiTaskChangeOperationMode(&A);break;}
  case WDI_TASK_P2P_DISCOVER:St=Device?Pdiscover(P,H,B,N,false):STATUS_NOT_SUPPORTED;break;
  case WDI_SET_P2P_START_BACKGROUND_DISCOVERY:St=Device?Pdiscover(P,H,B,N,true):STATUS_NOT_SUPPORTED;break;
  case WDI_SET_P2P_STOP_BACKGROUND_DISCOVERY:if(!Device)return false;if(P->Background){if(P->OwnScan&&!P->ScanForTx){P->Cancel=TRUE;P->CancelAt=WcnNowMs();}else PfinishDiscover(P,STATUS_CANCELLED);}St=STATUS_SUCCESS;break;
@@ -260,15 +271,8 @@ extern "C" VOID WcnP2pService(PWCN_DEVICE D)
  if(D->Mhi.SysErr||D->Mhi.RddmFailed||D->Ce.SourceFailed||D->Dp.Failed){Pfail(P);return;}
  if(!Primary(P)->Radio){P->Listen=FALSE;PfinishDiscover(P,STATUS_DEVICE_NOT_READY);PfinishTx(P,STATUS_DEVICE_NOT_READY);if(P->OwnScan&&!P->Cancel){P->Cancel=TRUE;P->CancelAt=Now;}}
  if(P->ResetPending&&Now-P->ResetAt>5000){Pfail(P);return;}
+ if(P->ModePending&&Now-P->ModeAt>15000){Pfail(P);return;}
  if(P->LoActive){if((P->LoStopping||P->LoStopAt)&&Now-P->LoStopAt>5000){Pfail(P);return;}if(!P->Listen||P->Discover||P->TxPending||P->ModePending||P->LoRefresh||P->ResetPending){St=PstopLo(P);if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St)){Pfail(P);}return;}}
- if(P->ModePending){auto S=(S8*)D->RoleStage8;if(!S){Pfail(P);return;}St=HotspotReleaseRole(D);
-  if(St==STATUS_SUCCESS){if(!P->ModeCancel){bool Client=P->Mode==WDI_OPERATION_MODE_P2P_CLIENT;BOOLEAN Pmf=S->PmfAvailable;
-    if(Client){D->P2pJoin.Vdev=1;RtlCopyMemory(D->P2pJoin.Mac,S->Mac,6);Pmf=NT_SUCCESS(WcnPmfInit(D,&D->P2pJoin));}S8ClearStaging(S);KIRQL Irql;KeAcquireSpinLock(&S->Lock,&Irql);D->P2pClient=Client;S->HotspotRole=!Client;S->J=Client?&D->P2pJoin:&D->Join;S->Stopped=S->Fatal=S->FailureReported=FALSE;S->Radio=Primary(P)->Radio;S->PmfAvailable=Pmf;KeReleaseSpinLock(&S->Lock,Irql);
-    P->RoleFrequency=P->NegotiatedFrequency;P->NegotiatedFrequency=0;}
-   S8Indicate(S,&P->ModeHeader,WDI_INDICATION_CHANGE_OPERATION_MODE_COMPLETE,P->ModeCancel?STATUS_CANCELLED:STATUS_SUCCESS);P->ModePending=FALSE;
-  }else if(St!=STATUS_PENDING&&St!=STATUS_DEVICE_BUSY){S8Indicate(S,&P->ModeHeader,WDI_INDICATION_CHANGE_OPERATION_MODE_COMPLETE,St);P->ModePending=FALSE;}
-  else if(Now-P->ModeAt>15000){Pfail(P);return;}
- }
  if(P->TxBusy&&Now-P->TxAt>5000){Pfail(P);return;}
  if(P->TxTask&&Now>P->TxDeadline)PfinishTx(P,STATUS_IO_TIMEOUT);
  if(!P->TxTask&&P->TxPending&&Now>P->TxDeadline)P->TxPending=FALSE;
@@ -284,6 +288,16 @@ extern "C" VOID WcnP2pService(PWCN_DEVICE D)
   }
  }
  if(P->ResetPending){if(!P->OwnScan&&!P->TxBusy&&!P->LoActive){P->ResetPending=FALSE;P->Cancel=FALSE;P->PeerCount=0;S8Indicate(Primary(P),&P->ResetHeader,WDI_INDICATION_DOT11_RESET_COMPLETE,STATUS_SUCCESS);}return;}
+ if(P->ModePending){
+  if(P->OwnScan||P->TxBusy)return;
+  auto S=(S8*)D->RoleStage8;if(!S){Pfail(P);return;}St=HotspotReleaseRole(D);
+  if(St==STATUS_SUCCESS){if(!P->ModeCancel){bool Client=P->Mode==WDI_OPERATION_MODE_P2P_CLIENT;BOOLEAN Pmf=S->PmfAvailable;
+    if(Client){D->P2pJoin.Vdev=1;RtlCopyMemory(D->P2pJoin.Mac,S->Mac,6);Pmf=NT_SUCCESS(WcnPmfInit(D,&D->P2pJoin));}S8ClearStaging(S);KIRQL Irql;KeAcquireSpinLock(&S->Lock,&Irql);D->P2pClient=Client;S->HotspotRole=!Client;S->J=Client?&D->P2pJoin:&D->Join;S->Stopped=S->Fatal=S->FailureReported=FALSE;S->Radio=Primary(P)->Radio;S->PmfAvailable=Pmf;KeReleaseSpinLock(&S->Lock,Irql);
+    P->RoleFrequency=P->NegotiatedFrequency;P->NegotiatedFrequency=0;}
+   S8Indicate(S,&P->ModeHeader,WDI_INDICATION_CHANGE_OPERATION_MODE_COMPLETE,P->ModeCancel?STATUS_CANCELLED:STATUS_SUCCESS);P->ModePending=FALSE;
+  }else if(St!=STATUS_PENDING&&St!=STATUS_DEVICE_BUSY){S8Indicate(S,&P->ModeHeader,WDI_INDICATION_CHANGE_OPERATION_MODE_COMPLETE,St);P->ModePending=FALSE;}
+  if(P->ModePending)return;
+ }
  if(P->TxPending){St=Pensure(P);if(St==STATUS_DEVICE_BUSY)return;if(!NT_SUCCESS(St)){PfinishTx(P,St);return;}
   if(!P->OwnScan){St=Pscan(P,&P->TxFrequency,1,false,P->TxDwell?P->TxDwell:150);if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St))PfinishTx(P,St);return;}
   St=Psubmit(P);if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St))PfinishTx(P,St);return;
@@ -305,7 +319,7 @@ static ULONG Presponse(P2P *P,const UCHAR Peer[6],ULONG Frequency,UCHAR *Out,ULO
 }
 static void Pprobe(P2P *P,const UCHAR *F,ULONG N,ULONG Frequency)
 {
- if((!P->Listen&&!(P->Discover&&P->FindListen))||!P->OwnScan||!P->OnChannel||P->Frequency!=Frequency||!Plegal(P,Frequency)||P->TxTask||P->TxBusy||P->TxPending||!Pmac(F+10))return;
+ if((!P->Listen&&!(P->Discover&&P->FindListen))||!P->OwnScan||!P->OnChannel||P->Frequency!=Frequency||!Plegal(P,Frequency)||P->ModePending||P->TxTask||P->TxBusy||P->TxPending||!Pmac(F+10))return;
  bool Direct=false;for(ULONG I=24;I<N;I+=F[I+1]+2){if(N-I<2||F[I+1]>N-I-2)return;if(F[I]==0&&F[I+1]==7&&Jeq(F+I+2,(const UCHAR*)"DIRECT-",7))Direct=true;}if(!Direct)return;
  ULONG L=Presponse(P,F+10,Frequency,P->Tx,sizeof(P->Tx));if(!L)return;
  P->TxLength=L;P->TxFrequency=Frequency;P->TxPending=TRUE;P->TxTask=FALSE;P->TxDeadline=WcnNowMs()+200;
@@ -329,14 +343,23 @@ extern "C" VOID WcnP2pWmi(PWCN_DEVICE D,ULONG Event,const UCHAR *Data,ULONG N)
  if(Event==0x7006){V=Jfind(Data,N,423,&L);if(!V||L<12||!P->TxBusy||Jle32(V)!=P->TxId||D->MgmtInUse[3]!=P->TxId||Jle32(V+8)<1||Jle32(V+8)>2)return;
   ULONG Status=Jle32(V+4);P->TxBusy=FALSE;D->MgmtInUse[3]=0;if(P->TxTask)PfinishTx(P,Status?STATUS_UNSUCCESSFUL:STATUS_SUCCESS);return;
  }
- if(Event==0x3001&&P->OwnScan){V=Jfind(Data,N,36,&L);if(!V||L<24||Jle32(V+16)!=P->ScanId||Jle32(V+20)!=3)return;ULONG Type=Jle32(V);if(Type&8){P->Frequency=Jle32(V+8);P->OnChannel=TRUE;}if(Type&(2|4|64|256))P->OnChannel=FALSE;if(P->Failed&&(Type&(2|64)))P->OwnScan=FALSE;return;}
- if(P->Failed||!Primary(P)->Radio||Event!=0x7001)return;V=Jfind(Data,N,44,&L);auto F=Jfind(Data,N,17,&K);if(!V||L<68||!F||(Jle32(V+20)&0x29))return;ULONG Size=Jle32(V+16),Frequency=Jle32(V+64),Pdev=Jle32(V+60);if(Size<24||Size>K||Size>2048||(Pdev!=1&&Pdev!=2)||!Pmac(F+10))return;
+ if(Event==0x3001&&P->OwnScan){V=Jfind(Data,N,36,&L);if(!V||L<24||Jle32(V+16)!=P->ScanId||Jle32(V+20)!=3)return;ULONG Type=Jle32(V);if(Type&8){P->Frequency=Jle32(V+8);P->OnChannel=TRUE;}if(Type&(2|4|64|256))P->OnChannel=FALSE;
+  // Submit while the firmware reports the requested off-channel window.
+  // A dwell may finish before the worker's next 100-ms service iteration,
+  // or both entry/exit events may already be queued in the same CE batch.
+  if(!P->Failed&&(Type&8)&&P->OnChannel&&P->TxPending&&P->Frequency==P->TxFrequency){
+   if(WcnNowMs()>P->TxDeadline)PfinishTx(P,STATUS_IO_TIMEOUT);
+   else{NTSTATUS St=Psubmit(P);if(St!=STATUS_DEVICE_BUSY&&!NT_SUCCESS(St))PfinishTx(P,St);}
+  }
+  if(P->Failed&&(Type&(2|64)))P->OwnScan=FALSE;return;}
+ if(P->Failed||!Primary(P)->Radio||Event!=0x7001)return;V=Jfind(Data,N,44,&L);auto F=Jfind(Data,N,17,&K);
+ if(!V||L<68||!F||(Jle32(V+20)&0x29))return;ULONG Size=Jle32(V+16),Frequency=Jle32(V+64),Pdev=Jle32(V+60);if(Size<24||Size>K||Size>2048||(Pdev!=1&&Pdev!=2)||!Pmac(F+10))return;
  if(!Frequency)Frequency=WcnChannelFrequency(Jle32(V));if(!Plegal(P,Frequency,false))return;
  if(Jeq(F+10,P->Mac,6)||Jeq(F+10,D->Ce.MacAddress,6))return;
  ULONG Type=F[0]&0xfc;if(Type==0x80||Type==0x50){Pobserve(P,F,Size,Frequency,(LONG)Jle32(V+44));return;}
  if(Type==0x40){Pprobe(P,F,Size,Frequency);return;}
- if(Type!=0xd0||(F[1]&0x40)||Size<32||F[24]!=4||F[25]!=9||!Jeq(F+26,P2pOui,4)||!P2pAttributesValid(F+32,Size-32)||!P2pVendor(F+32,Size-32,P2pOui))return;
- if(!Jeq(F+4,P->Mac,6))return;ULONG Action=P2pFrameType(F[30]);if(!Action||!F[31])return;auto E=Ppeer(P,F+10,true);E->Frequency=Frequency;E->Type=(UCHAR)Action;E->Token=F[31];E->At=WcnNowMs();
+ if(Type!=0xd0||(F[1]&0x40)||Size<32||F[24]!=4||F[25]!=9||!Jeq(F+26,P2pOui,4))return;
+ ULONG Action=P2pFrameType(F[30]);if(!Action||!F[31]||!Jeq(F+4,P->Mac,6)||!P2pActionIesValid(Action,F+32,Size-32))return;auto E=Ppeer(P,F+10,true);E->Frequency=Frequency;E->Type=(UCHAR)Action;E->Token=F[31];E->At=WcnNowMs();
  UCHAR Op[5];ULONG Ol;if((Action==2||Action==3)&&Jeq(P->NegotiationPeer,F+10,6)&&P->NegotiationToken==F[31]&&WcnNowMs()-P->NegotiationAt<30000&&P2pAttr(F+32,Size-32,17,Op,sizeof(Op),&Ol)&&Ol==5){ULONG Of=WcnChannelFrequency(Op[4]);if(Op[3]==P2pOperatingClass(Of)&&Plegal(P,Of))P->NegotiatedFrequency=Of;}
  WDI_INDICATION_P2P_ACTION_FRAME_RECEIVED_PARAMETERS R;R.FrameInfo.FrameParams.ActionFrameType=(WDI_P2P_ACTION_FRAME_TYPE)Action;RtlCopyMemory(R.FrameInfo.FrameParams.PeerDeviceAddress.Address,F+10,6);R.FrameInfo.FrameParams.DialogToken=F[31];R.FrameInfo.FrameIEs.SimpleAssign((UCHAR*)F+32,Size-32);UCHAR *Out=nullptr;ULONG Len=0;
  if(GenerateWdiIndicationP2pActionFrameReceivedFromIhv(&R,0,&Primary(P)->Tlv,&Len,&Out)==NDIS_STATUS_SUCCESS){WDI_MESSAGE_HEADER H={};H.PortId=(WDI_PORT_ID)HotspotDevicePort(D);S8Indicate(Primary(P),&H,WDI_INDICATION_P2P_ACTION_FRAME_RECEIVED,STATUS_SUCCESS,Out,Len,true);FreeGenerated(Out);}

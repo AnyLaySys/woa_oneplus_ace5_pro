@@ -21,7 +21,7 @@
   <PropertyGroup>
     <TargetName>qcom_cam</TargetName>
     <CamVersionDate Condition="'$(CamVersionDate)' == ''">$([System.DateTime]::Now.ToString('yyyy-MM-dd'))</CamVersionDate>
-    <CamRevision Condition="'$(CamRevision)' == ''">318</CamRevision>
+    <CamRevision Condition="'$(CamRevision)' == ''">325</CamRevision>
     <CamDriverDate>$([System.DateTime]::Parse('$(CamVersionDate)').ToString('MM/dd/yyyy'))</CamDriverDate>
     <CamDriverVersion>$([System.DateTime]::Parse('$(CamVersionDate)').ToString('yy.M.d')).$(CamRevision)</CamDriverVersion>
     <CamDriverVersionComma>$([System.String]::Copy('$(CamDriverVersion)').Replace('.', ','))</CamDriverVersionComma>
@@ -49,7 +49,6 @@
     <ClCompile Include="..\clock-measure.c" />
     <ClCompile Include="..\cpas.c" />
     <ClCompile Include="..\scm.c" />
-    <ClCompile Include="..\scm-audit.c" />
     <MARMASM Include="..\scm-slow.asm" />
     <MARMASM Include="..\cpu-map.asm" />
     <ClInclude Include="..\cam.h" />

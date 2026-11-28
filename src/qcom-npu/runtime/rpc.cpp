@@ -44,8 +44,9 @@ NpuRuntime::NpuRuntime(const std::filesystem::path& directory) {
     }
     try {
         NpuFilesStart(directory, this);
-        SocId = Status().SocId;
-        PagedMemory = (Status().Flags & QCOM_NPU_PAGED_MEMORY) != 0;
+        auto status = Status();
+        SocId = status.SocId;
+        PagedMemory = (status.Flags & QCOM_NPU_PAGED_MEMORY) != 0;
         std::vector<uint8_t> query(152 + 255 * 4);
         auto* capabilities = reinterpret_cast<QCOM_NPU_PACKET*>(query.data());
         capabilities->Abi = QCOM_NPU_ABI; capabilities->Handle = 2; capabilities->Scalar = 0x10100; capabilities->Count = 2;
@@ -127,14 +128,9 @@ int NpuRuntime::Invoke(uint32_t handle, uint32_t scalar, remote_arg* args, bool 
     DWORD collect = scheduled ? QCOM_NPU_EXECUTION_RESULT : QCOM_NPU_COLLECT;
     QCOM_NPU_TICKET ticket{}; DWORD used = 0;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
-    while (!Io(file_, submit, input.data(), static_cast<DWORD>(input.size()), &ticket, sizeof(ticket), used)) {
-        DWORD error = GetLastError();
-        if (error != ERROR_BUSY || std::chrono::steady_clock::now() >= deadline) {
-            std::cerr << "RPC submit failed handle=" << handle << " scalar=" << std::hex << scalar << std::dec << " Windows error=" << error << '\n';
-            return AEE_ERPC;
-        }
-        if (stop_) return AEE_ECONNRESET;
-        Sleep(1);
+    if (!Io(file_, submit, input.data(), static_cast<DWORD>(input.size()), &ticket, sizeof(ticket), used)) {
+        std::cerr << "RPC submission failed: " << GetLastError() << '\n';
+        return AEE_ERPC;
     }
     if (used != sizeof(ticket) || ticket.Abi != QCOM_NPU_ABI) return AEE_ERPC;
     if (scheduled) scheduler_->Submit(ticket);
@@ -215,11 +211,9 @@ int NpuRuntime::MapFile(const std::filesystem::path& path, int* fd, int* size) {
     }
     for (ULONG offset = 0; offset < static_cast<ULONG>(length);) {
         ULONG bytes = (std::min)(ULONG(0x10000), static_cast<ULONG>(length) - offset);
-        std::vector<uint8_t> buffer(16 + bytes);
-        auto* q = reinterpret_cast<QCOM_NPU_MEMORY_WRITE*>(buffer.data());
-        q->Abi = QCOM_NPU_ABI; q->Id = out.Id; q->Offset = offset; q->Bytes = bytes;
-        source.read(reinterpret_cast<char*>(q->Data), bytes);
-        if (!source || !Io(file_, QCOM_NPU_WRITE_MEMORY, buffer.data(), static_cast<DWORD>(buffer.size()), nullptr, 0, used))
+        std::vector<uint8_t> buffer(bytes);
+        source.read(reinterpret_cast<char*>(buffer.data()), bytes);
+        if (!source || WriteBuffer(out.Id, offset, buffer.data(), bytes))
             return AEE_ERPC; // The driver retains the owned file map until process release.
         offset += bytes;
     }
@@ -228,30 +222,19 @@ int NpuRuntime::MapFile(const std::filesystem::path& path, int* fd, int* size) {
     *fd = static_cast<int>(out.Id); *size = static_cast<int>(length);
     return 0;
 }
-int NpuRuntime::MapBuffer(uint32_t size, uint32_t flags, QCOM_NPU_ALLOCATION* allocation) {
-    if (!allocation || !size || size > QCOM_NPU_MAX_HEAP || flags != 3) return AEE_EBADPARM;
-    QCOM_NPU_SHARED_ALLOCATION shared{};
-    int error = MapShared(size, &shared, flags);
-    if (!error) *allocation = shared.Allocation;
-    return error;
-}
 int NpuRuntime::MapShared(uint32_t size, QCOM_NPU_SHARED_ALLOCATION* allocation, uint32_t flags, bool deferred) {
     if (!allocation || !size || size > (flags == 3 ? QCOM_NPU_MAX_HEAP : QCOM_NPU_MAX_SHARED) ||
         (flags != 3 && flags != QCOM_NPU_SHARED)) return AEE_EBADPARM;
     QCOM_NPU_SHARED_ALLOCATION in{{QCOM_NPU_ABI, flags, (size + 4095) & ~4095u, 0, 0}, 0}, out{};
     DWORD used = 0;
     if (!Io(file_, QCOM_NPU_SHARED_ALLOCATE, &in, sizeof(in), &out, sizeof(out), used) || used != sizeof(out) || !out.UserAddress) {
-        DWORD error = GetLastError();
-        try { auto state = Status(); std::cerr << "Shared NPU allocation failed: bytes=" << size << " Windows=" << error
-            << " status=0x" << std::hex << state.LastStatus << " DSP=0x" << state.LastResult << std::dec << '\n'; }
-        catch (...) { std::cerr << "Shared NPU allocation failed: " << error << '\n'; }
+        std::cerr << "NPU shared memory allocation failed: " << GetLastError() << '\n';
         return AEE_ERPC;
     }
     std::lock_guard<std::mutex> guard(allocationMutex_);
     fileAllocations_[static_cast<int>(out.Allocation.Id)] = out.Allocation;
     if (PagedMemory && flags == QCOM_NPU_SHARED && !deferred) {
-        QCOM_NPU_SHARED_MAPPING mapping{QCOM_NPU_ABI, out.Allocation.Id, 1, 1};
-        if (!Io(file_, QCOM_NPU_MAP_SHARED, &mapping, sizeof(mapping), nullptr, 0, used)) return AEE_ERPC;
+        if (MapSharedFile(static_cast<int>(out.Allocation.Id), true, true)) return AEE_ERPC;
     }
     if (!scheduler_) EnableScheduler();
     scheduler_->RegisterMemory(out);

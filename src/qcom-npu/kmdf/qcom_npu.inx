@@ -3,7 +3,7 @@ Signature="$WINDOWS NT$"
 Class=System
 ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
 Provider=%Provider%
-DriverVer=11/27/2026,26.11.27.71
+DriverVer=11/28/2026,26.11.28.1
 CatalogFile=qcom_npu.cat
 PnpLockdown=1
 [DestinationDirs]

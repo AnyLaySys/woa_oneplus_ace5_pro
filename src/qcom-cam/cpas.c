@@ -7,14 +7,10 @@
 
 static const ULONG PerfDomains[]={2,6,7};
 
-static NTSTATUS NocRead(CAM *c,ULONG offset,ULONG *value) {
-    ULONGLONG registers[8]={0xad90000+offset};
-    c->Diag.Step=187;c->Diag.Region=CamNoc;c->Diag.Address=(ULONG)registers[0];c->Diag.Offset=offset;
+static VOID NocRead(CAM *c,ULONG offset,ULONG *value) {
+    c->Diag.Step=187;c->Diag.Region=CamNoc;c->Diag.Address=0xad90000+offset;c->Diag.Offset=offset;
     c->Diag.Mask=MAXULONG;c->Diag.Expected=0;c->Diag.Phase=1;c->Diag.Count=1;c->Diag.Slot=0;RtlCopyMemory(c->Diag.Resource,"noc-mmio",8);
-    NTSTATUS status=CamScmAudit(c,7,registers,STATUS_SUCCESS);if(!NT_SUCCESS(status))return status;
     *value=CamRead(c->Base[CamNoc],offset);c->Diag.Observed=*value;
-    registers[1]=*value;status=CamScmAudit(c,8,registers,STATUS_SUCCESS);
-    return status;
 }
 
 NTSTATUS CamNocRegisters(CAM *c) {
@@ -29,16 +25,13 @@ NTSTATUS CamNocRegisters(CAM *c) {
     if((c->DmaActive||c->RxActive)&&(((CamRead(c->Base[CamTfe],0x2400)|CamRead(c->Base[CamTfe],0x2500)|CamRead(c->Base[CamTfe],0x2600)|CamRead(c->Base[CamTfe],0x2700))&1)||CamRead(c->Base[CamCsid],0xe04)||CamRead(c->Base[CamCsid],0x1004)||CamRead(c->Base[CamCsid],0x1204)||CamRead(c->Base[CamCsid],0x1404)))return STATUS_DEVICE_BUSY;
     c->Trace.NocErrorCount[0]=0;c->Trace.NocErrorStatus[0]=STATUS_DEVICE_NOT_READY;
     c->Trace.NocErrorCount[1]=0;c->Trace.NocErrorStatus[1]=STATUS_NOT_SUPPORTED;
-    NTSTATUS status=NocRead(c,0x10,&c->Trace.NocErrors[0][0]);
-    if(!NT_SUCCESS(status))return status;
+    NocRead(c,0x10,&c->Trace.NocErrors[0][0]);
     if(c->Trace.NocErrors[0][0]&~1u)return STATUS_IO_DEVICE_ERROR;
     c->Trace.NocErrorCount[0]=1;
-    status=NocRead(c,8,&c->Trace.NocMainControl);
-    if(!NT_SUCCESS(status))return status;
+    NocRead(c,8,&c->Trace.NocMainControl);
     if(c->Trace.NocMainControl==MAXULONG)return STATUS_IO_DEVICE_ERROR;
     if(c->Trace.NocErrors[0][0]&1)for(ULONG i=1;i<9;i++) {
-        status=NocRead(c,0x1c+i*4,&c->Trace.NocErrors[0][i]);
-        if(!NT_SUCCESS(status))return status;
+        NocRead(c,0x1c+i*4,&c->Trace.NocErrors[0][i]);
         c->Trace.NocErrorCount[0]++;
     }
     c->Trace.NocErrorStatus[0]=STATUS_SUCCESS;return STATUS_SUCCESS;

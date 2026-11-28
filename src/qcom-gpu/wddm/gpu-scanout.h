@@ -13,7 +13,8 @@ NTSTATUS QcomGpuScanoutRemap(PVOID adapter);
 /* Only after a full GPU reset has stopped all old-generation DMA. */
 NTSTATUS QcomGpuScanoutAfterReset(PVOID adapter);
 BOOLEAN QcomGpuScanoutEnabled(PVOID adapter);
-NTSTATUS QcomGpuScanoutQueue(PVOID adapter,PVOID allocation,ULONGLONG offset,ULONG pitch,ULONGLONG address);
+NTSTATUS QcomGpuScanoutQueue(PVOID adapter,PVOID allocation,ULONGLONG offset,ULONG pitch,ULONGLONG address,ULONGLONG presentId);
+NTSTATUS QcomGpuScanoutQueueFirmware(PVOID adapter,ULONGLONG presentId);
 /* Pump runs only in the scheduler worker; TRUE holds the display barrier. */
 BOOLEAN QcomGpuScanoutPump(PVOID adapter);
 

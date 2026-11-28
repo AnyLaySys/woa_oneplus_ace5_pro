@@ -101,20 +101,6 @@
  			filtered = append(filtered, device)
  			continue
  		}
---- a/llm/llama_server.go
-+++ b/llm/llama_server.go
-@@ -518,6 +518,11 @@
- 	}
- 
- 	libraryPaths := llamaServerLibraryPaths(exe, gpuLibs, envUpdates)
-+	if envUpdates["GGML_BACKEND_PATH"] == "" && os.Getenv("GGML_BACKEND_PATH") == "" {
-+		if path := ml.QcomNpuBackendPath(); path != "" {
-+			envUpdates["GGML_BACKEND_PATH"] = path
-+		}
-+	}
- 	pathEnv := llamaServerLibraryPathEnv()
- 	envUpdates[pathEnv] = strings.Join(libraryPaths, string(filepath.ListSeparator))
- 
 --- a/ml/device.go
 +++ b/ml/device.go
 @@ -108,6 +108,9 @@
